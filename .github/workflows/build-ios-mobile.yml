@@ -29,6 +29,9 @@ jobs:
       - name: Build web assets
         run: npx vite build --config vite.config.mobile.js
 
+      - name: Add iOS platform
+        run: npx cap add ios
+
       - name: Sync Capacitor
         run: npx cap sync ios
 
