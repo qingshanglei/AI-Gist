@@ -78,11 +78,11 @@ jobs:
         id: get_version
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          # 每次 run 唯一，避免反复 force 移动同名 tag 导致协作者 git pull --tags 报 would clobber
+          # 每次 run/attempt 唯一，避免同名 tag 被改写导致协作者 git pull --tags 报 would clobber
           if [ "${{ steps.signing.outputs.available }}" == "true" ]; then
-            echo "tag=v${VERSION}-mobile-${{ github.run_id }}" >> $GITHUB_OUTPUT
+            echo "tag=v${VERSION}-mobile-${{ github.run_id }}-${{ github.run_attempt }}" >> $GITHUB_OUTPUT
           else
-            echo "tag=v${VERSION}-debug-${{ github.run_id }}" >> $GITHUB_OUTPUT
+            echo "tag=v${VERSION}-debug-${{ github.run_id }}-${{ github.run_attempt }}" >> $GITHUB_OUTPUT
           fi
 
       - name: Collect artifacts
@@ -98,20 +98,13 @@ jobs:
           cp "$APK" "AI-Gist-${TAG}.apk"
           cp "$AAB" "AI-Gist-${TAG}.aab"
 
-      - name: Create and push release tag
-        run: |
-          TAG="${{ steps.get_version.outputs.tag }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag -a "${TAG}" -m "Mobile build ${TAG}"
-          git push origin "${TAG}"
-
       - name: Upload to release
         uses: softprops/action-gh-release@v1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tag_name: ${{ steps.get_version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           name: "AI Gist ${{ steps.get_version.outputs.tag }}"
           draft: true
           prerelease: false
