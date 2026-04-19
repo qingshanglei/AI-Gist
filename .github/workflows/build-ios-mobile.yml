@@ -144,7 +144,8 @@ jobs:
         id: get_version
         run: |
           VERSION=$(node -p "require('./package.json').version")
-          echo "tag=v${VERSION}-debug" >> $GITHUB_OUTPUT
+          # 每次 run 唯一，避免反复 force 移动同名 tag 导致协作者 git pull --tags 报 would clobber
+          echo "tag=v${VERSION}-debug-${{ github.run_id }}" >> $GITHUB_OUTPUT
 
       - name: Collect artifacts
         run: |
@@ -163,13 +164,12 @@ jobs:
         if: always() && steps.signing.outputs.available == 'true'
         run: security delete-keychain $KEYCHAIN_PATH 2>/dev/null || true
 
-      - name: Force update debug tag
+      - name: Create and push debug tag
         run: |
           TAG="${{ steps.get_version.outputs.tag }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git push origin ":refs/tags/${TAG}" 2>/dev/null || true
-          git tag -f "${TAG}" -m "Debug build ${TAG}"
+          git tag -a "${TAG}" -m "Debug build ${TAG}"
           git push origin "${TAG}"
 
       - name: Upload to debug release
