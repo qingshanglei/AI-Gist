@@ -25,12 +25,12 @@ const config = defineConfig({
     },
     resolve: {
         alias: {
-            '@': Path.resolve(__dirname, 'src/renderer'),
-            '~': Path.resolve(__dirname, 'src/renderer'),
+            '@renderer': Path.resolve(__dirname, 'src/renderer'),
             '@shared': Path.resolve(__dirname, 'src/shared'),
             '@main': Path.resolve(__dirname, 'src/main'),
-            '@renderer': Path.resolve(__dirname, 'src/renderer'),
             '@root': Path.resolve(__dirname, 'src'),
+            '@': Path.resolve(__dirname, 'src/renderer'),
+            '~': Path.resolve(__dirname, 'src/renderer'),
         }
     }
 });

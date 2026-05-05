@@ -98,7 +98,6 @@ import {
   IonChip,
   IonSpinner,
   IonModal,
-  toastController,
   alertController,
   actionSheetController,
   onIonViewWillEnter
@@ -114,6 +113,7 @@ import {
 } from 'ionicons/icons'
 import { useI18n } from '~/composables/useI18n'
 import { api } from '~/lib/api'
+import { presentMobileToast } from '~/lib/utils/mobile-toast'
 import type { Prompt, Category } from '@shared/types'
 
 const { t } = useI18n()
@@ -282,12 +282,7 @@ const handleDelete = async () => {
 
 // 显示提示
 const showToast = async (message: string, color: string = 'success') => {
-  const toast = await toastController.create({
-    message,
-    duration: 2000,
-    color
-  })
-  await toast.present()
+  await presentMobileToast(message, color)
 }
 
 // 初始化

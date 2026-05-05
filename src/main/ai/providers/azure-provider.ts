@@ -1,11 +1,37 @@
 import { ChatOpenAI } from '@langchain/openai';
 import { AIConfig, AIGenerationRequest, AIGenerationResult } from '@shared/types/ai';
+import { getDefaultModels as getProviderDefaultModels } from '@shared/ai-provider-metadata';
 import { BaseAIProvider, AITestResult, AIIntelligentTestResult, AIModelTestResult } from './base-provider';
 
 /**
  * Azure OpenAI 供应商实现
  */
 export class AzureProvider extends BaseAIProvider {
+  private readonly deploymentsApiVersion = '2024-10-21';
+
+  private trimTrailingSlash(url: string): string {
+    return url.trim().replace(/\/+$/, '');
+  }
+
+  private getChatBaseURL(config: AIConfig): string {
+    const baseURL = this.trimTrailingSlash(config.baseURL || '');
+    if (!baseURL) return '';
+    if (baseURL.endsWith('/openai/v1')) return baseURL;
+    if (baseURL.endsWith('/openai')) return `${baseURL}/v1`;
+    return `${baseURL}/openai/v1`;
+  }
+
+  private getResourceBaseURL(config: AIConfig): string {
+    const baseURL = this.trimTrailingSlash(config.baseURL || '');
+    if (baseURL.endsWith('/openai/v1')) {
+      return baseURL.slice(0, -'/openai/v1'.length);
+    }
+    if (baseURL.endsWith('/openai')) {
+      return baseURL.slice(0, -'/openai'.length);
+    }
+    return baseURL;
+  }
+
   
   /**
    * 测试配置连接
@@ -47,7 +73,7 @@ export class AzureProvider extends BaseAIProvider {
     console.log(`获取 Azure OpenAI 模型列表 - baseURL: ${config.baseURL}`);
     
     try {
-      const url = `${config.baseURL}/openai/deployments`;
+      const url = `${this.getResourceBaseURL(config)}/openai/deployments?api-version=${this.deploymentsApiVersion}`;
       console.log(`Azure OpenAI 请求URL: ${url}`);
       
       const timeoutFetch = this.createTimeoutFetch(10000);
@@ -92,7 +118,7 @@ export class AzureProvider extends BaseAIProvider {
         openAIApiKey: config.apiKey,
         modelName: model,
         configuration: {
-          baseURL: config.baseURL || undefined,
+          baseURL: this.getChatBaseURL(config) || undefined,
           defaultHeaders: {
             'api-key': config.apiKey
           }
@@ -140,7 +166,7 @@ export class AzureProvider extends BaseAIProvider {
         openAIApiKey: config.apiKey,
         modelName: model,
         configuration: {
-          baseURL: config.baseURL || undefined,
+          baseURL: this.getChatBaseURL(config) || undefined,
           defaultHeaders: {
             'api-key': config.apiKey
           }
@@ -188,7 +214,7 @@ export class AzureProvider extends BaseAIProvider {
         openAIApiKey: config.apiKey,
         modelName: model,
         configuration: {
-          baseURL: config.baseURL || undefined,
+          baseURL: this.getChatBaseURL(config) || undefined,
           defaultHeaders: {
             'api-key': config.apiKey
           }
@@ -244,7 +270,7 @@ export class AzureProvider extends BaseAIProvider {
         openAIApiKey: config.apiKey,
         modelName: model,
         configuration: {
-          baseURL: config.baseURL || undefined,
+          baseURL: this.getChatBaseURL(config) || undefined,
           defaultHeaders: {
             'api-key': config.apiKey
           }
@@ -357,12 +383,6 @@ export class AzureProvider extends BaseAIProvider {
    * 获取默认模型列表
    */
   private getDefaultModels(): string[] {
-    return [
-      'gpt-4',
-      'gpt-4-32k',
-      'gpt-35-turbo',
-      'gpt-35-turbo-16k',
-      'text-davinci-003'
-    ];
+    return getProviderDefaultModels('azure');
   }
 } 

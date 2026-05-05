@@ -587,6 +587,7 @@ import { useDatabase } from "~/composables/useDatabase";
 import { useWindowSize } from "~/composables/useWindowSize";
 import CommonModal from "~/components/common/CommonModal.vue";
 import QuickOptimizationConfigModal from "~/components/ai/QuickOptimizationConfigModal.vue";
+import { getDefaultBaseURL, getProviderMetadata } from "@shared/ai-provider-metadata";
 
 const { t } = useI18n();
 const message = useMessage();
@@ -723,7 +724,7 @@ const getBaseURLInfo = computed(() => {
         case 'azure':
             return {
                 label: t('aiConfig.azureOpenAIEndpoint'),
-                placeholder: t('aiConfig.azureExample')
+                placeholder: 'https://your-resource.openai.azure.com/openai/v1'
             };
         case 'deepseek':
             return {
@@ -743,7 +744,7 @@ const getBaseURLInfo = computed(() => {
         case 'aliyun':
             return {
                 label: t('aiConfig.aliyunAPIAddress'),
-                placeholder: t('aiConfig.aliyunExample')
+                placeholder: getDefaultBaseURL('aliyun')
             };
         case 'mistral':
             return {
@@ -768,106 +769,26 @@ const getBaseURLInfo = computed(() => {
         case 'openrouter':
             return {
                 label: t('aiConfig.baseURL') + '：',
-                placeholder: 'https://openrouter.ai/api/v1'
+                placeholder: getDefaultBaseURL('openrouter')
             };
 
         case 'openai':
         default:
             return {
                 label: t('aiConfig.baseURL') + '：',
-                placeholder: t('aiConfig.openaiExample')
+                placeholder: getDefaultBaseURL('openai')
             };
     }
 });
 
 // 计算属性：API Key 信息
 const getApiKeyInfo = computed(() => {
-    switch (formData.type) {
-        case 'openai':
-            return {
-                name: 'OpenAI',
-                apiKeyUrl: 'https://platform.openai.com/api-keys',
-                docUrl: 'https://platform.openai.com/docs'
-            };
-        case 'anthropic':
-            return {
-                name: 'Anthropic',
-                apiKeyUrl: 'https://console.anthropic.com/',
-                docUrl: 'https://docs.anthropic.com/'
-            };
-        case 'google':
-            return {
-                name: 'Google AI Studio',
-                apiKeyUrl: 'https://makersuite.google.com/app/apikey',
-                docUrl: 'https://ai.google.dev/docs'
-            };
-        case 'azure':
-            return {
-                name: 'Azure OpenAI',
-                apiKeyUrl: 'https://portal.azure.com/#view/Microsoft_Azure_ProjectOxford/CognitiveServicesBrowse/~/OpenAI',
-                docUrl: 'https://learn.microsoft.com/en-us/azure/ai-services/openai/'
-            };
-        case 'deepseek':
-            return {
-                name: 'DeepSeek',
-                apiKeyUrl: 'https://platform.deepseek.com/api_keys',
-                docUrl: 'https://platform.deepseek.com/docs'
-            };
-        case 'siliconflow':
-            return {
-                name: '硅基流动',
-                apiKeyUrl: 'https://cloud.siliconflow.cn/me/account/ak',
-                docUrl: 'https://docs.siliconflow.cn/'
-            };
-        case 'tencent':
-            return {
-                name: '腾讯云',
-                apiKeyUrl: 'https://console.cloud.tencent.com/hunyuan',
-                docUrl: 'https://cloud.tencent.com/document/product/1729'
-            };
-        case 'aliyun':
-            return {
-                name: '阿里云',
-                apiKeyUrl: 'https://bailian.console.aliyun.com/',
-                docUrl: 'https://bailian.console.aliyun.com/?tab=doc#/doc'
-            };
-        case 'mistral':
-            return {
-                name: 'Mistral AI',
-                apiKeyUrl: 'https://console.mistral.ai/api-keys/',
-                docUrl: 'https://docs.mistral.ai/'
-            };
-        case 'zhipu':
-            return {
-                name: '智谱AI',
-                apiKeyUrl: 'https://open.bigmodel.cn/usercenter/apikeys',
-                docUrl: 'https://docs.bigmodel.cn/cn/guide/start/model-overview'
-            };
-        case 'openrouter':
-            return {
-                name: 'OpenRouter',
-                apiKeyUrl: 'https://openrouter.ai/keys',
-                docUrl: 'https://openrouter.ai/docs'
-            };
-        case 'ollama':
-            return {
-                name: 'Ollama',
-                apiKeyUrl: '',
-                docUrl: 'https://github.com/ollama/ollama'
-            };
-        case 'lmstudio':
-            return {
-                name: 'LM Studio',
-                apiKeyUrl: '',
-                docUrl: 'https://lmstudio.ai/docs/app/basics'
-            };
-        default:
-            return {
-                name: 'N/A',
-                apiKeyUrl: '',
-                docUrl: ''
-            };
-    }
+    const metadata = getProviderMetadata(formData.type);
+    return {
+        name: metadata.displayName,
+        apiKeyUrl: metadata.apiKeyUrl,
+        docUrl: metadata.docUrl
+    };
 });
 
 // 计算属性：服务商信息
@@ -1383,8 +1304,8 @@ const closeModal = () => {
 // 重置表单
 const resetForm = () => {
     formData.type = "openai";
-    formData.name = "OpenAI 兼容";
-    formData.baseURL = "https://api.openai.com/v1";
+    formData.name = getProviderMetadata('openai').displayName;
+    formData.baseURL = getDefaultBaseURL('openai');
     formData.apiKey = "";
     formData.models = [];
     formData.defaultModel = "";
@@ -1399,61 +1320,8 @@ const resetForm = () => {
 
 // 类型变化处理
 const onTypeChange = (type: typeof formData.type) => {
-    // 设置默认的Base URL和API Key
-    switch (type) {
-        case 'openai':
-            formData.baseURL = "https://api.openai.com/v1";
-            formData.apiKey = "";
-            break;
-        case 'ollama':
-            formData.baseURL = "http://localhost:11434";
-            formData.apiKey = "";
-            break;
-        case 'anthropic':
-            formData.baseURL = "";
-            formData.apiKey = "";
-            break;
-        case 'google':
-            formData.baseURL = "";
-            formData.apiKey = "";
-            break;
-        case 'azure':
-            formData.baseURL = "";
-            formData.apiKey = "";
-            break;
-        case 'lmstudio':
-            formData.baseURL = "http://localhost:1234/v1";
-            formData.apiKey = "";
-            break;
-        case 'deepseek':
-            formData.baseURL = "https://api.deepseek.com/v1";
-            formData.apiKey = "";
-            break;
-        case 'siliconflow':
-            formData.baseURL = "https://api.siliconflow.cn/v1";
-            formData.apiKey = "";
-            break;
-        case 'tencent':
-            formData.baseURL = "https://api.hunyuan.cloud.tencent.com/v1";
-            formData.apiKey = "";
-            break;
-        case 'aliyun':
-            formData.baseURL = "https://dashscope.aliyuncs.com/api/v1";
-            formData.apiKey = "";
-            break;
-        case 'mistral':
-            formData.baseURL = "https://api.mistral.ai/v1";
-            formData.apiKey = "";
-            break;
-        case 'zhipu':
-            formData.baseURL = "https://open.bigmodel.cn/api/paas/v4";
-            formData.apiKey = "";
-            break;
-        case 'openrouter':
-            formData.baseURL = "https://openrouter.ai/api/v1";
-            formData.apiKey = "";
-            break;
-    }
+    formData.baseURL = getDefaultBaseURL(type);
+    formData.apiKey = "";
 
     // 自动填充配置名称（仅在新建模式下，且名称为空或为之前的自动名称时）
     if (!editingConfig.value) {
@@ -1464,22 +1332,7 @@ const onTypeChange = (type: typeof formData.type) => {
         ];
 
         if (autoGeneratedNames.includes(currentName)) {
-                    const nameMap: Record<typeof type, string> = {
-            'openai': 'OpenAI',
-            'ollama': 'Ollama',
-            'lmstudio': 'LM Studio',
-            'anthropic': 'Anthropic Claude',
-            'google': 'Google Gemini AI',
-            'azure': 'Azure OpenAI',
-            'openrouter': 'OpenRouter',
-            'mistral': 'Mistral AI',
-            'deepseek': 'DeepSeek',
-            'tencent': '腾讯云',
-            'aliyun': '阿里云',
-            'zhipu': '智谱AI',
-            'siliconflow': '硅基流动',
-        };
-            formData.name = nameMap[type];
+            formData.name = getProviderMetadata(type).displayName;
         }
     }
 

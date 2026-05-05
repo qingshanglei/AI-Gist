@@ -152,8 +152,7 @@ import {
   IonBadge,
   IonIcon,
   IonButton,
-  IonSpinner,
-  toastController
+  IonSpinner
 } from '@ionic/vue'
 import {
   refreshOutline,
@@ -169,6 +168,7 @@ import {
 } from 'ionicons/icons'
 import { useI18n } from '~/composables/useI18n'
 import { useUpdate } from '~/composables/useUpdate'
+import { presentMobileToast } from '~/lib/utils/mobile-toast'
 
 const { t } = useI18n()
 
@@ -190,8 +190,7 @@ const {
 const showReleaseNotes = ref(false)
 
 const showToast = async (message: string, color: string = 'success') => {
-  const toast = await toastController.create({ message, duration: 2000, color })
-  await toast.present()
+  await presentMobileToast(message, color)
 }
 
 const handleCheckForUpdates = async () => {

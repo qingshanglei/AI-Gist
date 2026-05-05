@@ -6,6 +6,28 @@
 
 import type { AIConfig, AIGenerationRequest, AIGenerationResult } from '@shared/types/ai'
 import { PlatformDetector } from '@shared/platform'
+import {
+  getConfiguredBaseURL,
+  getDefaultModels as getProviderDefaultModels
+} from '@shared/ai-provider-metadata'
+
+const GOOGLE_BASE_URL = 'https://generativelanguage.googleapis.com'
+const GOOGLE_API_VERSION = 'v1beta'
+
+function buildOpenAICompatibleHeaders(config: AIConfig): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    'Authorization': `Bearer ${config.apiKey}`
+  }
+
+  if (config.type === 'openrouter') {
+    headers['HTTP-Referer'] = 'https://getaigist.com'
+    headers['X-OpenRouter-Title'] = 'AI Gist'
+    headers['X-Title'] = 'AI Gist'
+  }
+
+  return headers
+}
 
 /**
  * 默认系统提示词
@@ -114,17 +136,15 @@ export class AIGeneratorService {
     userPrompt: string,
     onProgress?: (content: string) => void
   ): Promise<AIGenerationResult> {
-    const baseURL = config.baseURL || 'https://api.openai.com/v1'
+    const baseURL = getConfiguredBaseURL(config.type, config.baseURL).replace(/\/+$/, '')
     const url = `${baseURL}/chat/completions`
+    const model = request.model || config.defaultModel || ''
 
     const response = await fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.apiKey}`
-      },
+      headers: buildOpenAICompatibleHeaders(config),
       body: JSON.stringify({
-        model: request.model || config.defaultModel,
+        model,
         messages: [
           { role: 'system', content: systemPrompt },
           { role: 'user', content: userPrompt }
@@ -153,7 +173,7 @@ export class AIGeneratorService {
       id: `gen_${Date.now()}`,
       configId: config.configId,
       topic: request.topic,
-      model: request.model || config.defaultModel || '',
+      model,
       generatedPrompt,
       createdAt: new Date()
     }
@@ -222,8 +242,9 @@ export class AIGeneratorService {
     userPrompt: string,
     onProgress?: (content: string) => void
   ): Promise<AIGenerationResult> {
-    const baseURL = config.baseURL || 'https://api.anthropic.com'
+    const baseURL = (config.baseURL || 'https://api.anthropic.com').replace(/\/+$/, '')
     const url = `${baseURL}/v1/messages`
+    const model = request.model || config.defaultModel || getProviderDefaultModels('anthropic')[0]
 
     const response = await fetch(url, {
       method: 'POST',
@@ -233,7 +254,7 @@ export class AIGeneratorService {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: request.model || config.defaultModel,
+        model,
         max_tokens: 2000,
         system: systemPrompt,
         messages: [
@@ -260,7 +281,7 @@ export class AIGeneratorService {
       id: `gen_${Date.now()}`,
       configId: config.configId,
       topic: request.topic,
-      model: request.model || config.defaultModel || '',
+      model,
       generatedPrompt,
       createdAt: new Date()
     }
@@ -330,9 +351,9 @@ export class AIGeneratorService {
     userPrompt: string,
     onProgress?: (content: string) => void
   ): Promise<AIGenerationResult> {
-    const baseURL = config.baseURL || 'https://generativelanguage.googleapis.com'
-    const model = request.model || config.defaultModel || 'gemini-pro'
-    const url = `${baseURL}/v1/models/${model}:generateContent?key=${config.apiKey}`
+    const baseURL = (config.baseURL || GOOGLE_BASE_URL).replace(/\/+$/, '')
+    const model = request.model || config.defaultModel || getProviderDefaultModels('google')[0]
+    const url = `${baseURL}/${GOOGLE_API_VERSION}/models/${model}:generateContent?key=${config.apiKey}`
 
     const response = await fetch(url, {
       method: 'POST',
@@ -369,7 +390,7 @@ export class AIGeneratorService {
       id: `gen_${Date.now()}`,
       configId: config.configId,
       topic: request.topic,
-      model: request.model || config.defaultModel || '',
+      model,
       generatedPrompt,
       createdAt: new Date()
     }

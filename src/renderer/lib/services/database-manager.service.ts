@@ -15,6 +15,7 @@ import { AIGenerationHistoryService } from './ai-generation-history.service';
 import { AppSettingsService } from './app-settings.service';
 import { QuickOptimizationService } from './quick-optimization.service';
 import { generateUUID } from '../utils/uuid';
+import { emitDataChange } from './data-change-events';
 
 /**
  * 统一的数据库服务管理类
@@ -743,6 +744,10 @@ export class DatabaseServiceManager {
             const clearRequest = store.clear();
             clearRequest.onsuccess = () => {
               console.log(`清空表 ${tableName} 成功`);
+              emitDataChange({
+                storeName: tableName,
+                action: 'clear'
+              });
               resolve();
             };
             clearRequest.onerror = () => reject(clearRequest.error);

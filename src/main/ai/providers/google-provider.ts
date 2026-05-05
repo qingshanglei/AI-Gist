@@ -1,4 +1,8 @@
 import { AIConfig, AIGenerationRequest, AIGenerationResult } from '@shared/types/ai';
+import {
+  getDefaultModels as getProviderDefaultModels,
+  getTestModelPriority
+} from '@shared/ai-provider-metadata';
 import { BaseAIProvider, AITestResult, AIIntelligentTestResult, AIModelTestResult } from './base-provider';
 
 /**
@@ -6,6 +10,17 @@ import { BaseAIProvider, AITestResult, AIIntelligentTestResult, AIModelTestResul
  * 直接使用 Google Gemini REST API，避免 LangChain 的代理问题
  */
 export class GoogleProvider extends BaseAIProvider {
+  private readonly defaultBaseURL = 'https://generativelanguage.googleapis.com';
+  private readonly apiVersion = 'v1beta';
+
+  private getDefaultModel(): string {
+    return this.getDefaultModels()[0];
+  }
+
+  private getBaseURL(config: AIConfig): string {
+    return config.baseURL?.trim() || this.defaultBaseURL;
+  }
+
   
   /**
    * 测试配置连接
@@ -51,8 +66,8 @@ export class GoogleProvider extends BaseAIProvider {
         throw new Error('API Key 未设置');
       }
       
-      const baseUrl = config.baseURL || 'https://generativelanguage.googleapis.com';
-      const url = `${baseUrl}/v1beta/models?key=${config.apiKey}`;
+      const baseUrl = this.getBaseURL(config);
+      const url = `${baseUrl}/${this.apiVersion}/models?key=${config.apiKey}`;
       console.log(`Google Gemini 请求URL: ${url.replace(config.apiKey || '', (config.apiKey || '').substring(0, 10) + '...')}`);
       
       const timeoutFetch = this.createTimeoutFetch(20000);
@@ -128,7 +143,7 @@ export class GoogleProvider extends BaseAIProvider {
       return { success: false, error: '配置已禁用' };
     }
 
-    const model = config.defaultModel || config.customModel || 'gemini-1.5-pro';
+    const model = config.defaultModel || config.customModel || this.getDefaultModel();
     const testPrompt = '请用一句话简单介绍一下你自己。';
 
     try {
@@ -160,7 +175,7 @@ export class GoogleProvider extends BaseAIProvider {
       throw new Error('配置已禁用');
     }
 
-    const model = request.model || config.defaultModel || config.customModel || 'gemini-1.5-pro';
+    const model = request.model || config.defaultModel || config.customModel || this.getDefaultModel();
     if (!model) {
       throw new Error('未指定模型');
     }
@@ -188,7 +203,7 @@ export class GoogleProvider extends BaseAIProvider {
     onProgress: (charCount: number, partialContent?: string) => boolean,
     abortSignal?: AbortSignal
   ): Promise<AIGenerationResult> {
-    const model = request.model || config.defaultModel || config.customModel || 'gemini-1.5-pro';
+    const model = request.model || config.defaultModel || config.customModel || this.getDefaultModel();
     
     if (!model) {
       throw new Error('未指定模型');
@@ -202,7 +217,6 @@ export class GoogleProvider extends BaseAIProvider {
 
     try {
       let accumulatedContent = '';
-      let lastContentUpdate = Date.now();
       let shouldStop = false;
       
       if (abortSignal?.aborted) {
@@ -265,8 +279,8 @@ export class GoogleProvider extends BaseAIProvider {
    * 创建 Google Gemini API 请求
    */
   private async makeGoogleRequest(config: AIConfig, model: string, userPrompt: string, systemPrompt?: string): Promise<string> {
-    const baseUrl = config.baseURL || 'https://generativelanguage.googleapis.com';
-    const url = `${baseUrl}/v1beta/models/${model}:generateContent?key=${config.apiKey}`;
+    const baseUrl = this.getBaseURL(config);
+    const url = `${baseUrl}/${this.apiVersion}/models/${model}:generateContent?key=${config.apiKey}`;
     
     // Google Gemini 使用不同的消息格式
     let promptText = userPrompt;
@@ -338,14 +352,7 @@ export class GoogleProvider extends BaseAIProvider {
    */
   private findSuitableTestModel(models: string[]): string {
     // Google Gemini 的推荐测试模型优先级
-    const recommendedModels = [
-      'gemini-1.5-pro',
-      'gemini-1.5-flash',
-      'gemini-2.0-flash',
-      'gemini-2.5-flash',
-      'gemini-2.5-pro',
-      'gemini-pro'
-    ];
+    const recommendedModels = getTestModelPriority('google');
     
     // 首先尝试使用推荐的模型
     for (const recommendedModel of recommendedModels) {
@@ -444,22 +451,6 @@ export class GoogleProvider extends BaseAIProvider {
    * 获取默认模型列表
    */
   private getDefaultModels(): string[] {
-    return [
-      // Gemini 2.5 系列 (最新)
-      'gemini-2.5-pro',
-      'gemini-2.5-flash',
-      'gemini-2.5-flash-lite',
-      
-      // Gemini 2.0 系列
-      'gemini-2.0-flash',
-      
-      // Gemini 1.5 系列 (仍可用)
-      'gemini-1.5-pro',
-      'gemini-1.5-flash',
-      
-      // Gemini 1.0 系列 (legacy)
-      'gemini-pro',
-      'gemini-pro-vision'
-    ];
+    return getProviderDefaultModels('google');
   }
 } 

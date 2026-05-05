@@ -150,7 +150,6 @@ import {
   IonModal,
   IonListHeader,
   IonSpinner,
-  toastController,
   alertController,
   useBackButton
 } from '@ionic/vue'
@@ -166,6 +165,7 @@ import { api } from '~/lib/api'
 import { databaseService } from '~/lib/db'
 import type { AIConfig } from '@shared/types'
 import { AIGeneratorService } from '~/lib/services/mobile-ai-generator.service'
+import { presentMobileToast } from '~/lib/utils/mobile-toast'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -427,12 +427,7 @@ const resetForm = () => {
 
 // 显示提示
 const showToast = async (message: string, color: string = 'success') => {
-  const toast = await toastController.create({
-    message,
-    duration: 2000,
-    color
-  })
-  await toast.present()
+  await presentMobileToast(message, color)
 }
 
 // 初始化

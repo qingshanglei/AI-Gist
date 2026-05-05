@@ -253,7 +253,6 @@ import {
   IonChip,
   IonCheckbox,
   IonListHeader,
-  toastController,
   alertController,
   useBackButton
 } from '@ionic/vue'
@@ -267,6 +266,7 @@ import {
 } from 'ionicons/icons'
 import { useI18n } from '~/composables/useI18n'
 import { api } from '~/lib/api'
+import { presentMobileToast } from '~/lib/utils/mobile-toast'
 import type { Prompt, Category } from '@shared/types'
 import { Camera, CameraSource, CameraResultType } from '@capacitor/camera'
 import { Capacitor } from '@capacitor/core'
@@ -585,12 +585,7 @@ useBackButton(10, () => {
 
 // 显示提示
 const showToast = async (message: string, color: string = 'success') => {
-  const toast = await toastController.create({
-    message,
-    duration: 2000,
-    color
-  })
-  await toast.present()
+  await presentMobileToast(message, color)
 }
 
 // 初始化

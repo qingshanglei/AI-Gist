@@ -99,7 +99,6 @@ import {
   IonSelectOption,
   IonIcon,
   IonNote,
-  toastController,
   alertController,
   loadingController
 } from '@ionic/vue'
@@ -114,6 +113,7 @@ import { useTheme } from '~/composables/useTheme'
 import { Filesystem, Directory, Encoding } from '@capacitor/filesystem'
 import { Share } from '@capacitor/share'
 import { databaseService } from '~/lib/db'
+import { presentMobileToast } from '~/lib/utils/mobile-toast'
 
 const router = useRouter()
 const { t, currentLocale, switchLocale } = useI18n()
@@ -339,12 +339,7 @@ const performImport = async (file: File) => {
 
 // 显示提示
 const showToast = async (message: string, color: string = 'success') => {
-  const toast = await toastController.create({
-    message,
-    duration: 2000,
-    color
-  })
-  await toast.present()
+  await presentMobileToast(message, color)
 }
 
 // 导航到云端备份页面

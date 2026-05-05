@@ -28,9 +28,15 @@
 		}
 	}
 
-	.n-card__content {
+	> .n-card-content,
+	> .n-card__content {
 		padding: var(--spacing-xl);
 		max-height: 100%;
+	}
+
+	> .n-card-header + .n-card-content,
+	> .n-card-header + .n-card__content {
+		padding-top: var(--spacing-xl);
 	}
 }
 

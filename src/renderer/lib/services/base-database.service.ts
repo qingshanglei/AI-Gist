@@ -4,6 +4,7 @@
  */
 
 import { generateUUID } from '../utils/uuid';
+import { emitDataChange } from './data-change-events';
 
 /**
  * IndexedDB 基础数据库服务类
@@ -289,6 +290,11 @@ export class BaseDatabaseService {
           id: request.result as number,
         } as T;
         
+        emitDataChange({
+          storeName,
+          action: 'create',
+          id: request.result
+        });
         resolve(result);
       };
 
@@ -417,6 +423,11 @@ export class BaseDatabaseService {
         const putRequest = store.put(updatedData);
         
         putRequest.onsuccess = () => {
+          emitDataChange({
+            storeName,
+            action: 'update',
+            id
+          });
           resolve(updatedData as T);
         };
 
@@ -446,6 +457,11 @@ export class BaseDatabaseService {
       const request = store.delete(id);
 
       request.onsuccess = () => {
+        emitDataChange({
+          storeName,
+          action: 'delete',
+          id
+        });
         resolve();
       };
 
@@ -951,6 +967,13 @@ export class BaseDatabaseService {
           
           if (completed === total) {
             // 所有操作完成后，直接返回结果
+            if (success > 0) {
+              emitDataChange({
+                storeName,
+                action: 'batch-delete',
+                ids: ids.filter(id => !errors.some(error => error.includes(`记录 ${id} `)))
+              });
+            }
             resolve({ success, failed, errors });
           }
         };
@@ -962,6 +985,13 @@ export class BaseDatabaseService {
           
           if (completed === total) {
             // 所有操作完成后，直接返回结果
+            if (success > 0) {
+              emitDataChange({
+                storeName,
+                action: 'batch-delete',
+                ids: ids.filter(id => !errors.some(error => error.includes(`记录 ${id} `)))
+              });
+            }
             resolve({ success, failed, errors });
           }
         };
