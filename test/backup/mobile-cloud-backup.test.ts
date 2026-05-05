@@ -38,6 +38,10 @@ vi.mock('@capacitor/filesystem', () => ({
 vi.mock('@capacitor/core', () => ({
   Capacitor: { getPlatform: () => 'ios' },
   CapacitorHttp: { request: vi.fn() },
+  registerPlugin: vi.fn(() => ({
+    propfind: vi.fn(),
+    request: vi.fn(),
+  })),
 }))
 
 import { MobileCloudBackupService } from '~/lib/services/mobile-cloud-backup.service'

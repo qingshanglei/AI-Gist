@@ -1,5 +1,6 @@
 import { ChatAnthropic } from '@langchain/anthropic';
 import { AIConfig, AIGenerationRequest, AIGenerationResult } from '@shared/types/ai';
+import { getDefaultModels as getProviderDefaultModels } from '@shared/ai-provider-metadata';
 import { BaseAIProvider, AITestResult, AIIntelligentTestResult, AIModelTestResult } from './base-provider';
 
 /**
@@ -338,12 +339,6 @@ export class AnthropicProvider extends BaseAIProvider {
    * 获取默认模型列表
    */
   private getDefaultModels(): string[] {
-    return [
-      'claude-3-5-sonnet-20241022',
-      'claude-3-5-haiku-20241022',
-      'claude-3-opus-20240229',
-      'claude-3-sonnet-20240229',
-      'claude-3-haiku-20240307'
-    ];
+    return getProviderDefaultModels('anthropic');
   }
 } 

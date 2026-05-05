@@ -1,11 +1,20 @@
 import { ChatOpenAI } from '@langchain/openai';
 import { AIConfig, AIGenerationRequest, AIGenerationResult } from '@shared/types/ai';
+import {
+  getConfiguredBaseURL,
+  getDefaultModels as getProviderDefaultModels,
+  getTestModelPriority
+} from '@shared/ai-provider-metadata';
 import { BaseAIProvider, AITestResult, AIIntelligentTestResult, AIModelTestResult } from './base-provider';
 
 /**
  * OpenAI 兼容供应商（OpenAI、DeepSeek、Mistral等）
  */
 export class OpenAICompatibleProvider extends BaseAIProvider {
+  private getBaseURL(config: AIConfig): string {
+    return getConfiguredBaseURL(config.type, config.baseURL);
+  }
+
   
   /**
    * 测试配置连接
@@ -47,7 +56,8 @@ export class OpenAICompatibleProvider extends BaseAIProvider {
     console.log(`获取 ${config.type} 模型列表 - baseURL: ${config.baseURL}`);
     
     try {
-      const url = `${config.baseURL}/models`;
+      const baseURL = this.getBaseURL(config);
+      const url = `${baseURL}/models`;
       console.log(`${config.type} 请求URL: ${url}`);
       
       const timeoutFetch = this.createTimeoutFetch(10000);
@@ -92,7 +102,7 @@ export class OpenAICompatibleProvider extends BaseAIProvider {
         openAIApiKey: config.apiKey,
         modelName: model,
         configuration: {
-          baseURL: config.baseURL || undefined
+          baseURL: this.getBaseURL(config) || undefined
         }
       });
 
@@ -137,7 +147,7 @@ export class OpenAICompatibleProvider extends BaseAIProvider {
         openAIApiKey: config.apiKey,
         modelName: model,
         configuration: {
-          baseURL: config.baseURL || undefined
+          baseURL: this.getBaseURL(config) || undefined
         }
       });
 
@@ -182,7 +192,7 @@ export class OpenAICompatibleProvider extends BaseAIProvider {
         openAIApiKey: config.apiKey,
         modelName: model,
         configuration: {
-          baseURL: config.baseURL || undefined
+          baseURL: this.getBaseURL(config) || undefined
         }
       });
 
@@ -235,7 +245,7 @@ export class OpenAICompatibleProvider extends BaseAIProvider {
         openAIApiKey: config.apiKey,
         modelName: model,
         configuration: {
-          baseURL: config.baseURL || undefined
+          baseURL: this.getBaseURL(config) || undefined
         },
         streaming: true
       });
@@ -360,7 +370,7 @@ export class OpenAICompatibleProvider extends BaseAIProvider {
    * 查找适合测试的模型
    * 优先选择文本对话模型，避免图像生成等特殊模型
    */
-  private findSuitableTestModel(models: string[], providerType: string): string {
+  private findSuitableTestModel(models: string[], providerType: AIConfig['type']): string {
     // 定义适合测试的模型关键词
     const suitableKeywords = [
       'chat', 'instruct', 'text', 'gpt', 'claude', 'gemini', 'qwen', 'glm', 'deepseek', 'mistral', 'hunyuan'
@@ -371,30 +381,8 @@ export class OpenAICompatibleProvider extends BaseAIProvider {
       'stable-diffusion', 'dall-e', 'midjourney', 'image', 'vision', 'embedding', 'reranker', 'speech', 'audio', 'tts', 'fish-speech', 'cosyvoice', 'moss-ttsd', 'gpt-sovits'
     ];
     
-    // 针对特定服务商的模型优先级
-    const providerSpecificModels: Record<string, string[]> = {
-      'siliconflow': [
-        'Qwen/Qwen2.5-7B-Instruct',
-        'THUDM/glm-4-9b-chat',
-        'Qwen/Qwen2.5-14B-Instruct',
-        'Qwen/Qwen2.5-32B-Instruct',
-        'Qwen/Qwen3-8B',
-        'Qwen/Qwen3-14B',
-        'Qwen/Qwen3-32B'
-      ],
-      'tencent': [
-        'tencent/Hunyuan-A13B-Instruct'
-      ],
-      'aliyun': [
-        'qwen-turbo',
-        'qwen-plus',
-        'qwen-max',
-        'qwen-max-longcontext'
-      ]
-    };
-    
     // 首先尝试使用服务商特定的推荐模型
-    const providerModels = providerSpecificModels[providerType];
+    const providerModels = getTestModelPriority(providerType);
     if (providerModels) {
       for (const recommendedModel of providerModels) {
         if (models.includes(recommendedModel)) {
@@ -445,48 +433,7 @@ export class OpenAICompatibleProvider extends BaseAIProvider {
   /**
    * 获取默认模型列表
    */
-  private getDefaultModels(providerType: string): string[] {
-    switch (providerType) {
-      case 'openai':
-        return [
-          'gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo', 
-          'gpt-3.5-turbo-16k', 'text-davinci-003', 'text-davinci-002'
-        ];
-      case 'deepseek':
-        return [
-          'deepseek-chat',
-          'deepseek-coder',
-        ];
-      case 'siliconflow':
-        return [
-          'Qwen/Qwen2.5-7B-Instruct',
-          'THUDM/glm-4-9b-chat',
-          'Qwen/Qwen2.5-14B-Instruct',
-          'Qwen/Qwen2.5-32B-Instruct'
-        ];
-      case 'tencent':
-        return [
-          'tencent/Hunyuan-A13B-Instruct'
-        ];
-      case 'aliyun':
-        return [
-          'qwen-turbo',
-          'qwen-plus',
-          'qwen-max',
-          'qwen-max-longcontext'
-        ];
-      case 'mistral':
-        return [
-          'mistral-large-latest',
-          'mistral-medium-latest', 
-          'mistral-small-latest',
-          'codestral-latest',
-          'open-mistral-7b',
-          'open-mixtral-8x7b',
-          'open-mixtral-8x22b'
-        ];
-      default:
-        return ['gpt-4', 'gpt-3.5-turbo'];
-    }
+  private getDefaultModels(providerType: AIConfig['type']): string[] {
+    return getProviderDefaultModels(providerType);
   }
 } 

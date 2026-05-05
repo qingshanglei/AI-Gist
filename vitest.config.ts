@@ -63,11 +63,12 @@ export default defineConfig({
   
   resolve: {
     alias: {
-      '@': resolve(__dirname, 'src/renderer'),
-      '~': resolve(__dirname, 'src/renderer'),
+      '@renderer': resolve(__dirname, 'src/renderer'),
       '@main': resolve(__dirname, 'src/main'),
       '@shared': resolve(__dirname, 'src/shared'),
-      '@test': resolve(__dirname, 'test')
+      '@test': resolve(__dirname, 'test'),
+      '@': resolve(__dirname, 'src/renderer'),
+      '~': resolve(__dirname, 'src/renderer')
     }
   },
   

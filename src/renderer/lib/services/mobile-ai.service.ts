@@ -5,6 +5,31 @@
  */
 
 import type { AIConfig, AIConfigTestResult } from '@shared/types/ai'
+import {
+  getConfiguredBaseURL,
+  getDefaultModels as getProviderDefaultModels
+} from '@shared/ai-provider-metadata'
+
+const GOOGLE_BASE_URL = 'https://generativelanguage.googleapis.com'
+const GOOGLE_API_VERSION = 'v1beta'
+
+function buildOpenAICompatibleHeaders(config: AIConfig | { type: AIConfig['type']; apiKey?: string }): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json'
+  }
+
+  if (config.apiKey && config.apiKey.trim()) {
+    headers.Authorization = `Bearer ${config.apiKey.trim()}`
+  }
+
+  if (config.type === 'openrouter') {
+    headers['HTTP-Referer'] = 'https://getaigist.com'
+    headers['X-OpenRouter-Title'] = 'AI Gist'
+    headers['X-Title'] = 'AI Gist'
+  }
+
+  return headers
+}
 
 /**
  * 智能测试 AI 配置
@@ -83,17 +108,15 @@ async function intelligentTestOpenAICompatible(
   inputPrompt?: string
 }> {
   try {
-    const url = `${config.baseURL}/chat/completions`
+    const baseURL = getConfiguredBaseURL(config.type, config.baseURL)
+    const url = `${baseURL}/chat/completions`
 
     console.log('[AI Service] 智能测试请求 URL:', url)
     console.log('[AI Service] 使用模型:', model)
 
     const fetchPromise = fetch(url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${config.apiKey}`
-      },
+      headers: buildOpenAICompatibleHeaders(config),
       body: JSON.stringify({
         model: model,
         messages: [
@@ -227,7 +250,8 @@ async function intelligentTestGoogle(
   inputPrompt?: string
 }> {
   try {
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${config.apiKey}`
+    const baseURL = config.baseURL?.trim() || GOOGLE_BASE_URL
+    const url = `${baseURL}/${GOOGLE_API_VERSION}/models/${model}:generateContent?key=${config.apiKey}`
 
     const fetchPromise = fetch(url, {
       method: 'POST',
@@ -284,43 +308,8 @@ async function intelligentTestGoogle(
 /**
  * 获取默认模型列表
  */
-function getDefaultModels(providerType: string): string[] {
-  switch (providerType) {
-    case 'openai':
-      return [
-        'gpt-4o', 'gpt-4o-mini', 'gpt-4-turbo', 'gpt-4', 'gpt-3.5-turbo',
-        'gpt-3.5-turbo-16k', 'text-davinci-003', 'text-davinci-002'
-      ]
-    case 'deepseek':
-      return ['deepseek-chat', 'deepseek-coder']
-    case 'siliconflow':
-      return [
-        'Qwen/Qwen2.5-7B-Instruct',
-        'THUDM/glm-4-9b-chat',
-        'Qwen/Qwen2.5-14B-Instruct',
-        'Qwen/Qwen2.5-32B-Instruct'
-      ]
-    case 'tencent':
-      return ['tencent/Hunyuan-A13B-Instruct']
-    case 'aliyun':
-      return ['qwen-turbo', 'qwen-plus', 'qwen-max', 'qwen-max-longcontext']
-    case 'mistral':
-      return [
-        'mistral-large-latest',
-        'mistral-medium-latest',
-        'mistral-small-latest',
-        'codestral-latest',
-        'open-mistral-7b',
-        'open-mixtral-8x7b',
-        'open-mixtral-8x22b'
-      ]
-    case 'zhipu':
-      return ['glm-4', 'glm-4-air', 'glm-4-flash']
-    case 'openrouter':
-      return ['openai/gpt-4o', 'anthropic/claude-3.5-sonnet', 'google/gemini-pro']
-    default:
-      return ['gpt-4', 'gpt-3.5-turbo']
-  }
+function getDefaultModels(providerType: AIConfig['type']): string[] {
+  return getProviderDefaultModels(providerType)
 }
 
 /**
@@ -384,29 +373,26 @@ export async function testAIConfig(config: {
 async function testOpenAICompatible(
   baseURL: string,
   apiKey?: string,
-  providerType: string = 'openai'
+  providerType: AIConfig['type'] = 'openai'
 ): Promise<AIConfigTestResult> {
   try {
     // 验证和清理 URL
-    if (!baseURL || typeof baseURL !== 'string') {
+    const configuredBaseURL = getConfiguredBaseURL(providerType, baseURL)
+    if (!configuredBaseURL || typeof configuredBaseURL !== 'string') {
       return {
         success: false,
         error: 'Base URL 不能为空'
       }
     }
 
-    const cleanURL = baseURL.trim()
+    const cleanURL = configuredBaseURL.trim().replace(/\/+$/, '')
     const url = `${cleanURL}/models`
 
     console.log('[AI Service] 请求 URL:', url)
 
     // 构建请求头
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json'
-    }
-
-    if (apiKey && typeof apiKey === 'string' && apiKey.trim()) {
-      headers['Authorization'] = `Bearer ${apiKey.trim()}`
+    const headers = buildOpenAICompatibleHeaders({ type: providerType, apiKey })
+    if (headers.Authorization) {
       console.log('[AI Service] 已添加 Authorization 头')
     } else {
       console.log('[AI Service] 警告：没有 API Key')
@@ -533,7 +519,7 @@ async function testAnthropic(apiKey?: string): Promise<AIConfigTestResult> {
         'anthropic-version': '2023-06-01'
       },
       body: JSON.stringify({
-        model: 'claude-3-5-sonnet-20241022',
+        model: getDefaultModels('anthropic')[0],
         max_tokens: 1,
         messages: [{ role: 'user', content: 'test' }]
       }),
@@ -552,13 +538,7 @@ async function testAnthropic(apiKey?: string): Promise<AIConfigTestResult> {
     if (response.ok || response.status === 400) {
       return {
         success: true,
-        models: [
-          'claude-3-5-sonnet-20241022',
-          'claude-3-5-haiku-20241022',
-          'claude-3-opus-20240229',
-          'claude-3-sonnet-20240229',
-          'claude-3-haiku-20240307'
-        ]
+        models: getDefaultModels('anthropic')
       }
     }
 
@@ -657,7 +637,7 @@ async function testGoogle(apiKey?: string): Promise<AIConfigTestResult> {
 
     return {
       success: true,
-      models
+      models: models.length > 0 ? models : getDefaultModels('google')
     }
   } catch (error) {
     console.error('[AI Service] Google 测试失败:', error)

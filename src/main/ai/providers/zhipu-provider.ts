@@ -1,4 +1,8 @@
 import { AIConfig, AIGenerationRequest, AIGenerationResult } from '@shared/types/ai';
+import {
+  getDefaultModels as getProviderDefaultModels,
+  getTestModelPriority
+} from '@shared/ai-provider-metadata';
 import { BaseAIProvider, AITestResult, AIIntelligentTestResult, AIModelTestResult } from './base-provider';
 
 /**
@@ -12,6 +16,11 @@ export class ZhipuAIProvider extends BaseAIProvider {
    * 将标准模型名称映射到智谱API的实际模型名称
    */
   private readonly modelMapping: Record<string, string> = {
+    'glm-5.1': 'glm-5.1',
+    'glm-5': 'glm-5',
+    'glm-5-turbo': 'glm-5-turbo',
+    'glm-4.7': 'glm-4.7',
+    'glm-4.6': 'glm-4.6',
     'glm-4': 'glm-4',
     'glm-4v': 'glm-4v',
     'glm-3-turbo': 'glm-3-turbo',
@@ -21,6 +30,10 @@ export class ZhipuAIProvider extends BaseAIProvider {
     'chatglm_std': 'chatglm_std',
     'chatglm_lite': 'chatglm_lite'
   };
+
+  private getDefaultModel(): string {
+    return this.getDefaultModels()[0];
+  }
 
   /**
    * 测试配置连接
@@ -131,7 +144,7 @@ export class ZhipuAIProvider extends BaseAIProvider {
       return { success: false, error: '配置已禁用' };
     }
 
-    const model = config.defaultModel || config.customModel || 'glm-4';
+    const model = config.defaultModel || config.customModel || this.getDefaultModel();
     const testPrompt = '请用一句话简单介绍一下你自己。';
 
     try {
@@ -163,7 +176,7 @@ export class ZhipuAIProvider extends BaseAIProvider {
       throw new Error('配置已禁用');
     }
 
-    const model = request.model || config.defaultModel || config.customModel || 'glm-4';
+    const model = request.model || config.defaultModel || config.customModel || this.getDefaultModel();
     const { systemPrompt, userPrompt } = this.buildPrompts(request, config);
 
     try {
@@ -194,7 +207,7 @@ export class ZhipuAIProvider extends BaseAIProvider {
     onProgress: (charCount: number, partialContent?: string) => boolean,
     abortSignal?: AbortSignal
   ): Promise<AIGenerationResult> {
-    const model = request.model || config.defaultModel || config.customModel || 'glm-4';
+    const model = request.model || config.defaultModel || config.customModel || this.getDefaultModel();
     
     if (!model) {
       throw new Error('未指定模型');
@@ -213,7 +226,6 @@ export class ZhipuAIProvider extends BaseAIProvider {
       ];
       
       let accumulatedContent = '';
-      let lastContentUpdate = Date.now();
       let shouldStop = false;
       
       if (abortSignal?.aborted) {
@@ -347,8 +359,6 @@ export class ZhipuAIProvider extends BaseAIProvider {
     return {
       [Symbol.asyncIterator]: async function* () {
         try {
-          let buffer = '';
-          
           // 对于 Electron net 模块，我们需要手动处理响应流
           const responseText = await response.text();
           const lines = responseText.split('\n');
@@ -390,13 +400,7 @@ export class ZhipuAIProvider extends BaseAIProvider {
    */
   private findSuitableTestModel(models: string[]): string {
     // 智谱AI的推荐测试模型优先级
-    const recommendedModels = [
-      'glm-4',
-      'glm-3-turbo',
-      'chatglm_turbo',
-      'chatglm_pro',
-      'chatglm_std'
-    ];
+    const recommendedModels = getTestModelPriority('zhipu');
     
     // 首先尝试使用推荐的模型
     for (const recommendedModel of recommendedModels) {
@@ -413,15 +417,6 @@ export class ZhipuAIProvider extends BaseAIProvider {
    * 获取默认模型列表
    */
   private getDefaultModels(): string[] {
-    return [
-      'glm-4',
-      'glm-4v',
-      'glm-3-turbo',
-      'cogview-3',
-      'chatglm_turbo',
-      'chatglm_pro',
-      'chatglm_std',
-      'chatglm_lite'
-    ];
+    return getProviderDefaultModels('zhipu');
   }
 } 

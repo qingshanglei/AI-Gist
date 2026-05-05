@@ -1,5 +1,9 @@
 import { ChatOpenAI } from '@langchain/openai';
 import { AIConfig, AIGenerationRequest, AIGenerationResult } from '@shared/types/ai';
+import {
+  getConfiguredBaseURL,
+  getDefaultModels as getProviderDefaultModels
+} from '@shared/ai-provider-metadata';
 import { BaseAIProvider, AITestResult, AIIntelligentTestResult, AIModelTestResult } from './base-provider';
 
 /**
@@ -7,6 +11,18 @@ import { BaseAIProvider, AITestResult, AIIntelligentTestResult, AIModelTestResul
  * 基于 OpenRouter 官方 API 文档：https://openrouter.ai/docs
  */
 export class OpenRouterProvider extends BaseAIProvider {
+  private getBaseURL(config: AIConfig): string {
+    return getConfiguredBaseURL('openrouter', config.baseURL);
+  }
+
+  private getDefaultHeaders(): Record<string, string> {
+    return {
+      'HTTP-Referer': 'https://getaigist.com',
+      'X-OpenRouter-Title': 'AI Gist',
+      'X-Title': 'AI Gist'
+    };
+  }
+
   
   /**
    * 测试配置连接
@@ -48,7 +64,7 @@ export class OpenRouterProvider extends BaseAIProvider {
     console.log(`获取 OpenRouter 模型列表 - baseURL: ${config.baseURL}`);
     
     try {
-      const url = `${config.baseURL || 'https://openrouter.ai/api/v1'}/models`;
+      const url = `${this.getBaseURL(config)}/models`;
       console.log(`OpenRouter 请求URL: ${url}`);
       
       const timeoutFetch = this.createTimeoutFetch(10000);
@@ -56,8 +72,7 @@ export class OpenRouterProvider extends BaseAIProvider {
         headers: {
           'Authorization': `Bearer ${config.apiKey}`,
           'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://getaigist.com', // OpenRouter 要求提供 referer
-          'X-Title': 'AI Gist' // OpenRouter 要求提供应用名称
+          ...this.getDefaultHeaders()
         }
       });
       console.log(`OpenRouter 响应状态: ${response.status}`);
@@ -95,11 +110,8 @@ export class OpenRouterProvider extends BaseAIProvider {
         openAIApiKey: config.apiKey,
         modelName: model,
         configuration: {
-          baseURL: config.baseURL || 'https://openrouter.ai/api/v1',
-          defaultHeaders: {
-            'HTTP-Referer': 'https://getaigist.com',
-            'X-Title': 'AI Gist'
-          }
+          baseURL: this.getBaseURL(config),
+          defaultHeaders: this.getDefaultHeaders()
         }
       });
 
@@ -144,11 +156,8 @@ export class OpenRouterProvider extends BaseAIProvider {
         openAIApiKey: config.apiKey,
         modelName: model,
         configuration: {
-          baseURL: config.baseURL || 'https://openrouter.ai/api/v1',
-          defaultHeaders: {
-            'HTTP-Referer': 'https://getaigist.com',
-            'X-Title': 'AI Gist'
-          }
+          baseURL: this.getBaseURL(config),
+          defaultHeaders: this.getDefaultHeaders()
         }
       });
 
@@ -193,11 +202,8 @@ export class OpenRouterProvider extends BaseAIProvider {
         openAIApiKey: config.apiKey,
         modelName: model,
         configuration: {
-          baseURL: config.baseURL || 'https://openrouter.ai/api/v1',
-          defaultHeaders: {
-            'HTTP-Referer': 'https://getaigist.com',
-            'X-Title': 'AI Gist'
-          }
+          baseURL: this.getBaseURL(config),
+          defaultHeaders: this.getDefaultHeaders()
         }
       });
 
@@ -250,11 +256,8 @@ export class OpenRouterProvider extends BaseAIProvider {
         openAIApiKey: config.apiKey,
         modelName: model,
         configuration: {
-          baseURL: config.baseURL || 'https://openrouter.ai/api/v1',
-          defaultHeaders: {
-            'HTTP-Referer': 'https://getaigist.com',
-            'X-Title': 'AI Gist'
-          }
+          baseURL: this.getBaseURL(config),
+          defaultHeaders: this.getDefaultHeaders()
         },
         streaming: true
       });
@@ -363,17 +366,6 @@ export class OpenRouterProvider extends BaseAIProvider {
    * 基于 OpenRouter 官方文档中的热门模型
    */
   private getDefaultModels(): string[] {
-    return [
-      'openai/gpt-4o',
-      'openai/gpt-4o-mini',
-      'anthropic/claude-3-5-sonnet',
-      'anthropic/claude-3-5-haiku',
-      'meta-llama/llama-3.1-8b-instruct',
-      'meta-llama/llama-3.1-70b-instruct',
-      'google/gemini-pro',
-      'google/gemini-flash-1.5',
-      'mistralai/mistral-7b-instruct',
-      'microsoft/phi-3-mini-4k-instruct'
-    ];
+    return getProviderDefaultModels('openrouter');
   }
 }
