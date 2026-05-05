@@ -228,7 +228,6 @@ import {
   IonItemSliding,
   IonItemOptions,
   IonItemOption,
-  toastController,
   alertController,
   loadingController
 } from '@ionic/vue'
@@ -247,6 +246,7 @@ import {
 import { useI18n } from '~/composables/useI18n'
 import { mobileCloudBackupService } from '~/lib/services/mobile-cloud-backup.service'
 import { databaseService } from '~/lib/db'
+import { presentMobileToast } from '~/lib/utils/mobile-toast'
 import type { CloudStorageConfig, CloudBackupInfo } from '@shared/types/cloud-backup'
 
 const { t } = useI18n()
@@ -701,12 +701,7 @@ const getFriendlyRestoreError = (error?: string): string => {
 
 // 显示提示
 const showToast = async (message: string, color: string = 'success') => {
-  const toast = await toastController.create({
-    message,
-    duration: 2000,
-    color
-  })
-  await toast.present()
+  await presentMobileToast(message, color)
 }
 
 onMounted(() => {

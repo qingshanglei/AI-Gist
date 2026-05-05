@@ -136,7 +136,6 @@ import {
   IonCard,
   IonCardContent,
   alertController,
-  toastController,
   onIonViewWillEnter,
   onIonViewWillLeave
 } from '@ionic/vue'
@@ -151,6 +150,7 @@ import {
 import { useI18n } from '~/composables/useI18n'
 import { api } from '~/lib/api'
 import { onDataChange } from '~/lib/services/data-change-events'
+import { presentMobileToast } from '~/lib/utils/mobile-toast'
 import type { AIConfig } from '@shared/types'
 
 const { t } = useI18n()
@@ -293,12 +293,7 @@ const handleDelete = async (config: AIConfig) => {
 
 // 显示提示
 const showToast = async (message: string, color: string = 'success') => {
-  const toast = await toastController.create({
-    message,
-    duration: 2000,
-    color
-  })
-  await toast.present()
+  await presentMobileToast(message, color)
 }
 
 const runRealtimeRefresh = async (showLoading = false) => {

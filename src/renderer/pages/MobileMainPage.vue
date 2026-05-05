@@ -3,7 +3,7 @@
     <ion-tabs>
       <ion-router-outlet></ion-router-outlet>
 
-      <ion-tab-bar slot="bottom">
+      <ion-tab-bar id="mobile-tab-bar" slot="bottom">
         <ion-tab-button tab="prompts" href="/tabs/prompts">
           <ion-icon :icon="listOutline" />
           <ion-label>{{ t('mainPage.menu.prompts') }}</ion-label>

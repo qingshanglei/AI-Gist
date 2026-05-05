@@ -240,7 +240,6 @@ import {
   IonItemOptions,
   IonItemOption,
   alertController,
-  toastController,
   onIonViewWillEnter,
   onIonViewWillLeave,
   onIonViewDidEnter
@@ -261,6 +260,7 @@ import {
 import { useI18n } from '~/composables/useI18n'
 import { api } from '~/lib/api'
 import { onDataChange } from '~/lib/services/data-change-events'
+import { presentMobileToast } from '~/lib/utils/mobile-toast'
 import type { Prompt, Category } from '@shared/types'
 import { useRouter } from 'vue-router'
 import { databaseService } from '~/lib/db'
@@ -347,12 +347,7 @@ const loadPrompts = async (append = false, options: { showLoading?: boolean } = 
     totalCount.value = result.total || 0
   } catch (error) {
     console.error('加载提示词失败:', error)
-    const toast = await toastController.create({
-      message: t('promptManagement.loadFailed'),
-      duration: 2000,
-      color: 'danger'
-    })
-    await toast.present()
+    await showToast(t('promptManagement.loadFailed'), 'danger')
   } finally {
     if (!append && showLoading) {
       loading.value = false
@@ -472,20 +467,10 @@ const handleDelete = async (prompt: Prompt) => {
           try {
             await api.prompts.delete.mutate(prompt.id!)
 
-            const toast = await toastController.create({
-              message: t('promptManagement.deleteSuccess'),
-              duration: 2000,
-              color: 'success'
-            })
-            await toast.present()
+            await showToast(t('promptManagement.deleteSuccess'))
           } catch (error) {
             console.error('删除提示词失败:', error)
-            const toast = await toastController.create({
-              message: t('promptManagement.deleteFailed'),
-              duration: 2000,
-              color: 'danger'
-            })
-            await toast.present()
+            await showToast(t('promptManagement.deleteFailed'), 'danger')
           }
         }
       }
@@ -499,6 +484,10 @@ const handleDelete = async (prompt: Prompt) => {
 watch([showFavoritesOnly, selectedTag], () => {
   loadPrompts()
 })
+
+const showToast = async (message: string, color: string = 'success') => {
+  await presentMobileToast(message, color)
+}
 
 const reloadRealtimeData = async (showLoading = false) => {
   await Promise.all([

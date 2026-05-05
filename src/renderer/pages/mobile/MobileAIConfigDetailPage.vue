@@ -185,7 +185,6 @@ import {
   IonRefresher,
   IonRefresherContent,
   alertController,
-  toastController,
   actionSheetController,
   onIonViewWillEnter
 } from '@ionic/vue'
@@ -198,6 +197,7 @@ import {
 } from 'ionicons/icons'
 import { useI18n } from '~/composables/useI18n'
 import { api } from '~/lib/api'
+import { presentMobileToast } from '~/lib/utils/mobile-toast'
 import type { AIConfig } from '@shared/types'
 
 const { t } = useI18n()
@@ -435,12 +435,7 @@ const formatDate = (date: Date | string): string => {
 
 // 显示提示
 const showToast = async (message: string, color: string = 'success') => {
-  const toast = await toastController.create({
-    message,
-    duration: 2000,
-    color
-  })
-  await toast.present()
+  await presentMobileToast(message, color)
 }
 
 // 显示操作菜单

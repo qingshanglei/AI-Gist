@@ -214,8 +214,7 @@ import {
   IonChip,
   IonIcon,
   IonSpinner,
-  alertController,
-  toastController
+  alertController
 } from '@ionic/vue'
 import {
   add,
@@ -226,6 +225,7 @@ import {
 import { useI18n } from '~/composables/useI18n'
 import { useAIConfigForm } from '~/composables/useAIConfigForm'
 import { api } from '~/lib/api'
+import { presentMobileToast } from '~/lib/utils/mobile-toast'
 import type { AIConfig } from '@shared/types'
 
 const { t } = useI18n()
@@ -525,12 +525,7 @@ const handleSave = async () => {
 
 // 显示提示
 const showToast = async (message: string, color: string = 'success') => {
-  const toast = await toastController.create({
-    message,
-    duration: 2000,
-    color
-  })
-  await toast.present()
+  await presentMobileToast(message, color)
 }
 
 // 初始化
