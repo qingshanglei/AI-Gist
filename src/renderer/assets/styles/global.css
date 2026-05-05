@@ -97,6 +97,7 @@ webview {
   flex-direction: column !important;
 }
 
+.n-modal-container .n-modal.fullscreen-modal .n-card .n-card-content,
 .n-modal-container .n-modal.fullscreen-modal .n-card .n-card__content {
   flex: 1 !important;
   overflow: auto !important;
