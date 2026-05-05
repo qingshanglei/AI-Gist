@@ -110,7 +110,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted } from 'vue'
+import { ref, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   IonPage,
@@ -137,7 +137,8 @@ import {
   IonCardContent,
   alertController,
   toastController,
-  onIonViewWillEnter
+  onIonViewWillEnter,
+  onIonViewWillLeave
 } from '@ionic/vue'
 import {
   add,
@@ -149,6 +150,7 @@ import {
 } from 'ionicons/icons'
 import { useI18n } from '~/composables/useI18n'
 import { api } from '~/lib/api'
+import { onDataChange } from '~/lib/services/data-change-events'
 import type { AIConfig } from '@shared/types'
 
 const { t } = useI18n()
@@ -158,10 +160,18 @@ const router = useRouter()
 const configs = ref<AIConfig[]>([])
 const preferredConfig = ref<AIConfig | null>(null)
 const loading = ref(true)
+let isPageActive = true
+let pendingRealtimeRefresh = false
+let realtimeRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let realtimeRefreshRunning = false
 
 // 加载 AI 配置列表
-const loadConfigs = async () => {
-  loading.value = true
+const loadConfigs = async (options: { showLoading?: boolean } = {}) => {
+  const showLoading = options.showLoading ?? true
+
+  if (showLoading) {
+    loading.value = true
+  }
 
   try {
     configs.value = await api.aiConfigs.getAll.query()
@@ -171,7 +181,9 @@ const loadConfigs = async () => {
     console.error('加载 AI 配置失败:', error)
     showToast(t('aiConfig.loadFailed'), 'danger')
   } finally {
-    loading.value = false
+    if (showLoading) {
+      loading.value = false
+    }
   }
 }
 
@@ -238,7 +250,6 @@ const handleClearPreferred = async () => {
           try {
             await api.aiConfigs.clearPreferred.mutate()
             showToast(t('aiConfig.globalPreferredCleared'))
-            loadConfigs()
           } catch (error) {
             console.error('清除首选配置失败:', error)
             showToast(t('aiConfig.clearFailed'), 'danger')
@@ -268,7 +279,6 @@ const handleDelete = async (config: AIConfig) => {
           try {
             await api.aiConfigs.delete.mutate(config.id!)
             showToast(t('aiConfig.configDeleteSuccess'))
-            loadConfigs()
           } catch (error) {
             console.error('删除 AI 配置失败:', error)
             showToast(t('aiConfig.deleteFailed'), 'danger')
@@ -291,14 +301,62 @@ const showToast = async (message: string, color: string = 'success') => {
   await toast.present()
 }
 
+const runRealtimeRefresh = async (showLoading = false) => {
+  if (realtimeRefreshRunning) {
+    pendingRealtimeRefresh = true
+    return
+  }
+
+  realtimeRefreshRunning = true
+  try {
+    do {
+      pendingRealtimeRefresh = false
+      await loadConfigs({ showLoading })
+      showLoading = false
+    } while (pendingRealtimeRefresh && isPageActive)
+  } finally {
+    realtimeRefreshRunning = false
+  }
+}
+
+const scheduleRealtimeRefresh = () => {
+  pendingRealtimeRefresh = true
+
+  if (!isPageActive || realtimeRefreshTimer) return
+
+  realtimeRefreshTimer = setTimeout(() => {
+    realtimeRefreshTimer = null
+    if (!isPageActive) return
+    runRealtimeRefresh(false)
+  }, 80)
+}
+
+const unsubscribeDataChanges = onDataChange('ai_configs', scheduleRealtimeRefresh)
+
 // 初始化
 onMounted(async () => {
   await loadConfigs()
 })
 
-// 页面进入时刷新
+// 页面进入时刷新，并消费后台期间发生的数据层变更
 onIonViewWillEnter(() => {
-  loadConfigs()
+  isPageActive = true
+  if (pendingRealtimeRefresh) {
+    runRealtimeRefresh(configs.value.length === 0)
+  } else {
+    loadConfigs({ showLoading: configs.value.length === 0 })
+  }
+})
+
+onIonViewWillLeave(() => {
+  isPageActive = false
+})
+
+onUnmounted(() => {
+  if (realtimeRefreshTimer) {
+    clearTimeout(realtimeRefreshTimer)
+  }
+  unsubscribeDataChanges()
 })
 </script>
 

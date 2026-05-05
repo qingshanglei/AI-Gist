@@ -15,6 +15,7 @@ import {
   PromptFillResult 
 } from '@shared/types/database';
 import { generateUUID } from '../utils/uuid';
+import { emitDataChange } from './data-change-events';
 
 /**
  * 提示词数据服务类
@@ -974,6 +975,13 @@ export class PromptService extends BaseDatabaseService {
 
       // 然后批量删除提示词本身
       const promptDeleteResult = await this.batchDeleteWithoutSync('prompts', ids);
+      if (promptDeleteResult.success > 0) {
+        emitDataChange({
+          storeName: 'prompts',
+          action: 'batch-delete',
+          ids
+        });
+      }
       
       totalSuccess += promptDeleteResult.success;
       totalFailed += promptDeleteResult.failed;

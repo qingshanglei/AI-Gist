@@ -20,6 +20,8 @@ export { AIConfigService } from './ai-config.service';
 export { AIGenerationHistoryService } from './ai-generation-history.service';
 export { AppSettingsService } from './app-settings.service';
 export { DatabaseServiceManager } from './database-manager.service';
+export { emitDataChange, onDataChange } from './data-change-events';
+export type { DataChangeEventPayload, DataStoreName, DataChangeAction } from './data-change-events';
 
 // 创建并导出统一的数据库服务管理器实例
 export const databaseService = DatabaseServiceManager.getInstance();

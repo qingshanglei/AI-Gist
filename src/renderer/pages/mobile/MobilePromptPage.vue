@@ -211,7 +211,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, watch, onActivated } from 'vue'
+import { ref, computed, onMounted, watch, onActivated, onUnmounted } from 'vue'
 import {
   IonPage,
   IonHeader,
@@ -260,6 +260,7 @@ import {
 } from 'ionicons/icons'
 import { useI18n } from '~/composables/useI18n'
 import { api } from '~/lib/api'
+import { onDataChange } from '~/lib/services/data-change-events'
 import type { Prompt, Category } from '@shared/types'
 import { useRouter } from 'vue-router'
 import { databaseService } from '~/lib/db'
@@ -273,13 +274,17 @@ const ionContentRef = ref<any>(null)
 let savedScrollTop = 0
 let lastNavIntent: 'view' | 'mutation' | null = null
 let didReloadOnEnter = false
+let isPageActive = true
+let pendingRealtimeRefresh = false
+let realtimeRefreshTimer: ReturnType<typeof setTimeout> | null = null
+let realtimeRefreshRunning = false
 
 // 状态
 const prompts = ref<Prompt[]>([])
 const categories = ref<Category[]>([])
 const loading = ref(true)
 const searchText = ref('')
-const selectedCategory = ref<string | null>(null)
+const selectedCategory = ref<number | null>(null)
 const selectedTag = ref<string | null>(null)
 const showFavoritesOnly = ref(false)
 const sortType = ref('updatedAt')
@@ -306,13 +311,17 @@ const sortOptions = computed(() => [
 
 // 是否有激活的筛选
 const hasActiveFilters = computed(() => {
-  return selectedCategory.value || showFavoritesOnly.value || selectedTag.value
+  return selectedCategory.value !== null || showFavoritesOnly.value || selectedTag.value !== null
 })
 
 // 加载提示词列表
-const loadPrompts = async (append = false) => {
+const loadPrompts = async (append = false, options: { showLoading?: boolean } = {}) => {
+  const showLoading = options.showLoading ?? true
+
   if (!append) {
-    loading.value = true
+    if (showLoading) {
+      loading.value = true
+    }
     currentPage.value = 1
   }
 
@@ -334,7 +343,7 @@ const loadPrompts = async (append = false) => {
     } else {
       prompts.value = result.data || []
     }
-    hasNextPage.value = result.hasMore || false
+    hasNextPage.value = result.hasNextPage || false
     totalCount.value = result.total || 0
   } catch (error) {
     console.error('加载提示词失败:', error)
@@ -345,7 +354,9 @@ const loadPrompts = async (append = false) => {
     })
     await toast.present()
   } finally {
-    loading.value = false
+    if (!append && showLoading) {
+      loading.value = false
+    }
   }
 }
 
@@ -359,7 +370,7 @@ const loadCategories = async () => {
 }
 
 // 获取分类名称
-const getCategoryName = (categoryId: string | null) => {
+const getCategoryName = (categoryId: number | null) => {
   if (!categoryId) return t('promptManagement.noCategory')
   const category = categories.value.find(c => c.id === categoryId)
   return category?.name || t('promptManagement.noCategory')
@@ -391,7 +402,7 @@ const loadMore = async (event: any) => {
 }
 
 // 分类筛选
-const handleCategoryFilter = (categoryId: string | null) => {
+const handleCategoryFilter = (categoryId: number | null) => {
   selectedCategory.value = categoryId
   showFilterModal.value = false
   loadPrompts()
@@ -467,7 +478,6 @@ const handleDelete = async (prompt: Prompt) => {
               color: 'success'
             })
             await toast.present()
-            loadPrompts()
           } catch (error) {
             console.error('删除提示词失败:', error)
             const toast = await toastController.create({
@@ -490,6 +500,46 @@ watch([showFavoritesOnly, selectedTag], () => {
   loadPrompts()
 })
 
+const reloadRealtimeData = async (showLoading = false) => {
+  await Promise.all([
+    loadCategories(),
+    loadPrompts(false, { showLoading }),
+    checkAIConfig()
+  ])
+}
+
+const runRealtimeRefresh = async (showLoading = false) => {
+  if (realtimeRefreshRunning) {
+    pendingRealtimeRefresh = true
+    return
+  }
+
+  realtimeRefreshRunning = true
+  try {
+    do {
+      pendingRealtimeRefresh = false
+      await reloadRealtimeData(showLoading)
+      showLoading = false
+    } while (pendingRealtimeRefresh && isPageActive)
+  } finally {
+    realtimeRefreshRunning = false
+  }
+}
+
+const scheduleRealtimeRefresh = () => {
+  pendingRealtimeRefresh = true
+
+  if (!isPageActive || realtimeRefreshTimer) return
+
+  realtimeRefreshTimer = setTimeout(() => {
+    realtimeRefreshTimer = null
+    if (!isPageActive) return
+    runRealtimeRefresh(false)
+  }, 80)
+}
+
+const unsubscribeDataChanges = onDataChange(['prompts', 'categories', 'ai_configs'], scheduleRealtimeRefresh)
+
 // 初始化
 onMounted(async () => {
   await loadCategories()
@@ -499,19 +549,24 @@ onMounted(async () => {
 
 // 离开页面时保存滚动位置
 onIonViewWillLeave(async () => {
+  isPageActive = false
   const scrollEl = await ionContentRef.value?.$el?.getScrollElement?.()
   savedScrollTop = scrollEl?.scrollTop ?? 0
 })
 
-// 进入页面：只有 mutation 后才刷新列表
+// 进入页面：优先消费数据层变更；保留 mutation 意图作为旧路径兜底
 onIonViewWillEnter(() => {
   const isMutation = lastNavIntent === 'mutation'
   lastNavIntent = null
-  didReloadOnEnter = isMutation
-  if (isMutation) {
-    loadPrompts()
+  isPageActive = true
+
+  const shouldReload = pendingRealtimeRefresh || isMutation
+  didReloadOnEnter = shouldReload
+  if (shouldReload) {
+    runRealtimeRefresh(isMutation || prompts.value.length === 0)
+  } else {
+    checkAIConfig()
   }
-  checkAIConfig()
 })
 
 // 进入页面后恢复滚动位置（仅查看详情返回时）
@@ -523,7 +578,19 @@ onIonViewDidEnter(async () => {
 
 // keep-alive 激活时仅检查 AI 配置
 onActivated(() => {
-  checkAIConfig()
+  isPageActive = true
+  if (pendingRealtimeRefresh) {
+    runRealtimeRefresh(false)
+  } else {
+    checkAIConfig()
+  }
+})
+
+onUnmounted(() => {
+  if (realtimeRefreshTimer) {
+    clearTimeout(realtimeRefreshTimer)
+  }
+  unsubscribeDataChanges()
 })
 </script>
 
