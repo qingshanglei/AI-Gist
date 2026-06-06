@@ -117,7 +117,7 @@ export function useAIConfigForm() {
       },
       tencent: {
         label: '腾讯云 API 地址',
-        placeholder: 'https://api.hunyuan.cloud.tencent.com/v1'
+        placeholder: getDefaultBaseURL('tencent')
       },
       aliyun: {
         label: '阿里云 API 地址',

@@ -248,7 +248,12 @@ const {
 // 状态
 const saving = ref(false)
 const testingConnection = ref(false)
-const testResult = ref<{ success: boolean; message: string; models?: string[] } | null>(null)
+const testResult = ref<{
+  success: boolean
+  message: string
+  models?: string[]
+  modelSource?: 'remote' | 'default' | 'unavailable'
+} | null>(null)
 
 // 判断是否为编辑模式
 const isEditMode = computed(() => !!route.params.id)
@@ -341,6 +346,35 @@ const onTypeChange = () => {
   testResult.value = null
 }
 
+const getModelListDisplayMessage = (result: {
+  success: boolean
+  models?: string[]
+  error?: string
+  modelSource?: 'remote' | 'default' | 'unavailable'
+  modelListMessage?: string
+}) => {
+  if (!result.success) {
+    return result.error || t('aiConfig.connectionTestFailed')
+  }
+
+  const modelCount = result.models?.length || 0
+  if (result.modelSource === 'remote' && modelCount > 0) {
+    return t('aiConfig.foundModels', { count: modelCount })
+  }
+  if (result.modelSource === 'default' && modelCount > 0) {
+    return t('aiConfig.usingDefaultModels', { count: modelCount })
+  }
+  if (result.modelSource === 'unavailable') {
+    return result.modelListMessage || t('aiConfig.connectionSuccessNoModels')
+  }
+
+  return result.modelListMessage || (
+    modelCount > 0
+      ? t('aiConfig.foundModels', { count: modelCount })
+      : t('aiConfig.connectionSuccessNoModels')
+  )
+}
+
 // 测试连接
 const handleTestConnection = async () => {
   // 验证必填字段
@@ -378,6 +412,8 @@ const handleTestConnection = async () => {
     console.log('[Page] 测试结果:', result)
 
     if (result.success) {
+      const resultMessage = getModelListDisplayMessage(result)
+
       // 如果获取到模型，自动填充
       if (result.models && result.models.length > 0) {
         formData.models = result.models
@@ -389,17 +425,19 @@ const handleTestConnection = async () => {
 
         testResult.value = {
           success: true,
-          message: t('aiConfig.foundModels', { count: result.models.length }),
-          models: result.models
+          message: resultMessage,
+          models: result.models,
+          modelSource: result.modelSource
         }
-        showToast(t('aiConfig.connectionTestSuccess'))
+        showToast(resultMessage, result.modelSource === 'default' ? 'warning' : 'success')
       } else {
         // 连接成功但没有获取到模型
         testResult.value = {
           success: true,
-          message: t('aiConfig.connectionSuccessNoModels') || '连接成功，但未获取到模型列表，请手动添加'
+          message: resultMessage,
+          modelSource: result.modelSource
         }
-        showToast(t('aiConfig.connectionSuccessNoModels') || '连接成功，请手动添加模型', 'warning')
+        showToast(resultMessage, 'warning')
       }
     } else {
       // 显示详细的错误信息

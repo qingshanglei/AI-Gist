@@ -12,6 +12,79 @@ import {
 
 const GOOGLE_BASE_URL = 'https://generativelanguage.googleapis.com'
 const GOOGLE_API_VERSION = 'v1beta'
+const PROVIDERS_WITHOUT_MODEL_LIST = new Set<AIConfig['type']>(['aliyun', 'tencent', 'zhipu'])
+
+function getModelListURL(providerType: AIConfig['type'], baseURL: string): string {
+  const configuredBaseURL = getConfiguredBaseURL(providerType, baseURL)
+  if (providerType === 'deepseek') {
+    return `${configuredBaseURL.replace(/\/v1$/, '')}/models`
+  }
+  return `${configuredBaseURL}/models`
+}
+
+function parseModelIds(data: any): string[] {
+  const rawModels = Array.isArray(data) ? data : data?.data
+  if (!Array.isArray(rawModels)) return []
+  return rawModels
+    .map((m: any) => m?.id)
+    .filter((id: unknown): id is string => typeof id === 'string' && id.trim().length > 0)
+}
+
+async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs = 15000): Promise<Response> {
+  const fetchPromise = fetch(url, options)
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    setTimeout(() => reject(new Error('请求超时')), timeoutMs)
+  })
+  return await Promise.race([fetchPromise, timeoutPromise])
+}
+
+async function readErrorMessage(response: Response): Promise<string> {
+  let errorMessage = `HTTP ${response.status}`
+  try {
+    const contentType = response.headers.get('content-type')
+    if (contentType && contentType.includes('application/json')) {
+      const errorData = await response.json()
+      return errorData.error?.message || errorData.message || errorMessage
+    }
+
+    const errorText = await response.text()
+    if (errorText && errorText.length < 200) {
+      errorMessage = `${errorMessage}: ${errorText}`
+    }
+  } catch (e) {
+    console.error('[AI Service] 解析错误响应失败:', e)
+  }
+  return errorMessage
+}
+
+async function validateDefaultOpenAICompatibleModel(
+  baseURL: string,
+  apiKey: string | undefined,
+  providerType: AIConfig['type']
+): Promise<void> {
+  const model = getDefaultModels(providerType)[0]
+  if (!model) {
+    throw new Error('没有可用于测试的默认模型')
+  }
+
+  const url = `${getConfiguredBaseURL(providerType, baseURL)}/chat/completions`
+  const response = await fetchWithTimeout(url, {
+    method: 'POST',
+    headers: buildOpenAICompatibleHeaders({ type: providerType, apiKey }),
+    body: JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: 'test' }],
+      max_tokens: 1,
+      stream: false
+    }),
+    mode: 'cors',
+    cache: 'no-cache'
+  }, 20000)
+
+  if (!response.ok) {
+    throw new Error(await readErrorMessage(response))
+  }
+}
 
 function buildOpenAICompatibleHeaders(config: AIConfig | { type: AIConfig['type']; apiKey?: string }): Record<string, string> {
   const headers: Record<string, string> = {
@@ -337,9 +410,9 @@ export async function testAIConfig(config: {
       case 'siliconflow':
       case 'openrouter':
       case 'mistral':
-      case 'zhipu':
       case 'tencent':
       case 'aliyun':
+      case 'zhipu':
         return await testOpenAICompatible(baseURL, apiKey, type)
 
       case 'anthropic':
@@ -350,7 +423,7 @@ export async function testAIConfig(config: {
 
       case 'ollama':
       case 'lmstudio':
-        return await testLocalService(baseURL)
+        return await testLocalService(baseURL, type)
 
       default:
         return {
@@ -385,8 +458,18 @@ async function testOpenAICompatible(
       }
     }
 
-    const cleanURL = configuredBaseURL.trim().replace(/\/+$/, '')
-    const url = `${cleanURL}/models`
+    if (PROVIDERS_WITHOUT_MODEL_LIST.has(providerType)) {
+      await validateDefaultOpenAICompatibleModel(baseURL, apiKey, providerType)
+      const defaultModels = getDefaultModels(providerType)
+      return {
+        success: true,
+        models: defaultModels,
+        modelSource: 'default',
+        modelListMessage: `${providerType} 未提供可用的远端模型列表接口，已使用内置默认模型`
+      }
+    }
+
+    const url = getModelListURL(providerType, baseURL)
 
     console.log('[AI Service] 请求 URL:', url)
 
@@ -400,44 +483,20 @@ async function testOpenAICompatible(
 
     console.log('[AI Service] 请求头:', Object.keys(headers))
 
-    // 使用 Promise.race 实现超时
-    const fetchPromise = fetch(url, {
+    const response = await fetchWithTimeout(url, {
       method: 'GET',
       headers: headers,
       mode: 'cors',
       cache: 'no-cache'
     })
 
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('请求超时')), 15000)
-    })
-
-    const response = await Promise.race([fetchPromise, timeoutPromise])
-
     console.log('[AI Service] 响应状态:', response.status)
     console.log('[AI Service] 响应头 Content-Type:', response.headers.get('content-type'))
 
     if (!response.ok) {
-      let errorMessage = `HTTP ${response.status}`
-      try {
-        const contentType = response.headers.get('content-type')
-        if (contentType && contentType.includes('application/json')) {
-          const errorData = await response.json()
-          console.log('[AI Service] 错误响应数据:', errorData)
-          errorMessage = errorData.error?.message || errorData.message || errorMessage
-        } else {
-          const errorText = await response.text()
-          console.log('[AI Service] 错误响应文本:', errorText.substring(0, 200))
-          if (errorText && errorText.length < 200) {
-            errorMessage = `${errorMessage}: ${errorText}`
-          }
-        }
-      } catch (e) {
-        console.error('[AI Service] 解析错误响应失败:', e)
-      }
       return {
         success: false,
-        error: errorMessage
+        error: await readErrorMessage(response)
       }
     }
 
@@ -457,7 +516,7 @@ async function testOpenAICompatible(
       console.log('[AI Service] 前3个模型数据:', data.data.slice(0, 3))
     }
 
-    const models = data.data?.map((m: any) => m.id) || []
+    const models = parseModelIds(data)
     console.log('[AI Service] 解析出的模型列表:', models)
     console.log('[AI Service] 获取到模型数量:', models.length)
 
@@ -468,13 +527,17 @@ async function testOpenAICompatible(
 
       return {
         success: true,
-        models: defaultModels
+        models: defaultModels,
+        modelSource: defaultModels.length > 0 ? 'default' : 'unavailable',
+        modelListMessage: defaultModels.length > 0 ? '远端模型列表为空，已使用内置默认模型' : '远端模型列表为空，请手动添加模型'
       }
     }
 
     return {
       success: true,
-      models
+      models,
+      modelSource: 'remote',
+      modelListMessage: `已从远端获取到 ${models.length} 个可用模型`
     }
   } catch (error) {
     console.error('[AI Service] OpenAI 兼容测试失败:', error)
@@ -511,51 +574,34 @@ async function testAnthropic(apiKey?: string): Promise<AIConfigTestResult> {
 
     console.log('[AI Service] 测试 Anthropic API')
 
-    const fetchPromise = fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
+    const response = await fetchWithTimeout('https://api.anthropic.com/v1/models', {
+      method: 'GET',
       headers: {
         'Content-Type': 'application/json',
         'x-api-key': apiKey.trim(),
         'anthropic-version': '2023-06-01'
       },
-      body: JSON.stringify({
-        model: getDefaultModels('anthropic')[0],
-        max_tokens: 1,
-        messages: [{ role: 'user', content: 'test' }]
-      }),
       mode: 'cors',
       cache: 'no-cache'
     })
 
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('请求超时')), 15000)
-    })
-
-    const response = await Promise.race([fetchPromise, timeoutPromise])
-
     console.log('[AI Service] Anthropic 响应状态:', response.status)
 
-    if (response.ok || response.status === 400) {
+    if (response.ok) {
+      const data = await response.json()
+      const models = parseModelIds(data)
+      const defaultModels = getDefaultModels('anthropic')
       return {
         success: true,
-        models: getDefaultModels('anthropic')
+        models: models.length > 0 ? models : defaultModels,
+        modelSource: models.length > 0 ? 'remote' : (defaultModels.length > 0 ? 'default' : 'unavailable'),
+        modelListMessage: models.length > 0 ? `已从远端获取到 ${models.length} 个可用模型` : '远端模型列表为空，已使用内置默认模型'
       }
-    }
-
-    let errorMessage = `HTTP ${response.status}`
-    try {
-      const contentType = response.headers.get('content-type')
-      if (contentType && contentType.includes('application/json')) {
-        const errorData = await response.json()
-        errorMessage = errorData.error?.message || errorMessage
-      }
-    } catch (e) {
-      console.error('[AI Service] 解析 Anthropic 错误响应失败:', e)
     }
 
     return {
       success: false,
-      error: errorMessage
+      error: await readErrorMessage(response)
     }
   } catch (error) {
     console.error('[AI Service] Anthropic 测试失败:', error)
@@ -594,7 +640,7 @@ async function testGoogle(apiKey?: string): Promise<AIConfigTestResult> {
 
     const url = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey.trim())}`
 
-    const fetchPromise = fetch(url, {
+    const response = await fetchWithTimeout(url, {
       method: 'GET',
       headers: {
         'Content-Type': 'application/json'
@@ -603,41 +649,32 @@ async function testGoogle(apiKey?: string): Promise<AIConfigTestResult> {
       cache: 'no-cache'
     })
 
-    const timeoutPromise = new Promise<never>((_, reject) => {
-      setTimeout(() => reject(new Error('请求超时')), 15000)
-    })
-
-    const response = await Promise.race([fetchPromise, timeoutPromise])
-
     console.log('[AI Service] Google 响应状态:', response.status)
 
     if (!response.ok) {
-      let errorMessage = `HTTP ${response.status}`
-      try {
-        const contentType = response.headers.get('content-type')
-        if (contentType && contentType.includes('application/json')) {
-          const errorData = await response.json()
-          errorMessage = errorData.error?.message || errorMessage
-        }
-      } catch (e) {
-        console.error('[AI Service] 解析 Google 错误响应失败:', e)
-      }
       return {
         success: false,
-        error: errorMessage
+        error: await readErrorMessage(response)
       }
     }
 
     const data = await response.json()
     const models = data.models
-      ?.filter((m: any) => m.name && m.name.includes('gemini'))
+      ?.filter((m: any) => {
+        const supportedMethods = m.supportedGenerationMethods || m.supported_actions || m.supportedActions || []
+        return m.name && m.name.includes('gemini') && (
+          supportedMethods.length === 0 || supportedMethods.includes('generateContent')
+        )
+      })
       .map((m: any) => m.name.split('/').pop()) || []
 
     console.log('[AI Service] Google 获取到模型数量:', models.length)
 
     return {
       success: true,
-      models: models.length > 0 ? models : getDefaultModels('google')
+      models: models.length > 0 ? models : getDefaultModels('google'),
+      modelSource: models.length > 0 ? 'remote' : 'default',
+      modelListMessage: models.length > 0 ? `已从远端获取到 ${models.length} 个可用模型` : '远端模型列表为空，已使用内置默认模型'
     }
   } catch (error) {
     console.error('[AI Service] Google 测试失败:', error)
@@ -663,7 +700,7 @@ async function testGoogle(apiKey?: string): Promise<AIConfigTestResult> {
 /**
  * 测试本地服务（Ollama/LM Studio）
  */
-async function testLocalService(baseURL: string): Promise<AIConfigTestResult> {
+async function testLocalService(baseURL: string, providerType: 'ollama' | 'lmstudio'): Promise<AIConfigTestResult> {
   try {
     if (!baseURL || typeof baseURL !== 'string') {
       return {
@@ -675,12 +712,11 @@ async function testLocalService(baseURL: string): Promise<AIConfigTestResult> {
     const cleanURL = baseURL.trim()
     console.log('[AI Service] 测试本地服务:', cleanURL)
 
-    // 尝试 Ollama API
-    try {
+    if (providerType === 'ollama') {
       const ollamaURL = `${cleanURL}/api/tags`
       console.log('[AI Service] 尝试 Ollama API:', ollamaURL)
 
-      const fetchPromise = fetch(ollamaURL, {
+      const response = await fetchWithTimeout(ollamaURL, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json'
@@ -688,12 +724,6 @@ async function testLocalService(baseURL: string): Promise<AIConfigTestResult> {
         mode: 'cors',
         cache: 'no-cache'
       })
-
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('请求超时')), 15000)
-      })
-
-      const response = await Promise.race([fetchPromise, timeoutPromise])
 
       console.log('[AI Service] Ollama 响应状态:', response.status)
 
@@ -703,19 +733,23 @@ async function testLocalService(baseURL: string): Promise<AIConfigTestResult> {
         console.log('[AI Service] Ollama 获取到模型数量:', models.length)
         return {
           success: true,
-          models
+          models,
+          modelSource: models.length > 0 ? 'remote' : 'unavailable',
+          modelListMessage: models.length > 0 ? `已从本地服务获取到 ${models.length} 个可用模型` : 'Ollama 当前未返回模型，请先拉取模型'
         }
       }
-    } catch (ollamaError) {
-      console.log('[AI Service] Ollama API 失败，尝试 LM Studio API')
+
+      return {
+        success: false,
+        error: '无法连接到 Ollama 服务，请确保服务已启动'
+      }
     }
 
-    // 尝试 LM Studio API
     try {
-      const lmstudioURL = `${cleanURL}/v1/models`
+      const lmstudioURL = cleanURL.endsWith('/v1') ? `${cleanURL}/models` : `${cleanURL}/v1/models`
       console.log('[AI Service] 尝试 LM Studio API:', lmstudioURL)
 
-      const fetchPromise = fetch(lmstudioURL, {
+      const response = await fetchWithTimeout(lmstudioURL, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json'
@@ -723,12 +757,6 @@ async function testLocalService(baseURL: string): Promise<AIConfigTestResult> {
         mode: 'cors',
         cache: 'no-cache'
       })
-
-      const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('请求超时')), 15000)
-      })
-
-      const response = await Promise.race([fetchPromise, timeoutPromise])
 
       console.log('[AI Service] LM Studio 响应状态:', response.status)
 
@@ -738,7 +766,9 @@ async function testLocalService(baseURL: string): Promise<AIConfigTestResult> {
         console.log('[AI Service] LM Studio 获取到模型数量:', models.length)
         return {
           success: true,
-          models
+          models,
+          modelSource: models.length > 0 ? 'remote' : 'unavailable',
+          modelListMessage: models.length > 0 ? `已从本地服务获取到 ${models.length} 个可用模型` : 'LM Studio 当前未返回模型，请先加载或下载模型'
         }
       }
     } catch (lmstudioError) {

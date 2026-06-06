@@ -11,6 +11,8 @@ export interface AITestResult {
   success: boolean;
   error?: string;
   models?: string[];
+  modelSource?: 'remote' | 'default' | 'unavailable';
+  modelListMessage?: string;
 }
 
 /**

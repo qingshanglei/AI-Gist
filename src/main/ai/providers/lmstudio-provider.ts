@@ -23,7 +23,12 @@ export class LMStudioProvider extends BaseAIProvider {
       if (response.ok) {
         const models = await this.getAvailableModels(config);
         console.log('LM Studio 连接测试成功，获取到模型:', models);
-        return { success: true, models };
+        return {
+          success: true,
+          models,
+          modelSource: models.length > 0 ? 'remote' : 'unavailable',
+          modelListMessage: models.length > 0 ? `已从本地服务获取到 ${models.length} 个可用模型` : 'LM Studio 当前未返回模型，请先加载或下载模型'
+        };
       } else {
         console.log(`LM Studio models 端点响应状态: ${response.status}`);
         return { success: false, error: '无法连接到 LM Studio 服务，请确保服务已启动并加载了模型' };
@@ -61,18 +66,15 @@ export class LMStudioProvider extends BaseAIProvider {
           return models;
         } else {
           console.warn('LM Studio 返回空模型列表，可能未加载模型');
-          return ['请在 LM Studio 中加载模型'];
+          return [];
         }
       } else {
         console.warn(`LM Studio API 响应异常: ${response.status} ${response.statusText}`);
-        return ['请检查 LM Studio 服务状态'];
+        return [];
       }
     } catch (error) {
       console.error('获取 LM Studio 模型列表失败:', error);
-      if (error instanceof Error && error.message?.includes('请求超时')) {
-        return ['连接超时，请检查 LM Studio 状态'];
-      }
-      return ['无法连接到 LM Studio'];
+      return [];
     }
   }
 

@@ -11,8 +11,72 @@ import { BaseAIProvider, AITestResult, AIIntelligentTestResult, AIModelTestResul
  * OpenAI 兼容供应商（OpenAI、DeepSeek、Mistral等）
  */
 export class OpenAICompatibleProvider extends BaseAIProvider {
+  private readonly providersWithoutModelList = new Set<AIConfig['type']>(['aliyun', 'tencent']);
+
   private getBaseURL(config: AIConfig): string {
     return getConfiguredBaseURL(config.type, config.baseURL);
+  }
+
+  private getModelListURL(config: AIConfig): string {
+    if (config.type === 'deepseek') {
+      return this.getBaseURL(config).replace(/\/v1$/, '') + '/models';
+    }
+
+    return `${this.getBaseURL(config)}/models`;
+  }
+
+  private parseModelsResponse(data: any): string[] {
+    const rawModels = Array.isArray(data) ? data : data?.data;
+    if (!Array.isArray(rawModels)) {
+      return [];
+    }
+
+    return rawModels
+      .map((model: any) => model?.id)
+      .filter((id: unknown): id is string => typeof id === 'string' && id.trim().length > 0);
+  }
+
+  private async fetchRemoteModels(config: AIConfig): Promise<string[]> {
+    const url = this.getModelListURL(config);
+    console.log(`${config.type} 请求URL: ${url}`);
+
+    const timeoutFetch = this.createTimeoutFetch(10000);
+    const response = await timeoutFetch(url, {
+      headers: buildOpenAICompatibleHeaders(config)
+    });
+    console.log(`${config.type} 响应状态: ${response.status}`);
+
+    if (!response.ok) {
+      const errorData = await response.text().catch(() => response.statusText);
+      throw new Error(`模型列表请求失败: HTTP ${response.status} ${errorData}`);
+    }
+
+    const data = await response.json();
+    console.log(`${config.type} 响应数据:`, data);
+
+    const models = this.parseModelsResponse(data);
+    console.log(`${config.type} 解析出的模型列表:`, models);
+    return models;
+  }
+
+  private async validateDefaultModel(config: AIConfig): Promise<void> {
+    const model = this.findSuitableTestModel(this.getDefaultModels(config.type), config.type);
+    const timeoutFetch = this.createTimeoutFetch(20000);
+    const response = await timeoutFetch(`${this.getBaseURL(config)}/chat/completions`, {
+      method: 'POST',
+      headers: buildOpenAICompatibleHeaders(config),
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'user', content: 'test' }],
+        max_tokens: 1,
+        stream: false
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.text().catch(() => response.statusText);
+      throw new Error(`连接测试失败: HTTP ${response.status} ${errorData}`);
+    }
   }
 
   
@@ -23,8 +87,19 @@ export class OpenAICompatibleProvider extends BaseAIProvider {
     console.log(`测试 ${config.type} 连接，使用 baseURL: ${config.baseURL}`);
     
     try {
-      // 只测试连接和获取模型列表，不测试具体模型
-      const models = await this.getAvailableModels(config);
+      if (this.providersWithoutModelList.has(config.type)) {
+        await this.validateDefaultModel(config);
+        const models = this.getDefaultModels(config.type);
+        return {
+          success: true,
+          models,
+          modelSource: 'default',
+          modelListMessage: `${config.type} 未提供可用的远端模型列表接口，已使用内置默认模型`,
+          error: `✅ 连接成功！${config.type} 未提供可用的远端模型列表接口，已使用内置默认模型`
+        };
+      }
+
+      const models = await this.fetchRemoteModels(config);
       console.log(`${config.type} 获取到模型列表:`, models);
       
       if (models.length > 0) {
@@ -32,14 +107,19 @@ export class OpenAICompatibleProvider extends BaseAIProvider {
         return { 
           success: true, 
           models,
+          modelSource: 'remote',
+          modelListMessage: `已从远端获取到 ${models.length} 个可用模型`,
           error: `✅ 连接成功！获取到 ${models.length} 个可用模型`
         };
       } else {
-        console.log(`${config.type} 连接成功但未获取到模型，使用默认模型列表`);
+        const defaultModels = this.getDefaultModels(config.type);
+        console.log(`${config.type} 连接成功但远端模型列表为空，使用默认模型列表`);
         return { 
           success: true, 
-          models: this.getDefaultModels(config.type),
-          error: `✅ 连接成功！但未获取到模型列表，使用默认模型`
+          models: defaultModels,
+          modelSource: defaultModels.length > 0 ? 'default' : 'unavailable',
+          modelListMessage: defaultModels.length > 0 ? '远端模型列表为空，已使用内置默认模型' : '远端模型列表为空，请手动添加模型',
+          error: defaultModels.length > 0 ? `✅ 连接成功！远端模型列表为空，使用默认模型` : `✅ 连接成功！但未获取到模型列表`
         };
       }
     } catch (error: any) {
@@ -55,31 +135,14 @@ export class OpenAICompatibleProvider extends BaseAIProvider {
   async getAvailableModels(config: AIConfig): Promise<string[]> {
     console.log(`获取 ${config.type} 模型列表 - baseURL: ${config.baseURL}`);
     
+    if (this.providersWithoutModelList.has(config.type)) {
+      return this.getDefaultModels(config.type);
+    }
+
     try {
-      const baseURL = this.getBaseURL(config);
-      const url = `${baseURL}/models`;
-      console.log(`${config.type} 请求URL: ${url}`);
-      
-      const timeoutFetch = this.createTimeoutFetch(10000);
-      const response = await timeoutFetch(url, {
-        headers: {
-          'Authorization': `Bearer ${config.apiKey}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      console.log(`${config.type} 响应状态: ${response.status}`);
-      
-      if (response.ok) {
-        const data = await response.json();
-        console.log(`${config.type} 响应数据:`, data);
-        
-        const models = data.data?.map((model: any) => model.id) || [];
-        console.log(`${config.type} 解析出的模型列表:`, models);
-        
-        // 如果获取到了模型列表，返回；否则返回常见模型
-        if (models.length > 0) {
-          return models;
-        }
+      const models = await this.fetchRemoteModels(config);
+      if (models.length > 0) {
+        return models;
       }
     } catch (error) {
       console.error(`获取 ${config.type} 模型列表失败，使用默认列表:`, error);
@@ -437,3 +500,21 @@ export class OpenAICompatibleProvider extends BaseAIProvider {
     return getProviderDefaultModels(providerType);
   }
 } 
+
+function buildOpenAICompatibleHeaders(config: AIConfig): Record<string, string> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json'
+  };
+
+  if (config.apiKey) {
+    headers.Authorization = `Bearer ${config.apiKey}`;
+  }
+
+  if (config.type === 'openrouter') {
+    headers['HTTP-Referer'] = 'https://getaigist.com';
+    headers['X-OpenRouter-Title'] = 'AI Gist';
+    headers['X-Title'] = 'AI Gist';
+  }
+
+  return headers;
+}

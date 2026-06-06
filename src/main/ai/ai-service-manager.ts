@@ -109,7 +109,7 @@ class AIServiceManager {
    * @param config 原始配置
    * @returns 测试结果
    */
-  async processTestConfig(config: any): Promise<{ success: boolean; error?: string; models?: string[] }> {
+  async processTestConfig(config: any): Promise<AIConfigTestResult> {
     // 将配置转换为内部格式，只包含必要的属性
     const processedConfig = {
       configId: config.configId,
@@ -413,7 +413,7 @@ class AIServiceManager {
    * @param config AI配置
    * @returns 测试结果
    */
-  async testConfig(config: ProcessedAIConfig): Promise<{ success: boolean; error?: string; models?: string[] }> {
+  async testConfig(config: ProcessedAIConfig): Promise<AIConfigTestResult> {
     console.log(`${CONSTANTS.LOG_MESSAGES.TEST_START} - 供应商: ${config.type}, baseURL: ${config.baseURL}, 配置ID: ${config.configId}`);
     
     try {

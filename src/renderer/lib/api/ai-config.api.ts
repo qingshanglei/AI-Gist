@@ -347,7 +347,9 @@ export class AIConfigApiClient {
       }): Promise<{
         success: boolean;
         error?: string;
-        models?: string[]
+        models?: string[];
+        modelSource?: 'remote' | 'default' | 'unavailable';
+        modelListMessage?: string
       }> => {
         try {
           // 检测平台
@@ -367,11 +369,13 @@ export class AIConfigApiClient {
               updatedAt: new Date()
             };
 
-            const result = await window.electron.ai.testConfig(testConfig as AIConfig);
+            const result = await window.electronAPI.ai.testConfig(testConfig as AIConfig);
             return {
               success: result.success,
               error: result.error,
-              models: result.models
+              models: result.models,
+              modelSource: result.modelSource,
+              modelListMessage: result.modelListMessage
             };
           } else {
             // 移动端环境：直接调用 API
@@ -380,7 +384,9 @@ export class AIConfigApiClient {
             return {
               success: result.success,
               error: result.error,
-              models: result.models
+              models: result.models,
+              modelSource: result.modelSource,
+              modelListMessage: result.modelListMessage
             };
           }
         } catch (error) {
@@ -422,7 +428,7 @@ export class AIConfigApiClient {
 
           if (isElectron) {
             // Electron 环境
-            const result = await window.electron.ai.intelligentTest(config);
+            const result = await window.electronAPI.ai.intelligentTest(config);
             return {
               success: result.success,
               error: result.error,

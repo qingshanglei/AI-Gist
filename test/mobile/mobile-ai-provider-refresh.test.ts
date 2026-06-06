@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { AIGeneratorService } from '../../src/renderer/lib/services/mobile-ai-generator.service'
+import { testAIConfig } from '../../src/renderer/lib/services/mobile-ai.service'
 import { PlatformDetector } from '@shared/platform'
 import type { AIConfig, AIGenerationRequest } from '@shared/types/ai'
 
@@ -96,7 +97,58 @@ describe('mobile AI provider 2026 refresh', () => {
     )
 
     expect(fetchMock.mock.calls[0][0]).toBe(
-      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3.1-pro:generateContent?key=test-key'
+      'https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-preview:generateContent?key=test-key'
     )
+  })
+
+  it('marks Aliyun model discovery as default after validating chat completions', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      choices: [{ message: { content: '' } }]
+    }))
+
+    const result = await testAIConfig({
+      type: 'aliyun',
+      baseURL: '',
+      apiKey: 'test-key'
+    })
+
+    expect(fetchMock.mock.calls[0][0]).toBe('https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions')
+    expect(result.success).toBe(true)
+    expect(result.modelSource).toBe('default')
+    expect(result.models).toContain('qwen3.6-flash')
+  })
+
+  it('uses the real DeepSeek models endpoint instead of the chat base path', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse({
+      data: [{ id: 'deepseek-chat' }, { id: 'deepseek-reasoner' }]
+    }))
+
+    const result = await testAIConfig({
+      type: 'deepseek',
+      baseURL: 'https://api.deepseek.com/v1',
+      apiKey: 'test-key'
+    })
+
+    expect(fetchMock.mock.calls[0][0]).toBe('https://api.deepseek.com/models')
+    expect(result.success).toBe(true)
+    expect(result.modelSource).toBe('remote')
+    expect(result.models).toEqual(['deepseek-chat', 'deepseek-reasoner'])
+  })
+
+  it('does not return fake LM Studio models when none are loaded', async () => {
+    const fetchMock = vi.mocked(fetch)
+    fetchMock.mockResolvedValueOnce(jsonResponse({ data: [] }))
+
+    const result = await testAIConfig({
+      type: 'lmstudio',
+      baseURL: 'http://localhost:1234/v1'
+    })
+
+    expect(fetchMock.mock.calls[0][0]).toBe('http://localhost:1234/v1/models')
+    expect(result.success).toBe(true)
+    expect(result.modelSource).toBe('unavailable')
+    expect(result.models).toEqual([])
   })
 })

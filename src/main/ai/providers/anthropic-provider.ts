@@ -7,6 +7,36 @@ import { BaseAIProvider, AITestResult, AIIntelligentTestResult, AIModelTestResul
  * Anthropic 供应商实现
  */
 export class AnthropicProvider extends BaseAIProvider {
+  private getBaseURL(config: AIConfig): string {
+    return (config.baseURL || 'https://api.anthropic.com').replace(/\/+$/, '');
+  }
+
+  private async fetchRemoteModels(config: AIConfig): Promise<string[]> {
+    const url = `${this.getBaseURL(config)}/v1/models`;
+    console.log(`Anthropic 请求URL: ${url}`);
+
+    const timeoutFetch = this.createTimeoutFetch(10000);
+    const response = await timeoutFetch(url, {
+      headers: {
+        'x-api-key': config.apiKey,
+        'anthropic-version': '2023-06-01',
+        'Content-Type': 'application/json'
+      }
+    });
+    console.log(`Anthropic 响应状态: ${response.status}`);
+
+    if (!response.ok) {
+      const errorData = await response.text().catch(() => response.statusText);
+      throw new Error(`模型列表请求失败: HTTP ${response.status} ${errorData}`);
+    }
+
+    const data = await response.json();
+    console.log(`Anthropic 响应数据:`, data);
+
+    return data.data
+      ?.map((model: any) => model.id)
+      .filter((id: unknown): id is string => typeof id === 'string' && id.trim().length > 0) || [];
+  }
   
   /**
    * 测试配置连接
@@ -15,8 +45,7 @@ export class AnthropicProvider extends BaseAIProvider {
     console.log(`测试 Anthropic 连接，使用 baseURL: ${config.baseURL}`);
     
     try {
-      // 只测试连接和获取模型列表，不测试具体模型
-      const models = await this.getAvailableModels(config);
+      const models = await this.fetchRemoteModels(config);
       console.log(`Anthropic 获取到模型列表:`, models);
       
       if (models.length > 0) {
@@ -24,13 +53,18 @@ export class AnthropicProvider extends BaseAIProvider {
         return { 
           success: true, 
           models,
+          modelSource: 'remote',
+          modelListMessage: `已从远端获取到 ${models.length} 个可用模型`,
           error: `✅ 连接成功！获取到 ${models.length} 个可用模型`
         };
       } else {
+        const defaultModels = this.getDefaultModels();
         console.log(`Anthropic 连接成功但未获取到模型，使用默认模型列表`);
         return { 
           success: true, 
-          models: this.getDefaultModels(),
+          models: defaultModels,
+          modelSource: defaultModels.length > 0 ? 'default' : 'unavailable',
+          modelListMessage: defaultModels.length > 0 ? '远端模型列表为空，已使用内置默认模型' : '远端模型列表为空，请手动添加模型',
           error: `✅ 连接成功！但未获取到模型列表，使用默认模型`
         };
       }
@@ -48,30 +82,11 @@ export class AnthropicProvider extends BaseAIProvider {
     console.log(`获取 Anthropic 模型列表 - baseURL: ${config.baseURL}`);
     
     try {
-      const url = `${config.baseURL || 'https://api.anthropic.com'}/v1/models`;
-      console.log(`Anthropic 请求URL: ${url}`);
-      
-      const timeoutFetch = this.createTimeoutFetch(10000);
-      const response = await timeoutFetch(url, {
-        headers: {
-          'x-api-key': config.apiKey,
-          'anthropic-version': '2023-06-01',
-          'Content-Type': 'application/json'
-        }
-      });
-      console.log(`Anthropic 响应状态: ${response.status}`);
-      
-      if (response.ok) {
-        const data = await response.json();
-        console.log(`Anthropic 响应数据:`, data);
-        
-        const models = data.data?.map((model: any) => model.id) || [];
-        console.log(`Anthropic 解析出的模型列表:`, models);
-        
-        // 如果获取到了模型列表，返回；否则返回常见模型
-        if (models.length > 0) {
-          return models;
-        }
+      const models = await this.fetchRemoteModels(config);
+      console.log(`Anthropic 解析出的模型列表:`, models);
+
+      if (models.length > 0) {
+        return models;
       }
     } catch (error) {
       console.error(`获取 Anthropic 模型列表失败，使用默认列表:`, error);

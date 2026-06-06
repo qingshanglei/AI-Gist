@@ -111,6 +111,7 @@ export class AIGeneratorService {
       case 'siliconflow':
       case 'tencent':
       case 'aliyun':
+      case 'zhipu':
       case 'mistral':
       case 'openrouter':
         return await this.callOpenAICompatibleAPI(request, config, systemPrompt, userPrompt, onProgress)
