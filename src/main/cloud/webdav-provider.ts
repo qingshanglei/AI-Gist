@@ -1,6 +1,3 @@
-// 标准库导入
-import path from 'path';
-
 // 本地模块导入
 import { CloudStorageProvider, CloudFileInfo, WebDAVConfig } from '@shared/types/cloud-backup';
 
@@ -12,6 +9,7 @@ const CONSTANTS = {
     ROOT: '/',
     DEFAULT_DIR: '/'
   },
+  BACKUP_DIR: 'AI-Gist-Backup',
   ERROR_MESSAGES: {
     CLIENT_INIT_FAILED: 'WebDAV 客户端初始化失败',
     CONNECTION_TEST_FAILED: 'WebDAV 连接测试失败',
@@ -20,6 +18,7 @@ const CONSTANTS = {
     WRITE_FILE_FAILED: '写入文件失败',
     DELETE_FILE_FAILED: '删除文件失败',
     CREATE_DIRECTORY_FAILED: '创建目录失败',
+    WRITE_VERIFY_FAILED: '写入后远端校验失败',
     MODULE_EXPORT_ERROR: 'webdav 模块没有导出 createClient 方法'
   },
   LOG_MESSAGES: {
@@ -60,8 +59,12 @@ export class WebDAVProvider implements CloudStorageProvider {
    */
   private async initClient(): Promise<void> {
     try {
-      // 使用 eval 来动态导入 webdav 模块，避免 TypeScript 编译时的模块解析问题
-      const webdavModule = await eval('import("webdav")');
+      let webdavModule: any;
+      try {
+        webdavModule = require('webdav');
+      } catch {
+        webdavModule = await import('webdav');
+      }
       
       // webdav 模块直接导出 createClient 方法
       const { createClient } = webdavModule as any;
@@ -93,15 +96,13 @@ export class WebDAVProvider implements CloudStorageProvider {
    */
   async initializeDirectories(): Promise<void> {
     await this.ensureClient();
-    try {
-      // 创建默认的备份目录
-      const defaultBackupDir = '/AI-Gist-Backup';
-      await this.createDirectory(defaultBackupDir);
-      console.log('WebDAV 目录初始化成功');
-    } catch (error) {
-      console.warn('WebDAV 目录初始化失败，可能目录已存在:', error);
-      // 不抛出错误，因为目录可能已经存在
+    const defaultBackupDir = this.getDefaultBackupDirectory();
+    if (!defaultBackupDir) {
+      return;
     }
+
+    await this.createDirectory(defaultBackupDir);
+    console.log('WebDAV 目录初始化成功');
   }
 
   // ==================== 连接测试 ====================
@@ -113,26 +114,20 @@ export class WebDAVProvider implements CloudStorageProvider {
   async testConnection(): Promise<boolean> {
     await this.ensureClient();
     try {
-      // 首先尝试访问根目录
-      try {
-        await this.client.getDirectoryContents(CONSTANTS.DEFAULT_PATHS.ROOT);
-        return true;
-      } catch (rootError) {
-        // 如果根目录访问失败，尝试创建默认目录（适用于坚果云等服务）
-        console.log('根目录访问失败，尝试创建默认目录...');
-        
-        // 创建默认的备份目录
-        const defaultBackupDir = '/AI-Gist-Backup';
-        try {
-          await this.createDirectory(defaultBackupDir);
-          console.log('默认备份目录创建成功');
-          return true;
-        } catch (createError) {
-          console.error('创建默认目录失败:', createError);
-          // 如果创建目录也失败，返回false
-          return false;
-        }
-      }
+      await this.initializeDirectories();
+
+      const probeDir = this.getDefaultBackupDirectory();
+      const probePath = this.joinRemotePath(
+        probeDir,
+        `.ai-gist-webdav-test-${Date.now()}-${Math.random().toString(36).slice(2)}.json`
+      );
+      const probeData = Buffer.from(JSON.stringify({ ok: true, createdAt: new Date().toISOString() }), 'utf-8');
+
+      await this.writeFile(probePath, probeData);
+      const remoteData = await this.readFile(probePath);
+      await this.deleteFile(probePath);
+
+      return Buffer.compare(remoteData, probeData) === 0;
     } catch (error) {
       console.error(CONSTANTS.LOG_MESSAGES.CONNECTION_TEST_FAILED, error);
       return false;
@@ -150,7 +145,7 @@ export class WebDAVProvider implements CloudStorageProvider {
     await this.ensureClient();
     try {
       // 如果没有指定路径，使用默认路径 /
-      const targetPath = dirPath || CONSTANTS.DEFAULT_PATHS.DEFAULT_DIR;
+      const targetPath = this.normalizeRemotePath(dirPath || CONSTANTS.DEFAULT_PATHS.DEFAULT_DIR, true);
       const contents = await this.client.getDirectoryContents(targetPath);
       const files = Array.isArray(contents) ? contents : contents.data || [];
       return files.map((item: any) => this.mapFileInfo(item));
@@ -168,13 +163,17 @@ export class WebDAVProvider implements CloudStorageProvider {
   async readFile(filePath: string): Promise<Buffer> {
     await this.ensureClient();
     try {
-      const stream = await this.client.createReadStream(filePath);
-      return new Promise((resolve, reject) => {
-        const chunks: Buffer[] = [];
-        stream.on('data', (chunk: Buffer) => chunks.push(chunk));
-        stream.on('end', () => resolve(Buffer.concat(chunks)));
-        stream.on('error', reject);
-      });
+      const data = await this.client.getFileContents(this.normalizeRemotePath(filePath), { format: 'binary' });
+      if (Buffer.isBuffer(data)) {
+        return data;
+      }
+      if (data instanceof ArrayBuffer) {
+        return Buffer.from(data);
+      }
+      if (ArrayBuffer.isView(data)) {
+        return Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+      }
+      return Buffer.from(String(data), 'utf-8');
     } catch (error) {
       console.error(CONSTANTS.LOG_MESSAGES.READ_FILE_FAILED, error);
       throw new Error(`${CONSTANTS.ERROR_MESSAGES.READ_FILE_FAILED}: ${this.getErrorMessage(error)}`);
@@ -189,9 +188,22 @@ export class WebDAVProvider implements CloudStorageProvider {
   async writeFile(filePath: string, data: Buffer): Promise<void> {
     await this.ensureClient();
     try {
-      const dirPath = path.dirname(filePath);
-      await this.createDirectory(dirPath);
-      await this.client.putFileContents(filePath, data);
+      const targetPath = this.normalizeRemotePath(filePath);
+      const dirPath = this.dirnameRemotePath(targetPath);
+      if (dirPath) {
+        await this.createDirectory(dirPath);
+      }
+
+      const uploaded = await this.client.putFileContents(targetPath, data, {
+        overwrite: true,
+        contentLength: data.length,
+      });
+
+      if (uploaded !== true) {
+        throw new Error('WebDAV PUT 未返回成功状态');
+      }
+
+      await this.verifyRemoteWrite(targetPath, data);
     } catch (error) {
       console.error(CONSTANTS.LOG_MESSAGES.WRITE_FILE_FAILED, error);
       throw new Error(`${CONSTANTS.ERROR_MESSAGES.WRITE_FILE_FAILED}: ${this.getErrorMessage(error)}`);
@@ -205,7 +217,7 @@ export class WebDAVProvider implements CloudStorageProvider {
   async deleteFile(filePath: string): Promise<void> {
     await this.ensureClient();
     try {
-      await this.client.deleteFile(filePath);
+      await this.client.deleteFile(this.normalizeRemotePath(filePath));
     } catch (error) {
       console.error(CONSTANTS.LOG_MESSAGES.DELETE_FILE_FAILED, error);
       throw new Error(`${CONSTANTS.ERROR_MESSAGES.DELETE_FILE_FAILED}: ${this.getErrorMessage(error)}`);
@@ -222,13 +234,18 @@ export class WebDAVProvider implements CloudStorageProvider {
   async createDirectory(dirPath: string): Promise<void> {
     await this.ensureClient();
     try {
+      const targetPath = this.normalizeRemotePath(dirPath, true);
+      if (!targetPath || targetPath === CONSTANTS.DEFAULT_PATHS.ROOT) {
+        return;
+      }
+
       // 首先检查目录是否已存在
-      if (await this.directoryExists(dirPath)) {
+      if (await this.directoryExists(targetPath)) {
         return;
       }
 
       // 递归创建目录结构
-      await this.createDirectoryRecursively(dirPath);
+      await this.createDirectoryRecursively(targetPath);
     } catch (error) {
       console.error(CONSTANTS.LOG_MESSAGES.CREATE_DIRECTORY_FAILED, error);
       throw new Error(`${CONSTANTS.ERROR_MESSAGES.CREATE_DIRECTORY_FAILED}: ${this.getErrorMessage(error)}`);
@@ -242,9 +259,9 @@ export class WebDAVProvider implements CloudStorageProvider {
    */
   private async directoryExists(dirPath: string): Promise<boolean> {
     try {
-      await this.client.getDirectoryContents(dirPath);
-      return true;
-    } catch {
+      const stat = await this.client.stat(this.normalizeRemotePath(dirPath, true));
+      return stat?.type === 'directory';
+    } catch (error) {
       return false;
     }
   }
@@ -254,22 +271,23 @@ export class WebDAVProvider implements CloudStorageProvider {
    * @param dirPath 目录路径
    */
   private async createDirectoryRecursively(dirPath: string): Promise<void> {
-    const parts = dirPath.split('/').filter(Boolean);
+    const parts = this.normalizeRemotePath(dirPath, true).split('/').filter(Boolean);
     let currentPath = '';
     
     for (const part of parts) {
       currentPath += '/' + part;
+      if (await this.directoryExists(currentPath)) {
+        continue;
+      }
+
       try {
         await this.client.createDirectory(currentPath);
       } catch (error: any) {
-        // 忽略目录已存在的错误
-        if (!error.message?.includes('already exists') && 
-            !error.message?.includes('405') && // Method Not Allowed
-            !error.message?.includes('409')) { // Conflict
-          console.warn(`创建目录失败: ${currentPath}`, error);
-          // 对于坚果云等服务，可能需要特殊处理
-          // 尝试继续，因为目录可能已经存在
+        if (await this.directoryExists(currentPath)) {
+          continue;
         }
+
+        throw error;
       }
     }
   }
@@ -282,13 +300,72 @@ export class WebDAVProvider implements CloudStorageProvider {
    * @returns 标准化的文件信息
    */
   private mapFileInfo(item: any): CloudFileInfo {
+    const filename = this.normalizeRemotePath(item.filename || item.path || item.basename || '');
+    const name = item.basename || filename.split('/').filter(Boolean).pop() || '';
+
     return {
-      name: item.basename,
-      path: item.filename,
+      name,
+      path: filename,
       size: item.size || 0,
       isDirectory: item.type === 'directory',
       modifiedAt: item.lastmod || new Date().toISOString(),
     };
+  }
+
+  /**
+   * 如果配置 URL 已经指向 AI-Gist-Backup，就直接在该 URL 下写入；否则使用子目录。
+   */
+  getDefaultBackupDirectory(): string {
+    try {
+      const pathname = new URL(this.config.url).pathname.replace(/\/+$/, '');
+      if (pathname.split('/').filter(Boolean).pop() === CONSTANTS.BACKUP_DIR) {
+        return '';
+      }
+    } catch {
+      // URL 格式错误会在 webdav 客户端请求阶段暴露。
+    }
+
+    return `/${CONSTANTS.BACKUP_DIR}`;
+  }
+
+  private async verifyRemoteWrite(filePath: string, expectedData: Buffer): Promise<void> {
+    try {
+      const stat = await this.client.stat(filePath);
+      if (stat?.type === 'directory') {
+        throw new Error('远端路径是目录，不是文件');
+      }
+
+      const remoteData = await this.readFile(filePath);
+      if (remoteData.length !== expectedData.length || Buffer.compare(remoteData, expectedData) !== 0) {
+        throw new Error('远端文件内容与本地备份不一致');
+      }
+    } catch (error) {
+      throw new Error(`${CONSTANTS.ERROR_MESSAGES.WRITE_VERIFY_FAILED}: ${this.getErrorMessage(error)}`);
+    }
+  }
+
+  private normalizeRemotePath(remotePath: string, allowRoot = false): string {
+    const segments = (remotePath || '')
+      .split('/')
+      .filter(Boolean);
+
+    if (segments.length === 0) {
+      return allowRoot ? CONSTANTS.DEFAULT_PATHS.ROOT : '';
+    }
+
+    return `/${segments.join('/')}`;
+  }
+
+  private dirnameRemotePath(remotePath: string): string {
+    const normalized = this.normalizeRemotePath(remotePath);
+    const segments = normalized.split('/').filter(Boolean);
+    segments.pop();
+    return segments.length > 0 ? `/${segments.join('/')}` : '';
+  }
+
+  private joinRemotePath(...parts: string[]): string {
+    const segments = parts.flatMap(part => (part || '').split('/')).filter(Boolean);
+    return segments.length > 0 ? `/${segments.join('/')}` : '';
   }
 
   /**

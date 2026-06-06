@@ -63,6 +63,7 @@ vi.mock('@capacitor/core', () => ({
 }))
 
 import { MobileCloudBackupService } from '~/lib/services/mobile-cloud-backup.service'
+import { WebDAVProvider } from '../../src/main/cloud/webdav-provider'
 import { CapacitorHttp } from '@capacitor/core'
 import { Preferences } from '@capacitor/preferences'
 
@@ -286,7 +287,119 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
   })
 
   // ----------------------------------------------------------------
-  // 2. MobileCloudBackupService — 连接测试
+  // 2. WebDAVProvider — 桌面端真实协议路径
+  // ----------------------------------------------------------------
+
+  describe('WebDAVProvider（桌面端）', () => {
+    it('正确凭据连接会执行真实写入、读取和删除校验', async () => {
+      const provider = new WebDAVProvider({
+        id: 'desktop-cfg',
+        name: 'Desktop WebDAV',
+        type: 'webdav',
+        enabled: true,
+        url: server.baseUrl,
+        username: USERNAME,
+        password: PASSWORD,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+
+      await expect(provider.testConnection()).resolves.toBe(true)
+
+      const files = await provider.listFiles('/AI-Gist-Backup')
+      expect(files.some(file => file.name.startsWith('.ai-gist-webdav-test-'))).toBe(false)
+    })
+
+    it('错误凭据连接失败', async () => {
+      const provider = new WebDAVProvider({
+        id: 'desktop-bad',
+        name: 'Bad Desktop WebDAV',
+        type: 'webdav',
+        enabled: true,
+        url: server.baseUrl,
+        username: USERNAME,
+        password: 'wrongpass',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+
+      await expect(provider.testConnection()).resolves.toBe(false)
+    })
+
+    it('按 WebDAV 协议创建目录、上传、列出、读取和删除备份文件', async () => {
+      const provider = new WebDAVProvider({
+        id: 'desktop-flow',
+        name: 'Desktop Flow WebDAV',
+        type: 'webdav',
+        enabled: true,
+        url: server.baseUrl,
+        username: USERNAME,
+        password: PASSWORD,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+
+      await provider.initializeDirectories()
+
+      const filePath = '/AI-Gist-Backup/backup-desktop-provider.json'
+      const payload = Buffer.from(JSON.stringify(makeBackupPayload('desktop-provider-001')), 'utf-8')
+
+      await provider.writeFile(filePath, payload)
+
+      const files = await provider.listFiles('/AI-Gist-Backup')
+      expect(files.some(file => file.path.endsWith('/AI-Gist-Backup/backup-desktop-provider.json'))).toBe(true)
+
+      const remoteData = await provider.readFile(filePath)
+      expect(JSON.parse(remoteData.toString('utf-8')).id).toBe('desktop-provider-001')
+
+      await provider.deleteFile(filePath)
+      const filesAfterDelete = await provider.listFiles('/AI-Gist-Backup')
+      expect(filesAfterDelete.some(file => file.name === 'backup-desktop-provider.json')).toBe(false)
+    })
+
+    it('URL 已指向 AI-Gist-Backup 时不会重复追加备份目录', async () => {
+      const providerForRoot = new WebDAVProvider({
+        id: 'desktop-root',
+        name: 'Desktop Root WebDAV',
+        type: 'webdav',
+        enabled: true,
+        url: server.baseUrl,
+        username: USERNAME,
+        password: PASSWORD,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+      await providerForRoot.createDirectory('/AI-Gist-Backup')
+
+      const provider = new WebDAVProvider({
+        id: 'desktop-subdir',
+        name: 'Desktop Subdir WebDAV',
+        type: 'webdav',
+        enabled: true,
+        url: `${server.baseUrl}/AI-Gist-Backup`,
+        username: USERNAME,
+        password: PASSWORD,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+
+      expect(provider.getDefaultBackupDirectory()).toBe('')
+
+      const payload = Buffer.from(JSON.stringify(makeBackupPayload('desktop-subdir-001')), 'utf-8')
+      await provider.writeFile('/backup-desktop-subdir.json', payload)
+
+      const files = await provider.listFiles('/')
+      expect(files.some(file => file.name === 'backup-desktop-subdir.json')).toBe(true)
+
+      const remoteData = await provider.readFile('/backup-desktop-subdir.json')
+      expect(JSON.parse(remoteData.toString('utf-8')).id).toBe('desktop-subdir-001')
+
+      await provider.deleteFile('/backup-desktop-subdir.json')
+    })
+  })
+
+  // ----------------------------------------------------------------
+  // 3. MobileCloudBackupService — 连接测试
   // ----------------------------------------------------------------
 
   describe('WebDAV 连接测试（移动端）', () => {

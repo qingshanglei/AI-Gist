@@ -9,6 +9,8 @@ import { testDataGenerators } from '../helpers/test-utils'
 // ---- mock Capacitor ----
 
 const mockPreferences: Record<string, string> = {}
+const mockWebDavPropfind = vi.hoisted(() => vi.fn())
+const mockWebDavRequest = vi.hoisted(() => vi.fn())
 
 vi.mock('@capacitor/preferences', () => ({
   Preferences: {
@@ -42,6 +44,10 @@ vi.mock('@capacitor/core', () => ({
     propfind: vi.fn(),
     request: vi.fn(),
   })),
+}))
+
+vi.mock('@renderer/capacitor-bridge/webdav-native', () => ({
+  default: { propfind: mockWebDavPropfind, request: mockWebDavRequest },
 }))
 
 import { MobileCloudBackupService } from '~/lib/services/mobile-cloud-backup.service'
@@ -212,7 +218,7 @@ describe('MobileCloudBackupService', () => {
       await saveConfig(service)
 
       const backupFile = makeDesktopBackupFile('abc12345')
-      const xml = makePropfindXml([{ name: 'backup-abc12345.json', path: '/backup/backup-abc12345.json' }])
+      const xml = makePropfindXml([{ name: 'backup-abc12345.json', path: '/backup/AI-Gist-Backup/backup-abc12345.json' }])
 
       mockCapacitorHttp.request
         .mockResolvedValueOnce({ status: 207, data: xml })           // PROPFIND
@@ -237,7 +243,7 @@ describe('MobileCloudBackupService', () => {
       await saveConfig(service)
 
       const backupFile = makeDesktopBackupFile('abc12345')
-      const xml = makePropfindXml([{ name: 'backup-abc12345.json', path: '/backup/backup-abc12345.json' }])
+      const xml = makePropfindXml([{ name: 'backup-abc12345.json', path: '/backup/AI-Gist-Backup/backup-abc12345.json' }])
 
       mockCapacitorHttp.request
         .mockResolvedValueOnce({ status: 207, data: xml })
@@ -263,8 +269,9 @@ describe('MobileCloudBackupService', () => {
       expect(result.success).toBe(true)
       expect(result.backupInfo?.storageId).toBe('cfg-1')
 
-      const putCall = mockCapacitorHttp.request.mock.calls[0][0]
+      const putCall = mockCapacitorHttp.request.mock.calls.find(call => call[0].method === 'PUT')![0]
       expect(putCall.method).toBe('PUT')
+      expect(putCall.url).toContain('/AI-Gist-Backup/')
       expect(putCall.url.replace(/^https?:\/\//, '')).not.toContain('//')
     })
 
@@ -290,7 +297,7 @@ describe('MobileCloudBackupService', () => {
       await saveConfig(service)
 
       const desktopBackup = makeDesktopBackupFile('desktop-001')
-      const xml = makePropfindXml([{ name: 'backup-desktop-001.json', path: '/backup/backup-desktop-001.json' }])
+      const xml = makePropfindXml([{ name: 'backup-desktop-001.json', path: '/backup/AI-Gist-Backup/backup-desktop-001.json' }])
 
       mockCapacitorHttp.request
         .mockResolvedValueOnce({ status: 207, data: xml })           // list: PROPFIND
@@ -309,7 +316,7 @@ describe('MobileCloudBackupService', () => {
       await saveConfig(service)
 
       const desktopBackup = makeDesktopBackupFile('desktop-002')
-      const xml = makePropfindXml([{ name: 'backup-desktop-002.json', path: '/backup/backup-desktop-002.json' }])
+      const xml = makePropfindXml([{ name: 'backup-desktop-002.json', path: '/backup/AI-Gist-Backup/backup-desktop-002.json' }])
 
       mockCapacitorHttp.request
         .mockResolvedValueOnce({ status: 207, data: xml })
@@ -330,14 +337,15 @@ describe('MobileCloudBackupService', () => {
     it('完整的备份-恢复流程', async () => {
       await saveConfig(service)
 
-      // 备份（iOS 平台：只需 PUT，无 manifest 更新）
-      mockCapacitorHttp.request.mockResolvedValueOnce({ status: 201, data: '' })
+      mockCapacitorHttp.request
+        .mockResolvedValueOnce({ status: 201, data: '' }) // MKCOL backup directory
+        .mockResolvedValueOnce({ status: 201, data: '' }) // PUT backup file
       const backupResult = await service.createCloudBackup('cfg-1', mockExportData, '移动端备份')
       expect(backupResult.success).toBe(true)
 
       const backupId = backupResult.backupInfo!.id
       const mobileBackup = makeMobileBackupFile(backupId)
-      const xml = makePropfindXml([{ name: `backup-${backupId}.json`, path: `/backup/backup-${backupId}.json` }])
+      const xml = makePropfindXml([{ name: `backup-${backupId}.json`, path: `/backup/AI-Gist-Backup/backup-${backupId}.json` }])
 
       // 恢复
       mockCapacitorHttp.request
@@ -359,7 +367,7 @@ describe('MobileCloudBackupService', () => {
       await saveConfig(service)
 
       const backupFile = makeDesktopBackupFile('del-001')
-      const xml = makePropfindXml([{ name: 'backup-del-001.json', path: '/backup/backup-del-001.json' }])
+      const xml = makePropfindXml([{ name: 'backup-del-001.json', path: '/backup/AI-Gist-Backup/backup-del-001.json' }])
 
       mockCapacitorHttp.request
         .mockResolvedValueOnce({ status: 207, data: xml })
@@ -451,7 +459,7 @@ describe('MobileCloudBackupService', () => {
 })
 
 // ================================================================
-// Android 平台测试（manifest 方案）
+// Android 平台测试（原生 WebDAV PROPFIND）
 // ================================================================
 
 describe('MobileCloudBackupService — Android 平台', () => {
@@ -462,267 +470,99 @@ describe('MobileCloudBackupService — Android 平台', () => {
     service = MobileCloudBackupService.getInstance()
     Object.keys(mockPreferences).forEach(k => delete mockPreferences[k])
     vi.clearAllMocks()
-    // 切换到 Android 平台
     vi.spyOn(Capacitor, 'getPlatform').mockReturnValue('android')
   })
 
-  // ---- 获取备份列表 ----
+  it('通过原生 PROPFIND 获取备份列表', async () => {
+    await saveConfig(service)
 
-  describe('getCloudBackupList（Android manifest 方案）', () => {
-    it('从 manifest 获取备份列表', async () => {
-      await saveConfig(service)
+    const backupFile = makeDesktopBackupFile('android-001')
+    const xml = makePropfindXml([
+      { name: 'backup-android-001.json', path: '/backup/AI-Gist-Backup/backup-android-001.json' }
+    ])
 
-      const backupInfo = {
-        id: 'android-001',
-        name: 'backup-2026-03-15-android001',
-        description: 'Android 备份',
-        createdAt: new Date().toISOString(),
-        size: 1024,
-        cloudPath: '/backup-android-001.json',
-        storageId: 'cfg-1',
-      }
+    mockWebDavPropfind.mockResolvedValueOnce({ status: 207, body: xml })
+    mockCapacitorHttp.request.mockResolvedValueOnce({ status: 200, data: backupFile })
 
-      mockCapacitorHttp.request
-        .mockResolvedValueOnce({ status: 200, data: { backups: [backupInfo] } }) // GET manifest
+    const backups = await service.getCloudBackupList('cfg-1')
 
-      const backups = await service.getCloudBackupList('cfg-1')
-
-      expect(backups).toHaveLength(1)
-      expect(backups[0].id).toBe('android-001')
-      // 只发起 1 次请求（GET manifest），不使用 PROPFIND
-      expect(mockCapacitorHttp.request).toHaveBeenCalledTimes(1)
-      expect(mockCapacitorHttp.request.mock.calls[0][0].method).toBe('GET')
-    })
-
-    it('manifest 不存在（404）时返回空列表', async () => {
-      await saveConfig(service)
-      mockCapacitorHttp.request.mockResolvedValue({ status: 404, data: '' })
-
-      const backups = await service.getCloudBackupList('cfg-1')
-      expect(backups).toEqual([])
-    })
-
-    it('manifest 按创建时间倒序排列', async () => {
-      await saveConfig(service)
-
-      const older = {
-        id: 'b1', name: 'backup-1', description: '', storageId: 'cfg-1', size: 0, cloudPath: '/b1.json',
-        createdAt: new Date(Date.now() - 10000).toISOString(),
-      }
-      const newer = {
-        id: 'b2', name: 'backup-2', description: '', storageId: 'cfg-1', size: 0, cloudPath: '/b2.json',
-        createdAt: new Date().toISOString(),
-      }
-
-      // manifest 里旧的在前
-      mockCapacitorHttp.request
-        .mockResolvedValueOnce({ status: 200, data: { backups: [older, newer] } })
-
-      const backups = await service.getCloudBackupList('cfg-1')
-      expect(backups[0].id).toBe('b2') // 新的在前
-      expect(backups[1].id).toBe('b1')
-    })
+    expect(backups).toHaveLength(1)
+    expect(backups[0].id).toBe('android-001')
+    expect(mockWebDavPropfind).toHaveBeenCalledTimes(1)
   })
 
-  // ---- 创建备份 ----
+  it('PROPFIND 返回 404 时兼容扫描旧根目录', async () => {
+    await saveConfig(service)
 
-  describe('createCloudBackup（Android manifest 方案）', () => {
-    it('上传备份文件并更新 manifest', async () => {
-      await saveConfig(service)
+    const backupFile = makeDesktopBackupFile('legacy-001')
+    const legacyXml = makePropfindXml([
+      { name: 'backup-legacy-001.json', path: '/backup/backup-legacy-001.json' }
+    ])
 
-      mockCapacitorHttp.request
-        .mockResolvedValueOnce({ status: 201, data: '' })  // PUT backup file
-        .mockResolvedValueOnce({ status: 404, data: '' })  // GET manifest（首次，空）
-        .mockResolvedValueOnce({ status: 201, data: '' })  // PUT manifest
+    mockWebDavPropfind
+      .mockResolvedValueOnce({ status: 404, body: '' })
+      .mockResolvedValueOnce({ status: 207, body: legacyXml })
+    mockCapacitorHttp.request.mockResolvedValueOnce({ status: 200, data: backupFile })
 
-      const result = await service.createCloudBackup('cfg-1', mockExportData, 'Android 测试备份')
+    const backups = await service.getCloudBackupList('cfg-1')
 
-      expect(result.success).toBe(true)
-      expect(result.backupInfo?.storageId).toBe('cfg-1')
-
-      // 验证 3 次请求：PUT 文件、GET manifest、PUT manifest
-      expect(mockCapacitorHttp.request).toHaveBeenCalledTimes(3)
-      expect(mockCapacitorHttp.request.mock.calls[0][0].method).toBe('PUT')  // 备份文件
-      expect(mockCapacitorHttp.request.mock.calls[1][0].method).toBe('GET')  // 读 manifest
-      expect(mockCapacitorHttp.request.mock.calls[2][0].method).toBe('PUT')  // 写 manifest
-    })
-
-    it('manifest PUT 的 URL 包含 backup-manifest.json', async () => {
-      await saveConfig(service)
-
-      mockCapacitorHttp.request
-        .mockResolvedValueOnce({ status: 201, data: '' })
-        .mockResolvedValueOnce({ status: 404, data: '' })
-        .mockResolvedValueOnce({ status: 201, data: '' })
-
-      await service.createCloudBackup('cfg-1', mockExportData)
-
-      const manifestPutUrl: string = mockCapacitorHttp.request.mock.calls[2][0].url
-      expect(manifestPutUrl).toContain('backup-manifest.json')
-      expect(manifestPutUrl.replace(/^https?:\/\//, '')).not.toContain('//')
-    })
-
-    it('已有 manifest 时追加新条目', async () => {
-      await saveConfig(service)
-
-      const existing = {
-        id: 'existing-1', name: 'backup-existing', description: '', storageId: 'cfg-1',
-        size: 100, cloudPath: '/backup-existing.json', createdAt: new Date().toISOString(),
-      }
-
-      mockCapacitorHttp.request
-        .mockResolvedValueOnce({ status: 201, data: '' })                              // PUT backup file
-        .mockResolvedValueOnce({ status: 200, data: { backups: [existing] } })         // GET manifest
-        .mockResolvedValueOnce({ status: 201, data: '' })                              // PUT manifest
-
-      const result = await service.createCloudBackup('cfg-1', mockExportData, '新备份')
-      expect(result.success).toBe(true)
-
-      // 验证写入的 manifest 包含旧条目 + 新条目（共 2 条）
-      const putManifestBody = JSON.parse(mockCapacitorHttp.request.mock.calls[2][0].data)
-      expect(putManifestBody.backups).toHaveLength(2)
-      expect(putManifestBody.backups[0].id).toBe('existing-1')
-    })
+    expect(backups).toHaveLength(1)
+    expect(backups[0].cloudPath).toBe('/backup-legacy-001.json')
+    expect(mockWebDavPropfind).toHaveBeenCalledTimes(2)
   })
 
-  // ---- 恢复备份 ----
+  it('上传备份前通过原生插件创建默认目录', async () => {
+    await saveConfig(service)
 
-  describe('restoreCloudBackup（Android manifest 方案）', () => {
-    it('通过 manifest 找到备份并下载', async () => {
-      await saveConfig(service)
+    mockWebDavRequest.mockResolvedValueOnce({ status: 201, body: '' })
+    mockCapacitorHttp.request.mockResolvedValueOnce({ status: 201, data: '' })
 
-      const backupFile = makeDesktopBackupFile('android-restore-001')
-      const backupInfo = {
-        id: 'android-restore-001',
-        name: backupFile.name,
-        description: backupFile.description,
-        createdAt: backupFile.createdAt,
-        size: 1024,
-        cloudPath: '/backup-android-restore-001.json',
-        storageId: 'cfg-1',
-      }
+    const result = await service.createCloudBackup('cfg-1', mockExportData, 'Android 测试备份')
 
-      mockCapacitorHttp.request
-        .mockResolvedValueOnce({ status: 200, data: { backups: [backupInfo] } }) // GET manifest
-        .mockResolvedValueOnce({ status: 200, data: backupFile })                 // GET backup file
+    expect(result.success).toBe(true)
+    expect(mockWebDavRequest.mock.calls[0][0].method).toBe('MKCOL')
 
-      const result = await service.restoreCloudBackup('cfg-1', 'android-restore-001')
-
-      expect(result.success).toBe(true)
-      expect(result.data?.categories).toHaveLength(1)
-      expect(result.data?.prompts).toHaveLength(1)
-      // 共 2 次请求：GET manifest + GET 备份文件
-      expect(mockCapacitorHttp.request).toHaveBeenCalledTimes(2)
-    })
-
-    it('manifest 中不存在该备份 ID 时返回失败', async () => {
-      await saveConfig(service)
-
-      mockCapacitorHttp.request
-        .mockResolvedValueOnce({ status: 200, data: { backups: [] } }) // GET manifest（空）
-
-      const result = await service.restoreCloudBackup('cfg-1', 'nonexistent-id')
-      expect(result.success).toBe(false)
-    })
-
-    it('data 字段不嵌套（不是 { data: { data: ... } }）', async () => {
-      await saveConfig(service)
-
-      const backupFile = makeDesktopBackupFile('android-restore-002')
-      const backupInfo = {
-        id: 'android-restore-002', name: backupFile.name, description: '',
-        createdAt: backupFile.createdAt, size: 0,
-        cloudPath: '/backup-android-restore-002.json', storageId: 'cfg-1',
-      }
-
-      mockCapacitorHttp.request
-        .mockResolvedValueOnce({ status: 200, data: { backups: [backupInfo] } })
-        .mockResolvedValueOnce({ status: 200, data: backupFile })
-
-      const result = await service.restoreCloudBackup('cfg-1', 'android-restore-002')
-
-      expect(result.data?.data).toBeUndefined()
-      expect(result.data?.categories).toBeDefined()
-    })
+    const putCall = mockCapacitorHttp.request.mock.calls[0][0]
+    expect(putCall.method).toBe('PUT')
+    expect(putCall.url).toContain('/AI-Gist-Backup/')
   })
 
-  // ---- 删除备份 ----
+  it('通过 PROPFIND 找到备份并恢复 data', async () => {
+    await saveConfig(service)
 
-  describe('deleteCloudBackup（Android manifest 方案）', () => {
-    it('删除备份文件并从 manifest 移除条目', async () => {
-      await saveConfig(service)
+    const backupFile = makeDesktopBackupFile('android-restore-001')
+    const xml = makePropfindXml([
+      { name: 'backup-android-restore-001.json', path: '/backup/AI-Gist-Backup/backup-android-restore-001.json' }
+    ])
 
-      const backupInfo = {
-        id: 'android-del-001', name: 'backup-android-del-001', description: '',
-        createdAt: new Date().toISOString(), size: 1024,
-        cloudPath: '/backup-android-del-001.json', storageId: 'cfg-1',
-      }
+    mockWebDavPropfind.mockResolvedValueOnce({ status: 207, body: xml })
+    mockCapacitorHttp.request
+      .mockResolvedValueOnce({ status: 200, data: backupFile })
+      .mockResolvedValueOnce({ status: 200, data: backupFile })
 
-      mockCapacitorHttp.request
-        .mockResolvedValueOnce({ status: 200, data: { backups: [backupInfo] } }) // GET manifest（列表）
-        .mockResolvedValueOnce({ status: 204, data: '' })                         // DELETE 备份文件
-        .mockResolvedValueOnce({ status: 200, data: { backups: [backupInfo] } }) // GET manifest（更新前读取）
-        .mockResolvedValueOnce({ status: 201, data: '' })                         // PUT manifest
+    const result = await service.restoreCloudBackup('cfg-1', 'android-restore-001')
 
-      const result = await service.deleteCloudBackup('cfg-1', 'android-del-001')
-      expect(result.success).toBe(true)
-
-      // 验证 DELETE 请求
-      const deleteCall = mockCapacitorHttp.request.mock.calls[1][0]
-      expect(deleteCall.method).toBe('DELETE')
-
-      // 验证更新后的 manifest 不含已删除条目
-      const putManifestBody = JSON.parse(mockCapacitorHttp.request.mock.calls[3][0].data)
-      expect(putManifestBody.backups).toHaveLength(0)
-    })
-
-    it('备份不存在时返回失败', async () => {
-      await saveConfig(service)
-
-      mockCapacitorHttp.request
-        .mockResolvedValueOnce({ status: 200, data: { backups: [] } }) // GET manifest（空）
-
-      const result = await service.deleteCloudBackup('cfg-1', 'nonexistent-id')
-      expect(result.success).toBe(false)
-    })
+    expect(result.success).toBe(true)
+    expect(result.data?.data).toBeUndefined()
+    expect(result.data?.categories).toHaveLength(1)
   })
 
-  // ---- 端到端 ----
+  it('通过 PROPFIND 找到备份并删除文件', async () => {
+    await saveConfig(service)
 
-  describe('Android 端到端：备份 → 恢复 → 删除', () => {
-    it('完整流程', async () => {
-      await saveConfig(service)
+    const backupFile = makeDesktopBackupFile('android-del-001')
+    const xml = makePropfindXml([
+      { name: 'backup-android-del-001.json', path: '/backup/AI-Gist-Backup/backup-android-del-001.json' }
+    ])
 
-      // 1. 创建备份
-      mockCapacitorHttp.request
-        .mockResolvedValueOnce({ status: 201, data: '' })  // PUT backup file
-        .mockResolvedValueOnce({ status: 404, data: '' })  // GET manifest（首次空）
-        .mockResolvedValueOnce({ status: 201, data: '' })  // PUT manifest
+    mockWebDavPropfind.mockResolvedValueOnce({ status: 207, body: xml })
+    mockCapacitorHttp.request
+      .mockResolvedValueOnce({ status: 200, data: backupFile })
+      .mockResolvedValueOnce({ status: 204, data: '' })
 
-      const createResult = await service.createCloudBackup('cfg-1', mockExportData, 'Android 端到端')
-      expect(createResult.success).toBe(true)
-      const backupId = createResult.backupInfo!.id
-      const savedInfo = createResult.backupInfo!
+    const result = await service.deleteCloudBackup('cfg-1', 'android-del-001')
 
-      // 2. 恢复
-      const backupFile = makeMobileBackupFile(backupId)
-      mockCapacitorHttp.request
-        .mockResolvedValueOnce({ status: 200, data: { backups: [savedInfo] } }) // GET manifest
-        .mockResolvedValueOnce({ status: 200, data: backupFile })                // GET backup file
-
-      const restoreResult = await service.restoreCloudBackup('cfg-1', backupId)
-      expect(restoreResult.success).toBe(true)
-      expect(restoreResult.data?.categories).toHaveLength(1)
-
-      // 3. 删除
-      mockCapacitorHttp.request
-        .mockResolvedValueOnce({ status: 200, data: { backups: [savedInfo] } }) // GET manifest（列表）
-        .mockResolvedValueOnce({ status: 204, data: '' })                        // DELETE
-        .mockResolvedValueOnce({ status: 200, data: { backups: [savedInfo] } }) // GET manifest（更新前）
-        .mockResolvedValueOnce({ status: 201, data: '' })                        // PUT manifest
-
-      const deleteResult = await service.deleteCloudBackup('cfg-1', backupId)
-      expect(deleteResult.success).toBe(true)
-    })
+    expect(result.success).toBe(true)
+    expect(mockCapacitorHttp.request.mock.calls[1][0].method).toBe('DELETE')
   })
 })

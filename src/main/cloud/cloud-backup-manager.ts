@@ -28,6 +28,7 @@ const CONSTANTS = {
   CONFIG_DIR: '.ai-gist',
   BACKUP_FILE_EXTENSION: '.json',
   BACKUP_FILE_PREFIX: 'backup-',
+  WEBDAV_BACKUP_DIR: 'AI-Gist-Backup',
   ERROR_MESSAGES: {
     ICLOUD_PATH_EMPTY: 'iCloud 路径不能为空',
     CONFIG_NOT_FOUND: '配置不存在',
@@ -220,33 +221,28 @@ export class CloudBackupManager {
         
         const provider = this.createProvider(config);
         
-        // 对于WebDAV，确保目录已初始化
-        if (config.type === 'webdav' && provider.initializeDirectories) {
+        const searchPaths = this.getBackupSearchPaths(config);
+        const backupFilesByPath = new Map<string, any>();
+
+        for (const searchPath of searchPaths) {
           try {
-            console.log('正在初始化WebDAV目录...');
-            await provider.initializeDirectories();
-            console.log('WebDAV目录初始化完成');
+            console.log(`正在列出文件: ${searchPath || '/'}`);
+            const files = await provider.listFiles(searchPath || '/');
+            console.log(`找到 ${files.length} 个文件`);
+
+            for (const file of this.filterBackupFiles(files)) {
+              backupFilesByPath.set(file.path, file);
+            }
+
+            if (backupFilesByPath.size > 0) {
+              break;
+            }
           } catch (error) {
-            console.warn('WebDAV 目录初始化失败，继续尝试列出文件:', error);
+            console.warn(`列出云端备份目录失败: ${searchPath || '/'}`, error);
           }
         }
-        
-        console.log('正在列出文件...');
-        const files = await provider.listFiles();
-        console.log(`找到 ${files.length} 个文件`);
-        
-        // 对于WebDAV，尝试从备份目录列出文件
-        let backupFiles = this.filterBackupFiles(files);
-        if (config.type === 'webdav' && backupFiles.length === 0) {
-          console.log('从根目录未找到备份文件，尝试从备份目录列出...');
-          try {
-            const backupDirFiles = await provider.listFiles('/AI-Gist-Backup');
-            backupFiles = this.filterBackupFiles(backupDirFiles);
-            console.log(`从备份目录找到 ${backupFiles.length} 个备份文件`);
-          } catch (error) {
-            console.warn('从备份目录列出文件失败:', error);
-          }
-        }
+
+        const backupFiles = Array.from(backupFilesByPath.values());
         
         console.log(`过滤后找到 ${backupFiles.length} 个备份文件`);
         
@@ -570,31 +566,27 @@ export class CloudBackupManager {
    * @returns 备份文件对象
    */
   private async findBackupFile(provider: any, backupId: string): Promise<any> {
-    // 首先从根目录搜索
-    let files = await provider.listFiles();
-    let backupFile = files.find((file: any) => 
-      file.name.includes(backupId) && 
-      file.name.endsWith(CONSTANTS.BACKUP_FILE_EXTENSION)
-    );
+    const searchPaths = typeof provider.getDefaultBackupDirectory === 'function'
+      ? [provider.getDefaultBackupDirectory(), ''].filter((path, index, paths) => paths.indexOf(path) === index)
+      : [''];
 
-    // 如果没找到，尝试从备份目录搜索（适用于WebDAV）
-    if (!backupFile) {
+    for (const searchPath of searchPaths) {
       try {
-        const backupDirFiles = await provider.listFiles('/AI-Gist-Backup');
-        backupFile = backupDirFiles.find((file: any) => 
+        const files = await provider.listFiles(searchPath || '/');
+        const backupFile = files.find((file: any) =>
           file.name.includes(backupId) && 
           file.name.endsWith(CONSTANTS.BACKUP_FILE_EXTENSION)
         );
+
+        if (backupFile) {
+          return backupFile;
+        }
       } catch (error) {
-        console.warn('从备份目录搜索文件失败:', error);
+        console.warn(`搜索备份目录失败: ${searchPath || '/'}`, error);
       }
     }
 
-    if (!backupFile) {
-      throw new Error(CONSTANTS.ERROR_MESSAGES.BACKUP_FILE_NOT_FOUND);
-    }
-
-    return backupFile;
+    throw new Error(CONSTANTS.ERROR_MESSAGES.BACKUP_FILE_NOT_FOUND);
   }
 
   /**
@@ -705,8 +697,7 @@ export class CloudBackupManager {
   private getCloudPath(config: CloudStorageConfig, fileName: string): string {
     switch (config.type) {
       case 'webdav':
-        // 对于WebDAV，使用我们创建的备份目录
-        return `/AI-Gist-Backup/${fileName}`;
+        return this.getWebDAVBackupPath(config as WebDAVConfig, fileName);
       case 'icloud':
         return fileName;
       default:
@@ -762,5 +753,39 @@ export class CloudBackupManager {
    */
   private getErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : CONSTANTS.ERROR_MESSAGES.UNKNOWN_ERROR;
+  }
+
+  private getBackupSearchPaths(config: CloudStorageConfig): string[] {
+    if (config.type !== 'webdav') {
+      return [''];
+    }
+
+    const backupDir = this.getWebDAVBackupDirectory(config as WebDAVConfig);
+    return [backupDir, ''].filter((path, index, paths) => paths.indexOf(path) === index);
+  }
+
+  private getWebDAVBackupPath(config: WebDAVConfig, fileName: string): string {
+    return this.joinRemotePath(this.getWebDAVBackupDirectory(config), fileName);
+  }
+
+  private getWebDAVBackupDirectory(config: WebDAVConfig): string {
+    try {
+      const pathname = new URL(config.url).pathname.replace(/\/+$/, '');
+      if (pathname.split('/').filter(Boolean).pop() === CONSTANTS.WEBDAV_BACKUP_DIR) {
+        return '';
+      }
+    } catch {
+      // URL 格式错误会在 WebDAVProvider 的真实请求中返回明确失败。
+    }
+
+    return `/${CONSTANTS.WEBDAV_BACKUP_DIR}`;
+  }
+
+  private joinRemotePath(...parts: string[]): string {
+    const segments = parts
+      .flatMap(part => (part || '').split('/'))
+      .filter(Boolean);
+
+    return segments.length > 0 ? `/${segments.join('/')}` : '';
   }
 } 
