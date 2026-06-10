@@ -302,6 +302,7 @@ export class DatabaseServiceManager {
       const results = await Promise.allSettled([
         this.category.getBasicCategories(),
         this.prompt.getAllPromptsForTags(),
+        this.prompt.getAllPromptVariables(),
         this.prompt.getAllPromptHistories(),
         this.aiConfig.getAllAIConfigs(),
         this.aiGenerationHistory.getAllAIGenerationHistory(),
@@ -312,6 +313,7 @@ export class DatabaseServiceManager {
       const [
         categories,
         prompts,
+        promptVariables,
         promptHistories,
         aiConfigs,
         aiHistory,
@@ -320,7 +322,7 @@ export class DatabaseServiceManager {
         if (result.status === 'fulfilled') {
           return result.value || [];
         } else {
-          const tableNames = ['categories', 'prompts', 'promptHistories', 'aiConfigs', 'aiHistory', 'settings'];
+          const tableNames = ['categories', 'prompts', 'promptVariables', 'promptHistories', 'aiConfigs', 'aiHistory', 'settings'];
           console.warn(`获取 ${tableNames[index]} 数据失败:`, result.reason);
           return [];
         }
@@ -329,6 +331,7 @@ export class DatabaseServiceManager {
       const exportData = {
         categories: categories as any[],
         prompts: prompts as any[],
+        promptVariables: promptVariables as any[],
         promptHistories: promptHistories as any[],
         aiConfigs: aiConfigs as any[],
         aiHistory: aiHistory as any[],
@@ -338,6 +341,7 @@ export class DatabaseServiceManager {
       console.log('渲染进程: 数据导出完成', {
         分类数: exportData.categories.length,
         提示词数: exportData.prompts.length,
+        提示词变量数: exportData.promptVariables.length,
         提示词历史数: exportData.promptHistories.length,
         AI配置数: exportData.aiConfigs.length,
         AI历史数: exportData.aiHistory.length,
@@ -416,6 +420,7 @@ export class DatabaseServiceManager {
       
       // 确保导入数据具有完整的UUID
       data = this.ensureUUIDsInImportData(data);
+      const hasStandalonePromptVariables = Array.isArray(data.promptVariables);
       
       const details: Record<string, number> = {};
       let totalErrors = 0;
@@ -449,7 +454,12 @@ export class DatabaseServiceManager {
         console.log(`导入提示词数据: ${data.prompts.length} 条`);
         for (const prompt of data.prompts) {
           const oldPromptId = prompt.id;
-          const { id, ...promptDataWithoutId } = prompt;
+          const promptDataWithoutId = { ...prompt };
+          delete promptDataWithoutId.id;
+          delete promptDataWithoutId.category;
+          if (hasStandalonePromptVariables) {
+            delete promptDataWithoutId.variables;
+          }
           
           // 处理分类ID映射
           if (promptDataWithoutId.categoryId !== undefined) {
@@ -476,6 +486,33 @@ export class DatabaseServiceManager {
             }
           } catch (err) {
             console.warn('导入提示词数据失败:', prompt.id, err);
+            totalErrors++;
+          }
+        }
+      }
+
+      // 导入提示词变量数据（需要处理提示词 ID 映射）
+      if (data.promptVariables && data.promptVariables.length > 0) {
+        console.log(`导入提示词变量数据: ${data.promptVariables.length} 条`);
+        for (const variable of data.promptVariables) {
+          const variableDataWithoutId = { ...variable };
+          delete variableDataWithoutId.id;
+
+          if (variableDataWithoutId.promptId !== undefined) {
+            const newPromptId = idMapping[`prompt_${variableDataWithoutId.promptId}`];
+            if (newPromptId !== undefined) {
+              variableDataWithoutId.promptId = newPromptId;
+            } else {
+              console.warn(`未找到提示词变量的提示词ID映射: ${variableDataWithoutId.promptId}`);
+              totalErrors++;
+              continue;
+            }
+          }
+
+          try {
+            await this.prompt.createPromptVariableFromBackup(variableDataWithoutId);
+          } catch (err) {
+            console.warn('导入提示词变量数据失败:', variable.id, err);
             totalErrors++;
           }
         }
@@ -552,6 +589,7 @@ export class DatabaseServiceManager {
       // 统计导入结果
       details.categories = (data.categories?.length || 0);
       details.prompts = (data.prompts?.length || 0);
+      details.promptVariables = (data.promptVariables?.length || 0);
       details.promptHistories = (data.promptHistories?.length || 0);
       details.aiConfigs = (data.aiConfigs?.length || 0);
       details.aiHistory = (data.aiHistory?.length || 0);
@@ -608,6 +646,7 @@ export class DatabaseServiceManager {
       
       // 确保导入数据具有完整的UUID
       backupData = this.ensureUUIDsInImportData(backupData);
+      const hasStandalonePromptVariables = Array.isArray(backupData.promptVariables);
       
       // 清空现有数据表（如果支持的话）
       if (this.forceCleanAllTables) {
@@ -648,7 +687,12 @@ export class DatabaseServiceManager {
         console.log(`恢复提示词数据: ${backupData.prompts.length} 条`);
         for (const prompt of backupData.prompts) {
           const oldPromptId = prompt.id;
-          const { id, ...promptDataWithoutId } = prompt;
+          const promptDataWithoutId = { ...prompt };
+          delete promptDataWithoutId.id;
+          delete promptDataWithoutId.category;
+          if (hasStandalonePromptVariables) {
+            delete promptDataWithoutId.variables;
+          }
           
           // 处理分类ID映射
           if (promptDataWithoutId.categoryId !== undefined) {
@@ -675,6 +719,33 @@ export class DatabaseServiceManager {
             }
           } catch (err) {
             console.warn('恢复提示词数据失败:', prompt.id, err);
+            totalErrors++;
+          }
+        }
+      }
+
+      // 恢复提示词变量数据（需要处理提示词 ID 映射）
+      if (backupData.promptVariables && backupData.promptVariables.length > 0) {
+        console.log(`恢复提示词变量数据: ${backupData.promptVariables.length} 条`);
+        for (const variable of backupData.promptVariables) {
+          const variableDataWithoutId = { ...variable };
+          delete variableDataWithoutId.id;
+
+          if (variableDataWithoutId.promptId !== undefined) {
+            const newPromptId = idMapping[`prompt_${variableDataWithoutId.promptId}`];
+            if (newPromptId !== undefined) {
+              variableDataWithoutId.promptId = newPromptId;
+            } else {
+              console.warn(`未找到提示词变量的提示词ID映射: ${variableDataWithoutId.promptId}`);
+              totalErrors++;
+              continue;
+            }
+          }
+
+          try {
+            await this.prompt.createPromptVariableFromBackup(variableDataWithoutId);
+          } catch (err) {
+            console.warn('恢复提示词变量数据失败:', variable.id, err);
             totalErrors++;
           }
         }
@@ -753,6 +824,7 @@ export class DatabaseServiceManager {
       // 统计恢复结果
       details.categories = (backupData.categories?.length || 0);
       details.prompts = (backupData.prompts?.length || 0);
+      details.promptVariables = (backupData.promptVariables?.length || 0);
       details.promptHistories = (backupData.promptHistories?.length || 0);
       details.aiConfigs = (backupData.aiConfigs?.length || 0);
       details.aiHistory = (backupData.aiHistory?.length || 0);
@@ -1090,7 +1162,7 @@ export class DatabaseServiceManager {
     }
 
     // 需要UUID的数据类型
-    const syncableTypes = ['categories', 'prompts', 'promptVariables', 'promptHistories', 'aiConfigs', 'aiGenerationHistory'];
+    const syncableTypes = ['categories', 'prompts', 'promptVariables', 'promptHistories', 'aiConfigs', 'aiHistory', 'aiGenerationHistory'];
     
     for (const type of syncableTypes) {
       if (data[type] && Array.isArray(data[type])) {

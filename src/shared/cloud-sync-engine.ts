@@ -8,6 +8,7 @@
 export type CloudSyncCollectionName =
   | 'categories'
   | 'prompts'
+  | 'promptVariables'
   | 'promptHistories'
   | 'aiConfigs'
   | 'aiHistory'
@@ -16,6 +17,7 @@ export type CloudSyncCollectionName =
 export interface CloudSyncDataSet {
   categories?: any[];
   prompts?: any[];
+  promptVariables?: any[];
   promptHistories?: any[];
   aiConfigs?: any[];
   aiHistory?: any[];
@@ -84,6 +86,7 @@ export interface CloudSyncMergeOptions {
 const DEFAULT_COLLECTIONS: CloudSyncCollectionName[] = [
   'categories',
   'prompts',
+  'promptVariables',
   'promptHistories',
   'aiConfigs',
   'aiHistory',
@@ -93,6 +96,7 @@ const DEFAULT_COLLECTIONS: CloudSyncCollectionName[] = [
 const IDENTITY_FIELDS: Record<string, string[]> = {
   categories: ['uuid', 'id'],
   prompts: ['uuid', 'id'],
+  promptVariables: ['uuid', 'id'],
   promptHistories: ['uuid', 'id'],
   aiConfigs: ['uuid', 'configId', 'id'],
   aiHistory: ['uuid', 'historyId', 'id'],
@@ -501,7 +505,7 @@ function normalizeForCompare(collection: string, value: any): any {
       continue;
     }
 
-    if (key === 'promptId' && collection === 'promptHistories') {
+    if (key === 'promptId' && (collection === 'promptHistories' || collection === 'promptVariables')) {
       continue;
     }
 

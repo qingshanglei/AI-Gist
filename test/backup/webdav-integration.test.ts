@@ -101,6 +101,17 @@ let server: TestWebDAVServer
 const mockExportData = {
   categories: [testDataGenerators.createMockCategory({ id: 1 })],
   prompts:    [testDataGenerators.createMockPrompt({ id: 1, categoryId: 1 })],
+  promptVariables: [{
+    id: 1,
+    uuid: 'prompt-variable-1',
+    promptId: 1,
+    name: 'tone',
+    type: 'text',
+    defaultValue: 'friendly',
+    required: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }],
   aiConfigs:  [testDataGenerators.createMockAIConfig({ id: 1 })],
   aiHistory:  [],
   settings:   [{ key: 'theme', value: 'dark', type: 'string', description: '' }],
@@ -695,6 +706,7 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
           data: {
             categories: [],
             prompts: [],
+            promptVariables: [],
             promptHistories: [],
             aiConfigs: [],
             aiHistory: [],
@@ -843,6 +855,7 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
       expect(restoreResult.data).toBeDefined()
       expect(restoreResult.data.categories).toHaveLength(1)
       expect(restoreResult.data.prompts).toHaveLength(1)
+      expect(restoreResult.data.promptVariables).toHaveLength(1)
     })
 
     it('data 字段不嵌套（不是 { data: { data: ... } }）', async () => {
@@ -912,6 +925,7 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
       expect(restoreResult.success).toBe(true)
       expect(restoreResult.data.categories).toHaveLength(1)
       expect(restoreResult.data.prompts).toHaveLength(1)
+      expect(restoreResult.data.promptVariables).toHaveLength(1)
       expect(restoreResult.data.aiConfigs).toHaveLength(1)
 
       // 4. 删除

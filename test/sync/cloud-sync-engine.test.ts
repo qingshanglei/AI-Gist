@@ -56,6 +56,26 @@ describe('cloud sync engine', () => {
     expect(result.data.prompts).toHaveLength(1)
   })
 
+  it('merges prompt variables as first-class metadata', () => {
+    const local = {
+      promptVariables: [
+        { id: 1, uuid: 'variable-1', promptId: 1, name: 'tone', updatedAt: '2026-01-01T00:00:00.000Z' }
+      ]
+    }
+    const remote = {
+      promptVariables: [
+        { id: 99, uuid: 'variable-1', promptId: 9, name: 'tone', updatedAt: '2026-01-01T00:00:00.000Z' },
+        { id: 100, uuid: 'variable-2', promptId: 9, name: 'audience', updatedAt: '2026-01-02T00:00:00.000Z' }
+      ]
+    }
+
+    const result = mergeCloudSyncData(local, remote)
+
+    expect(getCloudSyncRecordKey('promptVariables', local.promptVariables[0])).toBe('uuid:variable-1')
+    expect(result.hasConflicts).toBe(false)
+    expect(result.data.promptVariables?.map(item => item.uuid).sort()).toEqual(['variable-1', 'variable-2'])
+  })
+
   it('applies remote-only changes against a shared base', () => {
     const base = {
       settings: [

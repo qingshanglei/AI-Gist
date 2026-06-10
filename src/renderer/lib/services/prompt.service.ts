@@ -618,6 +618,25 @@ export class PromptService extends BaseDatabaseService {
   }
 
   /**
+   * 获取所有提示词变量
+   * 用于备份和云同步导出独立变量集合，避免提示词变量元数据丢失。
+   */
+  async getAllPromptVariables(): Promise<PromptVariable[]> {
+    return this.getAll<PromptVariable>('promptVariables');
+  }
+
+  /**
+   * 从备份数据创建提示词变量
+   * 保留 UUID，便于跨设备同步时稳定识别同一变量。
+   */
+  async createPromptVariableFromBackup(data: Omit<PromptVariable, 'id'>): Promise<PromptVariable> {
+    return this.add<PromptVariable>('promptVariables', {
+      ...data,
+      uuid: data.uuid || generateUUID()
+    });
+  }
+
+  /**
    * 删除提示词变量
    * 删除指定的变量定义
    * @param id number 变量ID

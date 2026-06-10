@@ -22,6 +22,7 @@ class MemoryStorage {
 const baseData = {
   categories: [{ id: 1, uuid: 'cat-1', name: 'Base', updatedAt: '2026-01-01T00:00:00.000Z' }],
   prompts: [{ id: 1, uuid: 'prompt-1', title: 'Base', updatedAt: '2026-01-01T00:00:00.000Z' }],
+  promptVariables: [],
   promptHistories: [],
   aiConfigs: [],
   aiHistory: [],
@@ -143,6 +144,7 @@ describe('CloudSyncService', () => {
     const emptyLocalData = {
       categories: [],
       prompts: [],
+      promptVariables: [],
       promptHistories: [],
       aiConfigs: [],
       aiHistory: [],
@@ -303,6 +305,7 @@ describe('CloudSyncService', () => {
     const emptyLocalData = {
       categories: [],
       prompts: [],
+      promptVariables: [],
       promptHistories: [],
       aiConfigs: [],
       aiHistory: [],
