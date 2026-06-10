@@ -4,6 +4,7 @@ import type {
   ICloudConfig, 
   CloudBackupInfo 
 } from '@shared/types/cloud-backup';
+import type { CloudSyncManifest } from '@shared/cloud-sync-manifest';
 
 export class CloudBackupAPI {
   private static isElectronAvailable(): boolean {
@@ -140,4 +141,27 @@ export class CloudBackupAPI {
     }
     return await window.electronAPI.cloud.deleteBackup(storageId, backupId);
   }
-} 
+
+  /**
+   * 获取云同步 manifest
+   */
+  static async getCloudSyncManifest(storageId: string): Promise<CloudSyncManifest> {
+    if (!this.isElectronAvailable()) {
+      throw new Error('Electron API not available');
+    }
+    return await window.electronAPI.cloud.getSyncManifest(storageId);
+  }
+
+  /**
+   * 保存云同步 manifest
+   */
+  static async saveCloudSyncManifest(storageId: string, manifest: CloudSyncManifest): Promise<{
+    success: boolean;
+    error?: string;
+  }> {
+    if (!this.isElectronAvailable()) {
+      throw new Error('Electron API not available');
+    }
+    return await window.electronAPI.cloud.saveSyncManifest(storageId, manifest);
+  }
+}

@@ -5,6 +5,7 @@
 
 export const CLOUD_BACKUP_DIR = 'AI-Gist-Backup';
 export const CLOUD_BACKUP_MANIFEST_FILE = 'backup-manifest.json';
+export const CLOUD_SYNC_MANIFEST_FILE = 'sync-manifest.json';
 export const CLOUD_BACKUP_FILE_PREFIX = 'backup-';
 export const CLOUD_BACKUP_FILE_EXTENSION = '.json';
 
@@ -28,6 +29,10 @@ export function getCloudBackupFilePath(fileName: string): string {
 
 export function getCloudBackupManifestPath(): string {
   return getCloudBackupFilePath(CLOUD_BACKUP_MANIFEST_FILE);
+}
+
+export function getCloudSyncManifestPath(): string {
+  return getCloudBackupFilePath(CLOUD_SYNC_MANIFEST_FILE);
 }
 
 export function isCloudBackupFileName(name: string): boolean {

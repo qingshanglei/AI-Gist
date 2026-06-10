@@ -17,12 +17,18 @@ import {
   CloudRestoreResult 
 } from '@shared/types/cloud-backup';
 import {
+  CLOUD_SYNC_MANIFEST_FILE,
   CLOUD_BACKUP_FILE_EXTENSION,
   CLOUD_BACKUP_FILE_PREFIX,
   getCloudBackupDirectoryPath,
   getCloudBackupFilePath,
   isCloudBackupFileName
 } from '@shared/cloud-backup-paths';
+import type { CloudSyncManifest } from '@shared/cloud-sync-manifest';
+import {
+  createEmptyCloudSyncManifest,
+  normalizeCloudSyncManifest
+} from '@shared/cloud-sync-manifest';
 import { WebDAVProvider } from './webdav-provider';
 import { ICloudProvider } from './icloud-provider';
 import { DataManagementService } from '../data/data-management-service';
@@ -116,6 +122,7 @@ export class CloudBackupManager {
     this.setupAvailabilityHandlers();
     this.setupConfigManagementHandlers();
     this.setupBackupManagementHandlers();
+    this.setupSyncManifestHandlers();
   }
 
   /**
@@ -361,6 +368,34 @@ export class CloudBackupManager {
         return { 
           success: false, 
           error: this.getErrorMessage(error) 
+        };
+      }
+    });
+  }
+
+  /**
+   * 设置同步 manifest 处理器。
+   * manifest 是 WebDAV/iCloud 多端同步的稳定入口，不参与普通备份列表。
+   */
+  private setupSyncManifestHandlers(): void {
+    ipcMain.handle('cloud:get-sync-manifest', async (_, storageId: string) => {
+      try {
+        return await this.readCloudSyncManifest(storageId);
+      } catch (error) {
+        console.error('读取云同步 manifest 失败:', error);
+        throw new Error(`读取云同步 manifest 失败: ${this.getErrorMessage(error)}`);
+      }
+    });
+
+    ipcMain.handle('cloud:save-sync-manifest', async (_, storageId: string, manifest: CloudSyncManifest) => {
+      try {
+        await this.writeCloudSyncManifest(storageId, manifest);
+        return { success: true };
+      } catch (error) {
+        console.error('保存云同步 manifest 失败:', error);
+        return {
+          success: false,
+          error: this.getErrorMessage(error)
         };
       }
     });
@@ -689,6 +724,47 @@ export class CloudBackupManager {
     }
   }
 
+  /**
+   * 读取云同步 manifest。首次同步时 manifest 不存在，返回空 manifest。
+   */
+  private async readCloudSyncManifest(storageId: string): Promise<CloudSyncManifest> {
+    await this.loadConfigs();
+    const config = this.getStorageConfig(storageId);
+    const provider = this.createProvider(config);
+
+    try {
+      const data = await provider.readFile(this.getSyncManifestCloudPath(config));
+      return normalizeCloudSyncManifest(JSON.parse(data.toString()));
+    } catch (error) {
+      if (this.isNotFoundError(error)) {
+        return createEmptyCloudSyncManifest();
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * 写入云同步 manifest。
+   */
+  private async writeCloudSyncManifest(storageId: string, manifest: CloudSyncManifest): Promise<void> {
+    await this.loadConfigs();
+    const config = this.getStorageConfig(storageId);
+    const provider = this.createProvider(config);
+    const normalizedManifest = normalizeCloudSyncManifest({
+      ...manifest,
+      updatedAt: new Date().toISOString()
+    });
+
+    if (config.type === 'webdav' && provider.initializeDirectories) {
+      await provider.initializeDirectories();
+    }
+
+    await provider.writeFile(
+      this.getSyncManifestCloudPath(config),
+      Buffer.from(JSON.stringify(normalizedManifest, null, 2), 'utf-8')
+    );
+  }
+
   // ==================== 存储提供者管理 ====================
 
   /**
@@ -721,6 +797,17 @@ export class CloudBackupManager {
         return fileName;
       default:
         return fileName;
+    }
+  }
+
+  private getSyncManifestCloudPath(config: CloudStorageConfig): string {
+    switch (config.type) {
+      case 'webdav':
+        return this.getWebDAVBackupPath(config as WebDAVConfig, CLOUD_SYNC_MANIFEST_FILE);
+      case 'icloud':
+        return CLOUD_SYNC_MANIFEST_FILE;
+      default:
+        return CLOUD_SYNC_MANIFEST_FILE;
     }
   }
 
@@ -802,5 +889,10 @@ export class CloudBackupManager {
     } catch {
       return false;
     }
+  }
+
+  private isNotFoundError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /404|not\s*found|no such file|does not exist|ENOENT|不存在|未找到/i.test(message);
   }
 }

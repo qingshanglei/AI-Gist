@@ -19,12 +19,19 @@ import type {
 } from '@shared/types/cloud-backup'
 import {
   CLOUD_BACKUP_DIR,
+  CLOUD_SYNC_MANIFEST_FILE,
   getCloudBackupDirectoryPath,
   getCloudBackupFilePath,
+  getCloudSyncManifestPath,
   isCloudBackupFileName,
   joinCloudPath,
   normalizeCloudPath
 } from '@shared/cloud-backup-paths'
+import type { CloudSyncManifest } from '@shared/cloud-sync-manifest'
+import {
+  createEmptyCloudSyncManifest,
+  normalizeCloudSyncManifest
+} from '@shared/cloud-sync-manifest'
 
 const STORAGE_KEYS = {
   CONFIGS: 'cloud_backup_configs'
@@ -92,6 +99,15 @@ export class MobileCloudBackupService {
       console.error('获取存储配置失败:', error)
       return []
     }
+  }
+
+  private async getStorageConfigOrThrow(storageId: string): Promise<CloudStorageConfig> {
+    const configs = await this.getStorageConfigs()
+    const config = configs.find(c => c.id === storageId)
+    if (!config) {
+      throw new Error('存储配置不存在')
+    }
+    return config
   }
 
   /**
@@ -319,6 +335,57 @@ export class MobileCloudBackupService {
   }
 
   /**
+   * 获取云同步 manifest。文件不存在时返回空 manifest，表示首次同步。
+   */
+  async getCloudSyncManifest(storageId: string): Promise<CloudSyncManifest> {
+    const config = await this.getStorageConfigOrThrow(storageId)
+
+    if (config.type === 'webdav') {
+      return this.getWebDAVSyncManifest(config as any)
+    }
+
+    if (config.type === 'icloud') {
+      return this.getICloudSyncManifest(config as any)
+    }
+
+    throw new Error('不支持的存储类型')
+  }
+
+  /**
+   * 保存云同步 manifest。
+   */
+  async saveCloudSyncManifest(storageId: string, manifest: CloudSyncManifest): Promise<{
+    success: boolean
+    error?: string
+  }> {
+    try {
+      const config = await this.getStorageConfigOrThrow(storageId)
+      const normalizedManifest = normalizeCloudSyncManifest({
+        ...manifest,
+        updatedAt: new Date().toISOString()
+      })
+
+      if (config.type === 'webdav') {
+        await this.saveWebDAVSyncManifest(config as any, normalizedManifest)
+        return { success: true }
+      }
+
+      if (config.type === 'icloud') {
+        await this.saveICloudSyncManifest(config as any, normalizedManifest)
+        return { success: true }
+      }
+
+      return { success: false, error: '不支持的存储类型' }
+    } catch (error) {
+      console.error('保存云同步 manifest 失败:', error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : '保存云同步 manifest 失败'
+      }
+    }
+  }
+
+  /**
    * 列出 WebDAV 备份
    * Android：使用自定义原生插件（OkHttp），绕过 HttpURLConnection 的方法白名单和 CORS 限制
    * iOS/桌面：使用 CapacitorHttp（原生层，支持 PROPFIND）
@@ -446,6 +513,54 @@ export class MobileCloudBackupService {
     return backups
   }
 
+  private async getWebDAVSyncManifest(config: any): Promise<CloudSyncManifest> {
+    try {
+      const response = await CapacitorHttp.request({
+        url: this.buildWebDAVUrlFromCloudPath(config, getCloudSyncManifestPath()),
+        method: 'GET',
+        headers: {
+          'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
+        }
+      })
+
+      if (response.status === 404) {
+        return createEmptyCloudSyncManifest()
+      }
+
+      if (response.status !== 200) {
+        throw new Error(`读取云同步 manifest 失败（HTTP ${response.status}）`)
+      }
+
+      const data = typeof response.data === 'string'
+        ? JSON.parse(response.data)
+        : response.data
+      return normalizeCloudSyncManifest(data)
+    } catch (error) {
+      if (this.isNotFoundError(error)) {
+        return createEmptyCloudSyncManifest()
+      }
+      throw error
+    }
+  }
+
+  private async saveWebDAVSyncManifest(config: any, manifest: CloudSyncManifest): Promise<void> {
+    await this.ensureWebDAVBackupDirectory(config)
+
+    const response = await CapacitorHttp.request({
+      url: this.buildWebDAVUrlFromCloudPath(config, getCloudSyncManifestPath()),
+      method: 'PUT',
+      headers: {
+        'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`),
+        'Content-Type': 'application/json'
+      },
+      data: JSON.stringify(manifest, null, 2)
+    })
+
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`保存云同步 manifest 失败（HTTP ${response.status}）`)
+    }
+  }
+
   /**
    * 列出 iCloud 备份
    */
@@ -537,6 +652,63 @@ export class MobileCloudBackupService {
     } catch (error) {
       console.error('列出 iCloud 备份失败:', error)
       throw error
+    }
+  }
+
+  private async getICloudSyncManifest(config: any): Promise<CloudSyncManifest> {
+    const icloudCheck = await this.isICloudAvailable()
+    if (!icloudCheck.available) {
+      throw new Error(icloudCheck.reason || 'iCloud 不可用')
+    }
+
+    const dirPath = config.path || CLOUD_BACKUP_DIR
+    await this.ensureICloudDirectory(dirPath)
+
+    try {
+      const result = await Filesystem.readFile({
+        path: `${dirPath}/${CLOUD_SYNC_MANIFEST_FILE}`,
+        directory: Directory.Documents,
+        encoding: Encoding.UTF8
+      })
+
+      return normalizeCloudSyncManifest(JSON.parse(result.data as string))
+    } catch (error) {
+      if (this.isNotFoundError(error)) {
+        return createEmptyCloudSyncManifest()
+      }
+      throw error
+    }
+  }
+
+  private async saveICloudSyncManifest(config: any, manifest: CloudSyncManifest): Promise<void> {
+    const icloudCheck = await this.isICloudAvailable()
+    if (!icloudCheck.available) {
+      throw new Error(icloudCheck.reason || 'iCloud 不可用')
+    }
+
+    const dirPath = config.path || CLOUD_BACKUP_DIR
+    await this.ensureICloudDirectory(dirPath)
+
+    await Filesystem.writeFile({
+      path: `${dirPath}/${CLOUD_SYNC_MANIFEST_FILE}`,
+      data: JSON.stringify(manifest, null, 2),
+      directory: Directory.Documents,
+      encoding: Encoding.UTF8
+    })
+  }
+
+  private async ensureICloudDirectory(dirPath: string): Promise<void> {
+    try {
+      await Filesystem.stat({
+        path: dirPath,
+        directory: Directory.Documents
+      })
+    } catch {
+      await Filesystem.mkdir({
+        path: dirPath,
+        directory: Directory.Documents,
+        recursive: true
+      })
     }
   }
 
@@ -1270,6 +1442,11 @@ export class MobileCloudBackupService {
       seen.add(key)
       return true
     })
+  }
+
+  private isNotFoundError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error)
+    return /404|not\s*found|no such file|does not exist|不存在|未找到/i.test(message)
   }
 
   /**

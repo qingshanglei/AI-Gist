@@ -16,6 +16,7 @@ import type {
   CloudStorageConfig,
   CloudBackupInfo
 } from './cloud-backup';
+import type { CloudSyncManifest } from '../cloud-sync-manifest';
 
 /**
  * Electron API 接口定义
@@ -100,6 +101,8 @@ export default interface ElectronApi {
     createBackup: (storageId: string, description?: string) => Promise<{ success: boolean; message: string; backupInfo?: CloudBackupInfo; error?: string }>
     restoreBackup: (storageId: string, backupId: string) => Promise<{ success: boolean; message: string; backupInfo?: CloudBackupInfo; error?: string }>
     deleteBackup: (storageId: string, backupId: string) => Promise<{ success: boolean; message?: string; error?: string }>
+    getSyncManifest: (storageId: string) => Promise<CloudSyncManifest>
+    saveSyncManifest: (storageId: string, manifest: CloudSyncManifest) => Promise<{ success: boolean; error?: string }>
   }
 
   // 应用信息和更新
@@ -144,14 +147,14 @@ export default interface ElectronApi {
         successSites: number;
         failedSites: number;
       };
-      results: Array<{
+      results: {
         name: string;
         url: string;
         description: string;
         success: boolean;
         responseTime?: number;
         error?: string;
-      }>;
+      }[];
     }>
     getProxyInfo: (url?: string) => Promise<string>
     setProxyMode: (mode: 'direct' | 'system' | 'manual', config?: any) => Promise<{
@@ -211,4 +214,4 @@ declare global {
   interface Window {
     electronAPI: ElectronApi,
   }
-} 
+}

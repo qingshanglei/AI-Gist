@@ -57,6 +57,7 @@ import { MobileCloudBackupService } from '~/lib/services/mobile-cloud-backup.ser
 import { Filesystem } from '@capacitor/filesystem'
 import { Preferences } from '@capacitor/preferences'
 import { CapacitorHttp, Capacitor } from '@capacitor/core'
+import { createEmptyCloudSyncManifest } from '@shared/cloud-sync-manifest'
 
 const mockCapacitorHttp = CapacitorHttp as unknown as { request: ReturnType<typeof vi.fn> }
 
@@ -295,6 +296,51 @@ describe('MobileCloudBackupService', () => {
     it('存储配置不存在时返回错误', async () => {
       const result = await service.createCloudBackup('nonexistent', mockExportData)
       expect(result.success).toBe(false)
+    })
+  })
+
+  // ---- 云同步 manifest ----
+
+  describe('cloud sync manifest', () => {
+    it('WebDAV manifest 不存在时返回空 manifest', async () => {
+      await saveConfig(service)
+      mockCapacitorHttp.request.mockResolvedValueOnce({ status: 404, data: '' })
+
+      const manifest = await service.getCloudSyncManifest('cfg-1')
+
+      expect(manifest.schemaVersion).toBe(1)
+      expect(manifest.devices).toEqual({})
+      expect(manifest.conflicts).toEqual([])
+    })
+
+    it('保存 WebDAV manifest 到统一目录', async () => {
+      await saveConfig(service)
+      const manifest = createEmptyCloudSyncManifest('2026-03-12T00:00:00.000Z')
+      mockCapacitorHttp.request
+        .mockResolvedValueOnce({ status: 201, data: '' })
+        .mockResolvedValueOnce({ status: 201, data: '' })
+
+      const result = await service.saveCloudSyncManifest('cfg-1', manifest)
+
+      expect(result.success).toBe(true)
+      const putCall = mockCapacitorHttp.request.mock.calls.find((call: any[]) => call[0].method === 'PUT')![0]
+      expect(putCall.url).toContain('/AI-Gist-Backup/sync-manifest.json')
+      expect(JSON.parse(putCall.data).kind).toBe('ai-gist-cloud-sync-manifest')
+    })
+
+    it('iCloud manifest 使用配置目录下的 sync-manifest.json', async () => {
+      await saveConfig(service, {
+        ...webdavConfig,
+        id: 'cfg-icloud',
+        type: 'icloud',
+        path: 'AI-Gist-Backup'
+      } as any)
+
+      const manifest = createEmptyCloudSyncManifest('2026-03-12T00:00:00.000Z')
+      const result = await service.saveCloudSyncManifest('cfg-icloud', manifest)
+
+      expect(result.success).toBe(true)
+      expect((Filesystem.writeFile as any).mock.calls[0][0].path).toBe('AI-Gist-Backup/sync-manifest.json')
     })
   })
 

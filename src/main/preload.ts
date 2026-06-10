@@ -142,6 +142,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
     createBackup: (storageId: string, description?: string) => ipcRenderer.invoke('cloud:create-backup', storageId, description),
     restoreBackup: (storageId: string, backupId: string) => ipcRenderer.invoke('cloud:restore-backup', storageId, backupId),
     deleteBackup: (storageId: string, backupId: string) => ipcRenderer.invoke('cloud:delete-backup', storageId, backupId),
+    getSyncManifest: (storageId: string) => ipcRenderer.invoke('cloud:get-sync-manifest', storageId),
+    saveSyncManifest: (storageId: string, manifest: any) => ipcRenderer.invoke('cloud:save-sync-manifest', storageId, manifest),
   },
   // 应用信息和更新
   app: {

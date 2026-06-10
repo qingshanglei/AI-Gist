@@ -67,6 +67,7 @@ import { MobileCloudBackupService } from '~/lib/services/mobile-cloud-backup.ser
 import { WebDAVProvider } from '../../src/main/cloud/webdav-provider'
 import { CapacitorHttp } from '@capacitor/core'
 import { Preferences } from '@capacitor/preferences'
+import { createEmptyCloudSyncManifest } from '@shared/cloud-sync-manifest'
 
 const mockHttp = CapacitorHttp as unknown as { request: ReturnType<typeof vi.fn> }
 
@@ -602,7 +603,37 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
   })
 
   // ----------------------------------------------------------------
-  // 5. 恢复备份（GET）
+  // 5. 云同步 manifest（PUT + GET）
+  // ----------------------------------------------------------------
+
+  describe('cloud sync manifest', () => {
+    it('保存后能从本地 WebDAV 服务读取同一份 manifest', async () => {
+      const service = MobileCloudBackupService.getInstance()
+      await saveConfig(service)
+
+      const manifest = {
+        ...createEmptyCloudSyncManifest('2026-03-15T00:00:00.000Z'),
+        latestSnapshot: {
+          schemaVersion: 1 as const,
+          deviceId: 'ios-device',
+          revision: 'rev-1',
+          createdAt: '2026-03-15T00:00:00.000Z',
+          data: mockExportData
+        }
+      }
+
+      const saveResult = await service.saveCloudSyncManifest('cfg-real', manifest)
+      expect(saveResult.success).toBe(true)
+
+      const loaded = await service.getCloudSyncManifest('cfg-real')
+      expect(loaded.kind).toBe('ai-gist-cloud-sync-manifest')
+      expect(loaded.latestSnapshot?.revision).toBe('rev-1')
+      expect(loaded.latestSnapshot?.data.prompts).toHaveLength(1)
+    })
+  })
+
+  // ----------------------------------------------------------------
+  // 6. 恢复备份（GET）
   // ----------------------------------------------------------------
 
   describe('restoreCloudBackup', () => {
