@@ -65,11 +65,28 @@ vi.mock('@capacitor/core', () => ({
 
 import { MobileCloudBackupService } from '~/lib/services/mobile-cloud-backup.service'
 import { WebDAVProvider } from '../../src/main/cloud/webdav-provider'
+import { CloudSyncService } from '~/lib/services/cloud-sync.service'
 import { CapacitorHttp } from '@capacitor/core'
 import { Preferences } from '@capacitor/preferences'
 import { createEmptyCloudSyncManifest } from '@shared/cloud-sync-manifest'
 
 const mockHttp = CapacitorHttp as unknown as { request: ReturnType<typeof vi.fn> }
+
+class MemoryStorage {
+  private values = new Map<string, string>()
+
+  getItem(key: string): string | null {
+    return this.values.get(key) || null
+  }
+
+  setItem(key: string, value: string): void {
+    this.values.set(key, value)
+  }
+
+  removeItem(key: string): void {
+    this.values.delete(key)
+  }
+}
 
 // ---- 服务器配置 ----
 
@@ -633,7 +650,99 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
   })
 
   // ----------------------------------------------------------------
-  // 6. 恢复备份（GET）
+  // 6. 云同步协调器（本地 WebDAV，设备 A 上传 → 设备 B 拉取）
+  // ----------------------------------------------------------------
+
+  describe('cloud sync coordinator', () => {
+    it('设备 A 上传后，设备 B 作为新设备能从同一 WebDAV manifest 拉取完整数据', async () => {
+      const storageId = 'cfg-sync'
+      const service = MobileCloudBackupService.getInstance()
+      await Preferences.set({
+        key: 'cloud_backup_configs',
+        value: JSON.stringify([{
+          id: storageId,
+          name: 'Sync WebDAV',
+          type: 'webdav',
+          enabled: true,
+          url: `${server.baseUrl}/sync-coordinator-${Date.now()}`,
+          username: USERNAME,
+          password: PASSWORD,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }]),
+      })
+
+      const syncData = {
+        ...mockExportData,
+        promptHistories: [],
+        syncTombstones: []
+      }
+      const deviceADatabase = {
+        exportAllDataForSync: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'ok',
+          data: syncData
+        }),
+        replaceAllData: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'ok'
+        })
+      }
+      const deviceBDatabase = {
+        exportAllDataForSync: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'ok',
+          data: {
+            categories: [],
+            prompts: [],
+            promptHistories: [],
+            aiConfigs: [],
+            aiHistory: [],
+            settings: [],
+            syncTombstones: []
+          }
+        }),
+        replaceAllData: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'ok'
+        })
+      }
+
+      const deviceA = new CloudSyncService({
+        cloudClient: service,
+        database: deviceADatabase,
+        storage: new MemoryStorage(),
+        createDeviceId: () => 'device-a'
+      })
+      const deviceB = new CloudSyncService({
+        cloudClient: service,
+        database: deviceBDatabase,
+        storage: new MemoryStorage(),
+        createDeviceId: () => 'device-b'
+      })
+
+      const uploadResult = await deviceA.syncNow(storageId, {
+        deviceName: 'iPhone A',
+        platform: 'ios'
+      })
+      expect(uploadResult.success).toBe(true)
+      expect(uploadResult.action).toBe('uploaded')
+
+      const downloadResult = await deviceB.syncNow(storageId, {
+        deviceName: 'iPad B',
+        platform: 'ios'
+      })
+      expect(downloadResult.success).toBe(true)
+      expect(downloadResult.action).toBe('downloaded')
+      expect(deviceBDatabase.replaceAllData).toHaveBeenCalledWith(expect.objectContaining({
+        categories: expect.arrayContaining([expect.objectContaining({ uuid: mockExportData.categories[0].uuid })]),
+        prompts: expect.arrayContaining([expect.objectContaining({ uuid: mockExportData.prompts[0].uuid })])
+      }))
+    })
+  })
+
+  // ----------------------------------------------------------------
+  // 7. 恢复备份（GET）
   // ----------------------------------------------------------------
 
   describe('restoreCloudBackup', () => {

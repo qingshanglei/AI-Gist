@@ -36,6 +36,14 @@
                                         </template>
                                         {{ t('cloudBackup.refreshBackupList') }}
                                     </NButton>
+                                    <NButton secondary @click="syncCloudData(config.id)" :loading="loading.syncNow">
+                                        <template #icon>
+                                            <NIcon>
+                                                <Refresh />
+                                            </NIcon>
+                                        </template>
+                                        立即同步
+                                    </NButton>
                                 </NFlex>
 
                                 <!-- 云端备份列表 -->
@@ -330,6 +338,7 @@ import {
 import { ref, computed, onMounted, watch } from "vue";
 import { useI18n } from 'vue-i18n';
 import { CloudBackupAPI } from "@/lib/api/cloud-backup.api";
+import { cloudSyncService } from "@/lib/services/cloud-sync.service";
 import type { CloudStorageConfig, CloudBackupInfo } from "@shared/types/cloud-backup";
 
 const message = useMessage();
@@ -346,6 +355,7 @@ const loading = ref({
     createBackup: false,
     restoreBackup: false,
     refreshList: false,
+    syncNow: false,
     checkICloud: false,
 });
 
@@ -692,6 +702,29 @@ const createCloudBackup = async (storageId?: string) => {
     }
 };
 
+const syncCloudData = async (storageId?: string) => {
+    const targetStorageId = storageId || activeTabKey.value;
+    if (!targetStorageId) return;
+
+    loading.value.syncNow = true;
+    try {
+        const result = await cloudSyncService.syncNow(targetStorageId, {
+            platform: 'electron'
+        });
+
+        if (result.success) {
+            message.success(getSyncResultMessage(result.action, result.conflicts.length));
+        } else {
+            message.error(getFriendlySyncError(result.error));
+        }
+    } catch (error) {
+        console.error('云同步失败:', error);
+        message.error(getFriendlySyncError(error instanceof Error ? error.message : String(error)));
+    } finally {
+        loading.value.syncNow = false;
+    }
+};
+
 const restoreCloudBackup = async (storageId: string, backupId: string) => {
     loading.value.restoreBackup = true;
     try {
@@ -710,6 +743,28 @@ const restoreCloudBackup = async (storageId: string, backupId: string) => {
     } finally {
         loading.value.restoreBackup = false;
     }
+};
+
+const getSyncResultMessage = (action?: string, conflictCount = 0): string => {
+    const suffix = conflictCount > 0 ? `，已自动处理 ${conflictCount} 个冲突` : '';
+    if (action === 'uploaded') return `同步完成，已上传本机数据${suffix}`;
+    if (action === 'downloaded') return `同步完成，已更新本机数据${suffix}`;
+    if (action === 'merged') return `同步完成，已合并本机和云端数据${suffix}`;
+    return `同步完成，数据已是最新${suffix}`;
+};
+
+const getFriendlySyncError = (error?: string): string => {
+    if (!error) return '同步失败，请稍后重试';
+    if (error.includes('401') || error.includes('Unauthorized') || error.includes('403')) {
+        return '存储服务认证失败，请检查用户名和密码是否正确';
+    }
+    if (error.includes('Network') || error.includes('network') || error.includes('ECONNREFUSED') || error.includes('ENOTFOUND')) {
+        return '无法连接到存储服务器，请检查网络连接和服务器地址';
+    }
+    if (error.includes('数据库') || error.includes('database')) {
+        return '读取或写入本地数据失败，请重启应用后再试';
+    }
+    return `同步失败：${error}`;
 };
 
 const deleteCloudBackup = async (storageId: string, backupId: string) => {

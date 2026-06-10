@@ -293,5 +293,60 @@ describe('DatabaseServiceManager', () => {
       expect(cleanSpy).toHaveBeenCalled()
       expect(result.success).toBe(true)
     })
+
+    it('恢复同步删除标记，避免删除记录在下次同步复活', async () => {
+      const restoredTombstones: any[] = []
+      const cleanSpy = vi.spyOn(manager, 'forceCleanAllTables').mockResolvedValue()
+      mockCategoryService.db = createMockDbWithSyncTombstones(restoredTombstones)
+
+      const result = await manager.replaceAllData({
+        ...makeExportData(),
+        syncTombstones: [mockSyncTombstone]
+      })
+
+      expect(cleanSpy).toHaveBeenCalled()
+      expect(result.success).toBe(true)
+      expect(result.details?.syncTombstones).toBe(1)
+      expect(restoredTombstones).toHaveLength(1)
+      expect(restoredTombstones[0]).toMatchObject({
+        collectionName: 'prompts',
+        recordKey: 'uuid:prompt-1',
+        recordUuid: 'prompt-1'
+      })
+      expect(restoredTombstones[0].id).toBeUndefined()
+      expect(restoredTombstones[0].deletedAt).toBeInstanceOf(Date)
+    })
   })
 })
+
+function createMockDbWithSyncTombstones(restoredTombstones: any[]) {
+  return {
+    objectStoreNames: {
+      contains: vi.fn((storeName: string) => storeName === 'syncTombstones')
+    },
+    transaction: vi.fn(() => {
+      const transaction: any = {
+        error: null,
+        oncomplete: null,
+        onerror: null,
+        onabort: null,
+        objectStore: vi.fn(() => ({
+          add: vi.fn((record: any) => {
+            restoredTombstones.push(record)
+            const request = createSuccessfulRequest()
+            setTimeout(() => transaction.oncomplete?.(), 0)
+            return request
+          })
+        }))
+      }
+      return transaction
+    }),
+    version: 1
+  }
+}
+
+function createSuccessfulRequest() {
+  const request: any = {}
+  setTimeout(() => request.onsuccess?.(), 0)
+  return request
+}

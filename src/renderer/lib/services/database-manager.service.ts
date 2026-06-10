@@ -747,6 +747,8 @@ export class DatabaseServiceManager {
           }
         }
       }
+
+      const restoredTombstones = await this.restoreSyncTombstones(backupData.syncTombstones || []);
       
       // 统计恢复结果
       details.categories = (backupData.categories?.length || 0);
@@ -755,6 +757,9 @@ export class DatabaseServiceManager {
       details.aiConfigs = (backupData.aiConfigs?.length || 0);
       details.aiHistory = (backupData.aiHistory?.length || 0);
       details.settings = (backupData.settings?.length || 0);
+      if (restoredTombstones > 0) {
+        details.syncTombstones = restoredTombstones;
+      }
       
       const totalRestored = Object.values(details).reduce((sum, count) => sum + count, 0);
       
@@ -860,6 +865,56 @@ export class DatabaseServiceManager {
       console.error('获取数据库连接失败:', error);
       return null;
     }
+  }
+
+  private async restoreSyncTombstones(syncTombstones: any[]): Promise<number> {
+    if (!Array.isArray(syncTombstones) || syncTombstones.length === 0) {
+      return 0;
+    }
+
+    const db = await this.getDatabase();
+    if (!db || !db.objectStoreNames.contains('syncTombstones')) {
+      return 0;
+    }
+
+    const validTombstones = syncTombstones
+      .filter(tombstone =>
+        tombstone &&
+        typeof tombstone.collectionName === 'string' &&
+        typeof tombstone.recordKey === 'string'
+      )
+      .map(tombstone => {
+        const dataWithoutId = { ...tombstone };
+        delete dataWithoutId.id;
+        return {
+          ...dataWithoutId,
+          deletedAt: tombstone.deletedAt ? new Date(tombstone.deletedAt) : new Date()
+        };
+      });
+
+    if (validTombstones.length === 0) {
+      return 0;
+    }
+
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(['syncTombstones'], 'readwrite');
+      const store = transaction.objectStore('syncTombstones');
+      let restoredCount = 0;
+
+      transaction.oncomplete = () => resolve(restoredCount);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+
+      for (const tombstone of validTombstones) {
+        const request = store.add(tombstone);
+        request.onsuccess = () => {
+          restoredCount++;
+        };
+        request.onerror = () => {
+          console.warn('恢复同步删除标记失败:', request.error);
+        };
+      }
+    });
   }
 
   /**

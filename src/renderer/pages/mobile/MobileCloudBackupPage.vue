@@ -156,6 +156,10 @@
               <ion-icon :icon="cloudUploadOutline" slot="start"></ion-icon>
               {{ t('cloudBackup.createCloudBackup') }}
             </ion-button>
+            <ion-button expand="block" fill="outline" @click="syncCloudData" :disabled="loading.syncNow">
+              <ion-icon :icon="syncOutline" slot="start"></ion-icon>
+              立即同步
+            </ion-button>
           </div>
 
           <!-- 备份列表 -->
@@ -241,10 +245,12 @@ import {
   documentOutline,
   folderOpenOutline,
   refreshOutline,
-  createOutline
+  createOutline,
+  syncOutline
 } from 'ionicons/icons'
 import { useI18n } from '~/composables/useI18n'
 import { mobileCloudBackupService } from '~/lib/services/mobile-cloud-backup.service'
+import { cloudSyncService } from '~/lib/services/cloud-sync.service'
 import { databaseService } from '~/lib/db'
 import { presentMobileToast } from '~/lib/utils/mobile-toast'
 import type { CloudStorageConfig, CloudBackupInfo } from '@shared/types/cloud-backup'
@@ -274,7 +280,8 @@ const configForm = ref({
 
 const loading = ref({
   createBackup: false,
-  restoreBackup: false
+  restoreBackup: false,
+  syncNow: false
 })
 
 const isConfigValid = computed(() => {
@@ -517,6 +524,38 @@ const createBackup = async () => {
   }
 }
 
+// 立即同步
+const syncCloudData = async () => {
+  if (!selectedConfig.value) return
+
+  const loadingEl = await loadingController.create({
+    message: '正在同步'
+  })
+
+  loading.value.syncNow = true
+
+  try {
+    await loadingEl.present()
+
+    const result = await cloudSyncService.syncNow(selectedConfig.value.id, {
+      platform,
+      deviceName: navigator.userAgent
+    })
+
+    if (result.success) {
+      showToast(getSyncResultMessage(result.action, result.conflicts.length))
+    } else {
+      showToast(getFriendlySyncError(result.error), 'danger')
+    }
+  } catch (error) {
+    console.error('云同步失败:', error)
+    showToast(getFriendlySyncError(error instanceof Error ? error.message : String(error)), 'danger')
+  } finally {
+    await loadingEl.dismiss()
+    loading.value.syncNow = false
+  }
+}
+
 // 恢复备份
 const restoreBackup = async (backup: CloudBackupInfo) => {
   const alert = await alertController.create({
@@ -652,6 +691,28 @@ const formatSize = (size: number) => {
   if (size < 1024) return `${size} B`
   if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
   return `${(size / (1024 * 1024)).toFixed(1)} MB`
+}
+
+const getSyncResultMessage = (action?: string, conflictCount = 0): string => {
+  const suffix = conflictCount > 0 ? `，已自动处理 ${conflictCount} 个冲突` : ''
+  if (action === 'uploaded') return `同步完成，已上传本机数据${suffix}`
+  if (action === 'downloaded') return `同步完成，已更新本机数据${suffix}`
+  if (action === 'merged') return `同步完成，已合并本机和云端数据${suffix}`
+  return `同步完成，数据已是最新${suffix}`
+}
+
+const getFriendlySyncError = (error?: string): string => {
+  if (!error) return '同步失败，请稍后重试'
+  if (error.includes('401') || error.includes('Unauthorized') || error.includes('403')) {
+    return '存储服务认证失败，请检查用户名和密码是否正确'
+  }
+  if (error.includes('ECONNREFUSED') || error.includes('Network') || error.includes('network') || error.includes('fetch')) {
+    return '无法连接到存储服务器，请检查网络连接和服务器地址'
+  }
+  if (error.includes('数据库') || error.includes('database')) {
+    return '读取或写入本地数据失败，请重启应用后再试'
+  }
+  return `同步失败：${error}`
 }
 
 // 将技术错误转换为用户友好的备份错误提示
