@@ -47,7 +47,10 @@ vi.mock('@capacitor/core', () => ({
 }))
 
 vi.mock('@renderer/capacitor-bridge/webdav-native', () => ({
-  default: { propfind: mockWebDavPropfind, request: mockWebDavRequest },
+  default: {
+    propfind: mockWebDavPropfind,
+    request: mockWebDavRequest,
+  },
 }))
 
 import { MobileCloudBackupService } from '~/lib/services/mobile-cloud-backup.service'
@@ -137,6 +140,8 @@ describe('MobileCloudBackupService', () => {
     service = MobileCloudBackupService.getInstance()
     Object.keys(mockPreferences).forEach(k => delete mockPreferences[k])
     vi.clearAllMocks()
+    mockWebDavPropfind.mockResolvedValue({ status: 404, body: '' })
+    mockWebDavRequest.mockResolvedValue({ status: 201, body: '' })
   })
 
   // ---- 配置管理 ----
@@ -223,6 +228,7 @@ describe('MobileCloudBackupService', () => {
       mockCapacitorHttp.request
         .mockResolvedValueOnce({ status: 207, data: xml })           // PROPFIND
         .mockResolvedValueOnce({ status: 200, data: backupFile })    // GET file
+        .mockResolvedValueOnce({ status: 404, data: '' })            // legacy PROPFIND
 
       const backups = await service.getCloudBackupList('cfg-1')
 
@@ -248,12 +254,14 @@ describe('MobileCloudBackupService', () => {
       mockCapacitorHttp.request
         .mockResolvedValueOnce({ status: 207, data: xml })
         .mockResolvedValueOnce({ status: 200, data: backupFile })
+        .mockResolvedValueOnce({ status: 404, data: '' })
 
       await service.getCloudBackupList('cfg-1')
 
       // 第二次调用是 GET 文件，协议头之后不应有双斜杠
       const getUrl = mockCapacitorHttp.request.mock.calls[1][0].url
       expect(getUrl.replace(/^https?:\/\//, '')).not.toContain('//')
+      expect(getUrl).toContain('/AI-Gist-Backup/')
     })
   })
 
@@ -269,10 +277,10 @@ describe('MobileCloudBackupService', () => {
       expect(result.success).toBe(true)
       expect(result.backupInfo?.storageId).toBe('cfg-1')
 
-      const putCall = mockCapacitorHttp.request.mock.calls.find(call => call[0].method === 'PUT')![0]
+      const putCall = mockCapacitorHttp.request.mock.calls.find((call: any[]) => call[0].method === 'PUT')![0]
       expect(putCall.method).toBe('PUT')
-      expect(putCall.url).toContain('/AI-Gist-Backup/')
       expect(putCall.url.replace(/^https?:\/\//, '')).not.toContain('//')
+      expect(putCall.url).toContain('/AI-Gist-Backup/')
     })
 
     it('上传失败（401）时返回错误', async () => {
@@ -302,6 +310,7 @@ describe('MobileCloudBackupService', () => {
       mockCapacitorHttp.request
         .mockResolvedValueOnce({ status: 207, data: xml })           // list: PROPFIND
         .mockResolvedValueOnce({ status: 200, data: desktopBackup }) // list: GET metadata
+        .mockResolvedValueOnce({ status: 404, data: '' })            // list: legacy PROPFIND
         .mockResolvedValueOnce({ status: 200, data: desktopBackup }) // restore: download
 
       const result = await service.restoreCloudBackup('cfg-1', 'desktop-001')
@@ -321,6 +330,7 @@ describe('MobileCloudBackupService', () => {
       mockCapacitorHttp.request
         .mockResolvedValueOnce({ status: 207, data: xml })
         .mockResolvedValueOnce({ status: 200, data: desktopBackup })
+        .mockResolvedValueOnce({ status: 404, data: '' })
         .mockResolvedValueOnce({ status: 200, data: desktopBackup })
 
       const result = await service.restoreCloudBackup('cfg-1', 'desktop-002')
@@ -338,8 +348,8 @@ describe('MobileCloudBackupService', () => {
       await saveConfig(service)
 
       mockCapacitorHttp.request
-        .mockResolvedValueOnce({ status: 201, data: '' }) // MKCOL backup directory
-        .mockResolvedValueOnce({ status: 201, data: '' }) // PUT backup file
+        .mockResolvedValueOnce({ status: 201, data: '' }) // MKCOL
+        .mockResolvedValueOnce({ status: 201, data: '' }) // PUT
       const backupResult = await service.createCloudBackup('cfg-1', mockExportData, '移动端备份')
       expect(backupResult.success).toBe(true)
 
@@ -351,6 +361,7 @@ describe('MobileCloudBackupService', () => {
       mockCapacitorHttp.request
         .mockResolvedValueOnce({ status: 207, data: xml })
         .mockResolvedValueOnce({ status: 200, data: mobileBackup })
+        .mockResolvedValueOnce({ status: 404, data: '' })
         .mockResolvedValueOnce({ status: 200, data: mobileBackup })
 
       const restoreResult = await service.restoreCloudBackup('cfg-1', backupId)
@@ -372,12 +383,13 @@ describe('MobileCloudBackupService', () => {
       mockCapacitorHttp.request
         .mockResolvedValueOnce({ status: 207, data: xml })
         .mockResolvedValueOnce({ status: 200, data: backupFile })
+        .mockResolvedValueOnce({ status: 404, data: '' })
         .mockResolvedValueOnce({ status: 204, data: '' }) // DELETE
 
       const result = await service.deleteCloudBackup('cfg-1', 'del-001')
       expect(result.success).toBe(true)
 
-      const deleteCall = mockCapacitorHttp.request.mock.calls[2][0]
+      const deleteCall = mockCapacitorHttp.request.mock.calls.find((call: any[]) => call[0].method === 'DELETE')![0]
       expect(deleteCall.method).toBe('DELETE')
     })
   })
@@ -459,7 +471,7 @@ describe('MobileCloudBackupService', () => {
 })
 
 // ================================================================
-// Android 平台测试（原生 WebDAV PROPFIND）
+// Android 平台测试（原生 WebDAV 请求）
 // ================================================================
 
 describe('MobileCloudBackupService — Android 平台', () => {
@@ -471,9 +483,11 @@ describe('MobileCloudBackupService — Android 平台', () => {
     Object.keys(mockPreferences).forEach(k => delete mockPreferences[k])
     vi.clearAllMocks()
     vi.spyOn(Capacitor, 'getPlatform').mockReturnValue('android')
+    mockWebDavPropfind.mockResolvedValue({ status: 404, body: '' })
+    mockWebDavRequest.mockResolvedValue({ status: 201, body: '' })
   })
 
-  it('通过原生 PROPFIND 获取备份列表', async () => {
+  it('通过原生 PROPFIND 从统一目录获取备份列表', async () => {
     await saveConfig(service)
 
     const backupFile = makeDesktopBackupFile('android-001')
@@ -481,14 +495,17 @@ describe('MobileCloudBackupService — Android 平台', () => {
       { name: 'backup-android-001.json', path: '/backup/AI-Gist-Backup/backup-android-001.json' }
     ])
 
-    mockWebDavPropfind.mockResolvedValueOnce({ status: 207, body: xml })
+    mockWebDavPropfind
+      .mockResolvedValueOnce({ status: 207, body: xml })
+      .mockResolvedValueOnce({ status: 404, body: '' })
     mockCapacitorHttp.request.mockResolvedValueOnce({ status: 200, data: backupFile })
 
     const backups = await service.getCloudBackupList('cfg-1')
 
     expect(backups).toHaveLength(1)
     expect(backups[0].id).toBe('android-001')
-    expect(mockWebDavPropfind).toHaveBeenCalledTimes(1)
+    expect(backups[0].cloudPath).toContain('/AI-Gist-Backup/')
+    expect(mockWebDavPropfind).toHaveBeenCalled()
   })
 
   it('PROPFIND 返回 404 时兼容扫描旧根目录', async () => {
@@ -511,23 +528,20 @@ describe('MobileCloudBackupService — Android 平台', () => {
     expect(mockWebDavPropfind).toHaveBeenCalledTimes(2)
   })
 
-  it('上传备份前通过原生插件创建默认目录', async () => {
+  it('创建备份时用原生 MKCOL 建目录，并通过 PUT 写入统一目录', async () => {
     await saveConfig(service)
-
-    mockWebDavRequest.mockResolvedValueOnce({ status: 201, body: '' })
     mockCapacitorHttp.request.mockResolvedValueOnce({ status: 201, data: '' })
 
     const result = await service.createCloudBackup('cfg-1', mockExportData, 'Android 测试备份')
 
     expect(result.success).toBe(true)
     expect(mockWebDavRequest.mock.calls[0][0].method).toBe('MKCOL')
-
-    const putCall = mockCapacitorHttp.request.mock.calls[0][0]
-    expect(putCall.method).toBe('PUT')
+    const putCall = mockCapacitorHttp.request.mock.calls.find((call: any[]) => call[0].method === 'PUT')![0]
     expect(putCall.url).toContain('/AI-Gist-Backup/')
+    expect(result.backupInfo?.cloudPath).toContain('/AI-Gist-Backup/')
   })
 
-  it('通过 PROPFIND 找到备份并恢复 data', async () => {
+  it('通过原生 PROPFIND 找到备份并下载恢复', async () => {
     await saveConfig(service)
 
     const backupFile = makeDesktopBackupFile('android-restore-001')
@@ -535,7 +549,9 @@ describe('MobileCloudBackupService — Android 平台', () => {
       { name: 'backup-android-restore-001.json', path: '/backup/AI-Gist-Backup/backup-android-restore-001.json' }
     ])
 
-    mockWebDavPropfind.mockResolvedValueOnce({ status: 207, body: xml })
+    mockWebDavPropfind
+      .mockResolvedValueOnce({ status: 207, body: xml })
+      .mockResolvedValueOnce({ status: 404, body: '' })
     mockCapacitorHttp.request
       .mockResolvedValueOnce({ status: 200, data: backupFile })
       .mockResolvedValueOnce({ status: 200, data: backupFile })
@@ -543,11 +559,11 @@ describe('MobileCloudBackupService — Android 平台', () => {
     const result = await service.restoreCloudBackup('cfg-1', 'android-restore-001')
 
     expect(result.success).toBe(true)
-    expect(result.data?.data).toBeUndefined()
     expect(result.data?.categories).toHaveLength(1)
+    expect(result.data?.data).toBeUndefined()
   })
 
-  it('通过 PROPFIND 找到备份并删除文件', async () => {
+  it('删除备份时删除统一目录内的文件', async () => {
     await saveConfig(service)
 
     const backupFile = makeDesktopBackupFile('android-del-001')
@@ -555,7 +571,9 @@ describe('MobileCloudBackupService — Android 平台', () => {
       { name: 'backup-android-del-001.json', path: '/backup/AI-Gist-Backup/backup-android-del-001.json' }
     ])
 
-    mockWebDavPropfind.mockResolvedValueOnce({ status: 207, body: xml })
+    mockWebDavPropfind
+      .mockResolvedValueOnce({ status: 207, body: xml })
+      .mockResolvedValueOnce({ status: 404, body: '' })
     mockCapacitorHttp.request
       .mockResolvedValueOnce({ status: 200, data: backupFile })
       .mockResolvedValueOnce({ status: 204, data: '' })
@@ -563,6 +581,7 @@ describe('MobileCloudBackupService — Android 平台', () => {
     const result = await service.deleteCloudBackup('cfg-1', 'android-del-001')
 
     expect(result.success).toBe(true)
-    expect(mockCapacitorHttp.request.mock.calls[1][0].method).toBe('DELETE')
+    const deleteCall = mockCapacitorHttp.request.mock.calls.find((call: any[]) => call[0].method === 'DELETE')![0]
+    expect(deleteCall.url).toContain('/AI-Gist-Backup/')
   })
 })

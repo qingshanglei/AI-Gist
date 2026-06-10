@@ -16,6 +16,13 @@ import {
   CloudBackupResult, 
   CloudRestoreResult 
 } from '@shared/types/cloud-backup';
+import {
+  CLOUD_BACKUP_FILE_EXTENSION,
+  CLOUD_BACKUP_FILE_PREFIX,
+  getCloudBackupDirectoryPath,
+  getCloudBackupFilePath,
+  isCloudBackupFileName
+} from '@shared/cloud-backup-paths';
 import { WebDAVProvider } from './webdav-provider';
 import { ICloudProvider } from './icloud-provider';
 import { DataManagementService } from '../data/data-management-service';
@@ -26,9 +33,8 @@ import { DataManagementService } from '../data/data-management-service';
 const CONSTANTS = {
   CONFIG_FILE: 'cloud-config.json',
   CONFIG_DIR: '.ai-gist',
-  BACKUP_FILE_EXTENSION: '.json',
-  BACKUP_FILE_PREFIX: 'backup-',
-  WEBDAV_BACKUP_DIR: 'AI-Gist-Backup',
+  BACKUP_FILE_EXTENSION: CLOUD_BACKUP_FILE_EXTENSION,
+  BACKUP_FILE_PREFIX: CLOUD_BACKUP_FILE_PREFIX,
   ERROR_MESSAGES: {
     ICLOUD_PATH_EMPTY: 'iCloud 路径不能为空',
     CONFIG_NOT_FOUND: '配置不存在',
@@ -221,28 +227,19 @@ export class CloudBackupManager {
         
         const provider = this.createProvider(config);
         
-        const searchPaths = this.getBackupSearchPaths(config);
-        const backupFilesByPath = new Map<string, any>();
-
-        for (const searchPath of searchPaths) {
+        // 对于WebDAV，确保目录已初始化
+        if (config.type === 'webdav' && provider.initializeDirectories) {
           try {
-            console.log(`正在列出文件: ${searchPath || '/'}`);
-            const files = await provider.listFiles(searchPath || '/');
-            console.log(`找到 ${files.length} 个文件`);
-
-            for (const file of this.filterBackupFiles(files)) {
-              backupFilesByPath.set(file.path, file);
-            }
-
-            if (backupFilesByPath.size > 0) {
-              break;
-            }
+            console.log('正在初始化WebDAV目录...');
+            await provider.initializeDirectories();
+            console.log('WebDAV目录初始化完成');
           } catch (error) {
-            console.warn(`列出云端备份目录失败: ${searchPath || '/'}`, error);
+            console.warn('WebDAV 目录初始化失败，继续尝试列出文件:', error);
           }
         }
-
-        const backupFiles = Array.from(backupFilesByPath.values());
+        
+        console.log('正在列出文件...');
+        const backupFiles = await this.listBackupCandidateFiles(provider, config);
         
         console.log(`过滤后找到 ${backupFiles.length} 个备份文件`);
         
@@ -324,7 +321,7 @@ export class CloudBackupManager {
       try {
         const config = this.getStorageConfig(storageId);
         const provider = this.createProvider(config);
-        const backupFile = await this.findBackupFile(provider, backupId);
+        const backupFile = await this.findBackupFile(provider, config, backupId);
         const backupInfo = await this.readBackupData(provider, backupFile);
         await this.restoreBackupData(backupInfo);
         
@@ -352,7 +349,7 @@ export class CloudBackupManager {
       try {
         const config = this.getStorageConfig(storageId);
         const provider = this.createProvider(config);
-        const backupFile = await this.findBackupFile(provider, backupId);
+        const backupFile = await this.findBackupFile(provider, config, backupId);
         await provider.deleteFile(backupFile.path);
         
         return { 
@@ -512,10 +509,42 @@ export class CloudBackupManager {
    * @returns 备份文件列表
    */
   private filterBackupFiles(files: any[]): any[] {
-    return files.filter(file => 
-      file.name.endsWith(CONSTANTS.BACKUP_FILE_EXTENSION) && 
-      !file.isDirectory
-    );
+    return files.filter(file => isCloudBackupFileName(file.name) && !file.isDirectory);
+  }
+
+  /**
+   * 列出可能包含备份文件的位置。
+   * WebDAV 新版本统一使用 /AI-Gist-Backup，旧版本曾直接写入配置 URL 根目录。
+   */
+  private async listBackupCandidateFiles(provider: any, config: CloudStorageConfig): Promise<any[]> {
+    const backupFiles: any[] = [];
+    const searchPaths = this.getBackupSearchPaths(provider, config);
+
+    for (const searchPath of searchPaths) {
+      try {
+        const files = await provider.listFiles(searchPath || '/');
+        const filtered = this.filterBackupFiles(files);
+        console.log(`从 ${searchPath || '/'} 找到 ${filtered.length} 个备份文件`);
+        backupFiles.push(...filtered);
+      } catch (error) {
+        console.warn(`从 ${searchPath || '/'} 列出备份文件失败:`, error);
+      }
+    }
+
+    return this.dedupeFilesByPath(backupFiles);
+  }
+
+  /**
+   * 按远端路径去重，避免标准目录和旧目录搜索返回同一文件。
+   */
+  private dedupeFilesByPath(files: any[]): any[] {
+    const seen = new Set<string>();
+    return files.filter(file => {
+      const key = file.path || file.name;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
 
   /**
@@ -565,28 +594,18 @@ export class CloudBackupManager {
    * @param backupId 备份ID
    * @returns 备份文件对象
    */
-  private async findBackupFile(provider: any, backupId: string): Promise<any> {
-    const searchPaths = typeof provider.getDefaultBackupDirectory === 'function'
-      ? [provider.getDefaultBackupDirectory(), ''].filter((path, index, paths) => paths.indexOf(path) === index)
-      : [''];
+  private async findBackupFile(provider: any, config: CloudStorageConfig, backupId: string): Promise<any> {
+    const files = await this.listBackupCandidateFiles(provider, config);
+    const backupFile = files.find((file: any) =>
+      file.name.includes(backupId) &&
+      file.name.endsWith(CONSTANTS.BACKUP_FILE_EXTENSION)
+    );
 
-    for (const searchPath of searchPaths) {
-      try {
-        const files = await provider.listFiles(searchPath || '/');
-        const backupFile = files.find((file: any) =>
-          file.name.includes(backupId) && 
-          file.name.endsWith(CONSTANTS.BACKUP_FILE_EXTENSION)
-        );
-
-        if (backupFile) {
-          return backupFile;
-        }
-      } catch (error) {
-        console.warn(`搜索备份目录失败: ${searchPath || '/'}`, error);
-      }
+    if (!backupFile) {
+      throw new Error(CONSTANTS.ERROR_MESSAGES.BACKUP_FILE_NOT_FOUND);
     }
 
-    throw new Error(CONSTANTS.ERROR_MESSAGES.BACKUP_FILE_NOT_FOUND);
+    return backupFile;
   }
 
   /**
@@ -755,37 +774,33 @@ export class CloudBackupManager {
     return error instanceof Error ? error.message : CONSTANTS.ERROR_MESSAGES.UNKNOWN_ERROR;
   }
 
-  private getBackupSearchPaths(config: CloudStorageConfig): string[] {
+  private getBackupSearchPaths(provider: any, config: CloudStorageConfig): string[] {
     if (config.type !== 'webdav') {
       return [''];
     }
 
-    const backupDir = this.getWebDAVBackupDirectory(config as WebDAVConfig);
-    return [backupDir, ''].filter((path, index, paths) => paths.indexOf(path) === index);
+    const backupDir = typeof provider.getDefaultBackupDirectory === 'function'
+      ? provider.getDefaultBackupDirectory()
+      : getCloudBackupDirectoryPath();
+    const paths = [backupDir, ''].filter((searchPath): searchPath is string => typeof searchPath === 'string');
+    return paths.filter((searchPath, index) => paths.indexOf(searchPath) === index);
   }
 
   private getWebDAVBackupPath(config: WebDAVConfig, fileName: string): string {
-    return this.joinRemotePath(this.getWebDAVBackupDirectory(config), fileName);
-  }
-
-  private getWebDAVBackupDirectory(config: WebDAVConfig): string {
-    try {
-      const pathname = new URL(config.url).pathname.replace(/\/+$/, '');
-      if (pathname.split('/').filter(Boolean).pop() === CONSTANTS.WEBDAV_BACKUP_DIR) {
-        return '';
-      }
-    } catch {
-      // URL 格式错误会在 WebDAVProvider 的真实请求中返回明确失败。
+    if (this.isWebDAVUrlAtBackupDir(config.url)) {
+      return `/${fileName.replace(/^\/+/, '')}`;
     }
 
-    return `/${CONSTANTS.WEBDAV_BACKUP_DIR}`;
+    return getCloudBackupFilePath(fileName);
   }
 
-  private joinRemotePath(...parts: string[]): string {
-    const segments = parts
-      .flatMap(part => (part || '').split('/'))
-      .filter(Boolean);
-
-    return segments.length > 0 ? `/${segments.join('/')}` : '';
+  private isWebDAVUrlAtBackupDir(url: string): boolean {
+    try {
+      const directoryName = getCloudBackupDirectoryPath().split('/').filter(Boolean).pop();
+      const pathname = new URL(url).pathname.replace(/\/+$/, '');
+      return pathname.split('/').filter(Boolean).pop() === directoryName;
+    } catch {
+      return false;
+    }
   }
-} 
+}

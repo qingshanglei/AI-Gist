@@ -17,17 +17,25 @@ import type {
   CloudRestoreResult,
   CloudFileInfo
 } from '@shared/types/cloud-backup'
+import {
+  CLOUD_BACKUP_DIR,
+  getCloudBackupDirectoryPath,
+  getCloudBackupFilePath,
+  isCloudBackupFileName,
+  joinCloudPath,
+  normalizeCloudPath
+} from '@shared/cloud-backup-paths'
 
 const STORAGE_KEYS = {
   CONFIGS: 'cloud_backup_configs'
 }
 
-const WEBDAV_BACKUP_DIR = 'AI-Gist-Backup'
-
 export class MobileCloudBackupService {
   private static instance: MobileCloudBackupService
 
-  private constructor() { }
+  private constructor() {
+    // Singleton service.
+  }
 
   static getInstance(): MobileCloudBackupService {
     if (!MobileCloudBackupService.instance) {
@@ -316,24 +324,17 @@ export class MobileCloudBackupService {
    * iOS/桌面：使用 CapacitorHttp（原生层，支持 PROPFIND）
    */
   private async listWebDAVBackups(config: any): Promise<CloudBackupInfo[]> {
-    const baseUrl = this.normalizeBaseUrl(config.url)
-
     try {
-      const locations = this.getWebDAVDiscoveryLocations(baseUrl)
-      const backupsById = new Map<string, CloudBackupInfo>()
+      const standardBackups = await this.discoverWebDAVBackupsViaPropfind(
+        config,
+        this.getWebDAVBackupBaseUrl(config),
+        'standard'
+      )
+      const legacyBackups = this.isWebDAVUrlAtBackupDir(config.url)
+        ? []
+        : await this.discoverWebDAVBackupsViaPropfind(config, this.normalizeBaseUrl(config.url), 'legacy')
 
-      for (const location of locations) {
-        const backups = await this.discoverWebDAVBackupsViaPropfind(config, location.url, location.pathPrefix)
-        for (const backup of backups) {
-          backupsById.set(backup.id, backup)
-        }
-
-        if (backupsById.size > 0) {
-          break
-        }
-      }
-
-      return Array.from(backupsById.values())
+      return this.dedupeBackups([...standardBackups, ...legacyBackups])
         .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     } catch (error) {
       console.error('列出 WebDAV 备份失败:', error)
@@ -349,7 +350,7 @@ export class MobileCloudBackupService {
   private async discoverWebDAVBackupsViaPropfind(
     config: any,
     baseUrl: string,
-    pathPrefix: string = ''
+    layout: 'standard' | 'legacy'
   ): Promise<CloudBackupInfo[]> {
     const platform = Capacitor.getPlatform()
 
@@ -393,15 +394,12 @@ export class MobileCloudBackupService {
     }
 
     const files = this.parseWebDAVResponse(xmlData, baseUrl)
-    const backupFiles = files.filter(file =>
-      file.name.endsWith('.json') && file.name.startsWith('backup-') && file.name !== 'backup-manifest.json'
-    )
+    const backupFiles = files.filter(file => isCloudBackupFileName(file.name))
 
     const backups: CloudBackupInfo[] = []
     for (const file of backupFiles) {
       try {
-        const filePath = this.joinWebDAVPath(pathPrefix, file.path)
-        const fileUrl = this.buildWebDAVFileUrl(config.url, filePath)
+        const fileUrl = this.joinUrlPath(baseUrl, file.path)
 
         const fileResponse = await CapacitorHttp.request({
           url: fileUrl,
@@ -432,7 +430,9 @@ export class MobileCloudBackupService {
             description: backupData.description,
             createdAt: backupData.createdAt,
             size: actualSize,
-            cloudPath: filePath,
+            cloudPath: layout === 'standard'
+              ? getCloudBackupFilePath(file.name)
+              : joinCloudPath(file.name),
             storageId: config.id
           })
         } else {
@@ -456,7 +456,7 @@ export class MobileCloudBackupService {
         throw new Error(icloudCheck.reason)
       }
 
-      const dirPath = config.path || 'AI-Gist-Backup'
+      const dirPath = config.path || CLOUD_BACKUP_DIR
 
       // 检查目录是否存在
       let dirExists = false
@@ -504,7 +504,7 @@ export class MobileCloudBackupService {
       const backups: CloudBackupInfo[] = []
 
       for (const file of result.files) {
-        if (file.name && file.name.endsWith('.json') && file.name.startsWith('backup-')) {
+        if (file.name && isCloudBackupFileName(file.name)) {
           try {
             // 读取备份文件
             const fileResult = await Filesystem.readFile({
@@ -580,11 +580,9 @@ export class MobileCloudBackupService {
 
       console.log('WebDAV 响应数量:', responses.length)
 
-      for (let i = 0; i < responses.length; i++) {
-        const response = responses[i]
-
+      for (const response of Array.from(responses)) {
         // 获取 href
-        let hrefElement = response.getElementsByTagName('d:href')[0] ||
+        const hrefElement = response.getElementsByTagName('d:href')[0] ||
           response.getElementsByTagName('D:href')[0] ||
           response.getElementsByTagName('href')[0]
 
@@ -594,21 +592,21 @@ export class MobileCloudBackupService {
         console.log('处理文件 href:', href)
 
         // 获取 propstat
-        let propstat = response.getElementsByTagName('d:propstat')[0] ||
+        const propstat = response.getElementsByTagName('d:propstat')[0] ||
           response.getElementsByTagName('D:propstat')[0] ||
           response.getElementsByTagName('propstat')[0]
 
         if (!propstat) continue
 
         // 获取 prop
-        let prop = propstat.getElementsByTagName('d:prop')[0] ||
+        const prop = propstat.getElementsByTagName('d:prop')[0] ||
           propstat.getElementsByTagName('D:prop')[0] ||
           propstat.getElementsByTagName('prop')[0]
 
         if (!prop) continue
 
         // 检查是否是目录
-        let resourcetype = prop.getElementsByTagName('d:resourcetype')[0] ||
+        const resourcetype = prop.getElementsByTagName('d:resourcetype')[0] ||
           prop.getElementsByTagName('D:resourcetype')[0] ||
           prop.getElementsByTagName('resourcetype')[0]
 
@@ -658,7 +656,7 @@ export class MobileCloudBackupService {
         const name = normalizedPath.split('/').filter(Boolean).pop() || ''
 
         // 获取文件大小
-        let contentlength = prop.getElementsByTagName('d:getcontentlength')[0] ||
+        const contentlength = prop.getElementsByTagName('d:getcontentlength')[0] ||
           prop.getElementsByTagName('D:getcontentlength')[0] ||
           prop.getElementsByTagName('getcontentlength')[0] ||
           prop.getElementsByTagName('lp1:getcontentlength')[0] ||
@@ -671,7 +669,7 @@ export class MobileCloudBackupService {
         }
 
         // 获取修改时间
-        let lastmodified = prop.getElementsByTagName('d:getlastmodified')[0] ||
+        const lastmodified = prop.getElementsByTagName('d:getlastmodified')[0] ||
           prop.getElementsByTagName('D:getlastmodified')[0] ||
           prop.getElementsByTagName('getlastmodified')[0]
         const modifiedAt = lastmodified ? (lastmodified.textContent || '') : new Date().toISOString()
@@ -767,11 +765,10 @@ export class MobileCloudBackupService {
     try {
       console.log('创建 WebDAV 备份，文件名:', fileName)
 
-      const uploadPath = this.getWebDAVBackupFilePath(config.url, fileName)
-      const fileUrl = this.buildWebDAVFileUrl(config.url, uploadPath)
-
       await this.ensureWebDAVBackupDirectory(config)
 
+      const cloudPath = getCloudBackupFilePath(fileName)
+      const fileUrl = this.buildWebDAVUrlFromCloudPath(config, cloudPath)
       console.log('上传到 URL:', fileUrl)
       const response = await CapacitorHttp.request({
         url: fileUrl,
@@ -791,7 +788,7 @@ export class MobileCloudBackupService {
           description: backupData.description,
           createdAt: backupData.createdAt,
           size: new Blob([jsonString]).size,
-          cloudPath: uploadPath,
+          cloudPath,
           storageId: config.id
         }
 
@@ -839,7 +836,7 @@ export class MobileCloudBackupService {
         }
       }
 
-      const dirPath = config.path || 'AI-Gist-Backup'
+      const dirPath = config.path || CLOUD_BACKUP_DIR
 
       // 检查目录是否存在
       let dirExists = false
@@ -961,9 +958,7 @@ export class MobileCloudBackupService {
       }
 
       // 下载备份文件
-      // backup.cloudPath 是标准化的路径，如 /backup-xxx.json
-      const filePath = backup.cloudPath.startsWith('/') ? backup.cloudPath : `/${backup.cloudPath}`
-      const fileUrl = this.buildWebDAVFileUrl(config.url, filePath)
+      const fileUrl = this.buildWebDAVUrlFromCloudPath(config, backup.cloudPath)
 
       const response = await CapacitorHttp.request({
         url: fileUrl,
@@ -1109,9 +1104,7 @@ export class MobileCloudBackupService {
       }
 
       // 删除文件
-      // backup.cloudPath 是标准化的路径，如 /backup-xxx.json
-      const filePath = backup.cloudPath.startsWith('/') ? backup.cloudPath : `/${backup.cloudPath}`
-      const fileUrl = this.buildWebDAVFileUrl(config.url, filePath)
+      const fileUrl = this.buildWebDAVUrlFromCloudPath(config, backup.cloudPath)
 
       const response = await CapacitorHttp.request({
         url: fileUrl,
@@ -1191,81 +1184,92 @@ export class MobileCloudBackupService {
     return url.replace(/\/+$/, '')
   }
 
-  private getWebDAVDiscoveryLocations(baseUrl: string): Array<{ url: string; pathPrefix: string }> {
-    const locations: Array<{ url: string; pathPrefix: string }> = []
-    const backupPath = this.getWebDAVBackupDirectoryPath(baseUrl)
-    const backupUrl = backupPath ? this.buildWebDAVFileUrl(baseUrl, backupPath) : baseUrl
-
-    locations.push({ url: backupUrl, pathPrefix: backupPath })
-
-    // Backward compatibility: older mobile builds wrote backups directly to the configured URL.
-    if (backupUrl !== baseUrl) {
-      locations.push({ url: baseUrl, pathPrefix: '' })
-    }
-
-    return locations
+  private getWebDAVBackupBaseUrl(config: any): string {
+    const baseUrl = this.normalizeBaseUrl(config.url)
+    return this.isWebDAVUrlAtBackupDir(baseUrl)
+      ? baseUrl
+      : this.joinUrlPath(baseUrl, CLOUD_BACKUP_DIR)
   }
 
-  private getWebDAVBackupFilePath(baseUrl: string, fileName: string): string {
-    return this.joinWebDAVPath(this.getWebDAVBackupDirectoryPath(baseUrl), fileName)
-  }
-
-  private getWebDAVBackupDirectoryPath(baseUrl: string): string {
-    const normalized = this.normalizeBaseUrl(baseUrl)
-
+  private isWebDAVUrlAtBackupDir(url: string): boolean {
     try {
-      const pathname = new URL(normalized).pathname.replace(/\/+$/, '')
-      if (pathname.split('/').filter(Boolean).pop() === WEBDAV_BACKUP_DIR) {
-        return ''
-      }
-    } catch (error) {
-      console.warn('解析 WebDAV URL 失败:', baseUrl, error)
+      const parsed = new URL(this.normalizeBaseUrl(url))
+      const lastSegment = parsed.pathname.split('/').filter(Boolean).pop()
+      return lastSegment === CLOUD_BACKUP_DIR
+    } catch {
+      return false
+    }
+  }
+
+  private buildWebDAVUrlFromCloudPath(config: any, cloudPath: string): string {
+    const normalizedPath = normalizeCloudPath(cloudPath)
+    const backupDirPath = getCloudBackupDirectoryPath()
+
+    if (this.isWebDAVUrlAtBackupDir(config.url) && normalizedPath.startsWith(`${backupDirPath}/`)) {
+      return this.joinUrlPath(this.normalizeBaseUrl(config.url), normalizedPath.slice(backupDirPath.length))
     }
 
-    return `/${WEBDAV_BACKUP_DIR}`
+    return this.joinUrlPath(this.normalizeBaseUrl(config.url), normalizedPath)
   }
 
-  private buildWebDAVFileUrl(baseUrl: string, filePath: string): string {
-    const normalizedBaseUrl = this.normalizeBaseUrl(baseUrl)
-    const normalizedPath = filePath.startsWith('/') ? filePath : `/${filePath}`
-    return `${normalizedBaseUrl}${normalizedPath}`
-  }
-
-  private joinWebDAVPath(...parts: string[]): string {
-    const segments = parts
+  private joinUrlPath(baseUrl: string, ...parts: string[]): string {
+    const suffix = parts
       .flatMap(part => part.split('/'))
       .filter(Boolean)
+      .map(part => encodeURIComponent(decodeURIComponent(part)))
+      .join('/')
 
-    return segments.length > 0 ? `/${segments.join('/')}` : ''
+    return suffix ? `${this.normalizeBaseUrl(baseUrl)}/${suffix}` : this.normalizeBaseUrl(baseUrl)
   }
 
   private async ensureWebDAVBackupDirectory(config: any): Promise<void> {
-    const directoryPath = this.getWebDAVBackupDirectoryPath(config.url)
-    if (!directoryPath) return
-
-    const directoryUrl = this.buildWebDAVFileUrl(config.url, directoryPath)
-
-    try {
-      if (Capacitor.getPlatform() === 'android') {
-        await WebDav.request({
-          url: directoryUrl,
-          method: 'MKCOL',
-          username: config.username,
-          password: config.password
-        })
-        return
-      }
-
-      await CapacitorHttp.request({
-        url: directoryUrl,
-        method: 'MKCOL',
-        headers: {
-          'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
-        }
-      })
-    } catch (error) {
-      console.warn('创建 WebDAV 备份目录失败，继续尝试上传:', error)
+    const response = await this.sendWebDAVRequest(config, this.getWebDAVBackupBaseUrl(config), 'MKCOL')
+    if ([200, 201, 204, 405, 409].includes(response.status)) {
+      return
     }
+    if (response.status === 401 || response.status === 403) {
+      throw new Error('认证失败，请检查用户名和密码')
+    }
+    throw new Error(`创建 WebDAV 备份目录失败（HTTP ${response.status}）`)
+  }
+
+  private async sendWebDAVRequest(
+    config: any,
+    url: string,
+    method: string,
+    data?: string,
+    contentType = 'application/json'
+  ): Promise<{ status: number; data?: any }> {
+    if (Capacitor.getPlatform() === 'android' && method === 'MKCOL') {
+      const response = await WebDav.request({
+        url,
+        method,
+        username: config.username,
+        password: config.password,
+        body: data,
+        contentType
+      })
+      return { status: response.status, data: response.body }
+    }
+
+    return CapacitorHttp.request({
+      url,
+      method,
+      headers: {
+        'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
+      },
+      data
+    })
+  }
+
+  private dedupeBackups(backups: CloudBackupInfo[]): CloudBackupInfo[] {
+    const seen = new Set<string>()
+    return backups.filter(backup => {
+      const key = backup.id || backup.cloudPath || backup.name
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
   }
 
   /**

@@ -53,8 +53,9 @@ vi.mock('@capacitor/filesystem', () => ({
 // WebDav 原生插件 mock（Android 路径用它执行 PROPFIND）
 // 在测试环境中将 propfind 代理到真实 HTTP 服务器
 const mockWebDavPropfind = vi.hoisted(() => vi.fn())
+const mockWebDavRequest = vi.hoisted(() => vi.fn())
 vi.mock('@renderer/capacitor-bridge/webdav-native', () => ({
-  default: { propfind: mockWebDavPropfind, request: vi.fn() },
+  default: { propfind: mockWebDavPropfind, request: mockWebDavRequest },
 }))
 
 vi.mock('@capacitor/core', () => ({
@@ -154,6 +155,56 @@ function setupWebDavNativeProxy() {
   })
 }
 
+function setupWebDavRequestProxy() {
+  mockWebDavRequest.mockImplementation(async (opts: {
+    url: string
+    method: string
+    username?: string
+    password?: string
+    body?: string
+    contentType?: string
+  }) => {
+    const { default: http } = await import('http')
+    const { URL } = await import('url')
+
+    return new Promise<{ status: number; body: string }>((resolve, reject) => {
+      const parsed = new URL(opts.url)
+      const auth = opts.username
+        ? 'Basic ' + Buffer.from(`${opts.username}:${opts.password ?? ''}`).toString('base64')
+        : undefined
+
+      const headers: Record<string, string> = {}
+      if (auth) headers['Authorization'] = auth
+      if (opts.contentType) headers['Content-Type'] = opts.contentType
+
+      let bodyBuf: Buffer | undefined
+      if (opts.body !== undefined) {
+        bodyBuf = Buffer.from(opts.body, 'utf-8')
+        headers['Content-Length'] = String(bodyBuf.length)
+      }
+
+      const req = http.request({
+        hostname: parsed.hostname,
+        port: Number(parsed.port) || 80,
+        path: parsed.pathname + parsed.search,
+        method: opts.method,
+        headers,
+      }, res => {
+        const chunks: Buffer[] = []
+        res.on('data', (c: Buffer) => chunks.push(c))
+        res.on('end', () => resolve({
+          status: res.statusCode ?? 0,
+          body: Buffer.concat(chunks).toString('utf-8'),
+        }))
+      })
+
+      req.on('error', reject)
+      if (bodyBuf) req.write(bodyBuf)
+      req.end()
+    })
+  })
+}
+
 function setupHttpProxy() {  mockHttp.request.mockImplementation(async (opts: any) => {
     const { default: http } = await import('http')
     const { URL } = await import('url')
@@ -187,7 +238,11 @@ function setupHttpProxy() {  mockHttp.request.mockImplementation(async (opts: an
         res.on('end', () => {
           const raw = Buffer.concat(chunks).toString('utf-8')
           let data: any = raw
-          try { data = JSON.parse(raw) } catch {}
+          try {
+            data = JSON.parse(raw)
+          } catch {
+            // Keep plain text responses as-is.
+          }
           resolve({ status: res.statusCode ?? 0, data })
         })
       })
@@ -236,6 +291,7 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
     vi.clearAllMocks()
     setupHttpProxy()
     setupWebDavNativeProxy()
+    setupWebDavRequestProxy()
   })
 
   // ----------------------------------------------------------------
@@ -712,6 +768,7 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
       const androidService = MobileCloudBackupService.getInstance()
       await setCfg()
       setupWebDavNativeProxy() // 重新设置，因为 vi.clearAllMocks 会清除
+      setupWebDavRequestProxy()
 
       // Android 通过原生 OkHttp PROPFIND 独立发现备份，不依赖任何其他平台预先写入的索引
       const backups = await androidService.getCloudBackupList('cfg-cross')
