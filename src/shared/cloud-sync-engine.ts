@@ -11,6 +11,7 @@ export type CloudSyncCollectionName =
   | 'promptVariables'
   | 'promptHistories'
   | 'aiConfigs'
+  | 'quickOptimizationConfigs'
   | 'aiHistory'
   | 'settings';
 
@@ -20,6 +21,7 @@ export interface CloudSyncDataSet {
   promptVariables?: any[];
   promptHistories?: any[];
   aiConfigs?: any[];
+  quickOptimizationConfigs?: any[];
   aiHistory?: any[];
   settings?: any[];
   syncTombstones?: CloudSyncTombstone[];
@@ -89,6 +91,7 @@ const DEFAULT_COLLECTIONS: CloudSyncCollectionName[] = [
   'promptVariables',
   'promptHistories',
   'aiConfigs',
+  'quickOptimizationConfigs',
   'aiHistory',
   'settings'
 ];
@@ -99,6 +102,7 @@ const IDENTITY_FIELDS: Record<string, string[]> = {
   promptVariables: ['uuid', 'id'],
   promptHistories: ['uuid', 'id'],
   aiConfigs: ['uuid', 'configId', 'id'],
+  quickOptimizationConfigs: ['uuid', 'id'],
   aiHistory: ['uuid', 'historyId', 'id'],
   settings: ['key', 'id'],
   syncTombstones: ['recordKey', 'recordUuid', 'id']

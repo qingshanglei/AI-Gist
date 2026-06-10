@@ -56,7 +56,11 @@ const mockAppSettingsService = {
   updateSettingByKey: vi.fn(),
   getSettingByKey: vi.fn().mockResolvedValue(null),
 }
-const mockQuickOptService = { getInstance: vi.fn() }
+const mockQuickOptService = {
+  getInstance: vi.fn(),
+  getAllQuickOptimizationConfigs: vi.fn(),
+  createQuickOptimizationConfigFromBackup: vi.fn(),
+}
 
 vi.mock('~/lib/services/category.service', () => ({
   CategoryService: { getInstance: () => mockCategoryService }
@@ -121,6 +125,17 @@ const mockPromptHistory = {
   createdAt: new Date().toISOString(),
 }
 const mockAIConfig = testDataGenerators.createMockAIConfig({ id: 1 })
+const mockQuickOptimizationConfig = {
+  id: 1,
+  uuid: 'quick-opt-1',
+  name: '更清晰',
+  description: '优化表达',
+  prompt: '请优化：{{content}}',
+  enabled: true,
+  sortOrder: 1,
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+}
 const mockSetting = { key: 'theme', value: 'dark', type: 'string', description: '' }
 const mockSyncTombstone = {
   id: 1,
@@ -138,6 +153,7 @@ function makeExportData() {
     promptVariables: [mockPromptVariable],
     promptHistories: [mockPromptHistory],
     aiConfigs: [mockAIConfig],
+    quickOptimizationConfigs: [mockQuickOptimizationConfig],
     aiHistory: [],
     settings: [mockSetting],
   }
@@ -168,6 +184,7 @@ describe('DatabaseServiceManager', () => {
     mockPromptService.getAllPromptVariables.mockResolvedValue([mockPromptVariable])
     mockPromptService.getAllPromptHistories.mockResolvedValue([mockPromptHistory])
     mockAIConfigService.getAllAIConfigs.mockResolvedValue([mockAIConfig])
+    mockQuickOptService.getAllQuickOptimizationConfigs.mockResolvedValue([mockQuickOptimizationConfig])
     mockAIHistoryService.getAllAIGenerationHistory.mockResolvedValue([])
     mockAppSettingsService.getAllSettings.mockResolvedValue([mockSetting])
 
@@ -176,6 +193,7 @@ describe('DatabaseServiceManager', () => {
     mockPromptService.createPromptVariableFromBackup.mockResolvedValue({ ...mockPromptVariable, id: 30, promptId: 20 })
     mockPromptService.createPromptHistoryFromBackup.mockResolvedValue({ ...mockPromptHistory, id: 40, promptId: 20 })
     mockAIConfigService.createAIConfig.mockResolvedValue({ ...mockAIConfig, id: 30 })
+    mockQuickOptService.createQuickOptimizationConfigFromBackup.mockResolvedValue({ ...mockQuickOptimizationConfig, id: 50 })
     mockAIHistoryService.createAIGenerationHistory.mockResolvedValue({})
     mockAppSettingsService.updateSettingByKey.mockResolvedValue({})
   })
@@ -193,6 +211,7 @@ describe('DatabaseServiceManager', () => {
       expect(result.data!.promptVariables).toHaveLength(1)
       expect(result.data!.promptHistories).toHaveLength(1)
       expect(result.data!.aiConfigs).toHaveLength(1)
+      expect(result.data!.quickOptimizationConfigs).toHaveLength(1)
       expect(result.data!.settings).toHaveLength(1)
     })
 
@@ -252,6 +271,7 @@ describe('DatabaseServiceManager', () => {
       expect(mockPromptService.createPromptVariableFromBackup).toHaveBeenCalledTimes(1)
       expect(mockPromptService.createPromptHistoryFromBackup).toHaveBeenCalledTimes(1)
       expect(mockAIConfigService.createAIConfig).toHaveBeenCalledTimes(1)
+      expect(mockQuickOptService.createQuickOptimizationConfigFromBackup).toHaveBeenCalledTimes(1)
       expect(mockAppSettingsService.updateSettingByKey).toHaveBeenCalledTimes(1)
     })
 

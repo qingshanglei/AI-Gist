@@ -76,6 +76,25 @@ describe('cloud sync engine', () => {
     expect(result.data.promptVariables?.map(item => item.uuid).sort()).toEqual(['variable-1', 'variable-2'])
   })
 
+  it('merges quick optimization configs as syncable user settings', () => {
+    const local = {
+      quickOptimizationConfigs: [
+        { id: 1, uuid: 'quick-1', name: 'Shorter', updatedAt: '2026-01-01T00:00:00.000Z' }
+      ]
+    }
+    const remote = {
+      quickOptimizationConfigs: [
+        { id: 9, uuid: 'quick-2', name: 'Richer', updatedAt: '2026-01-02T00:00:00.000Z' }
+      ]
+    }
+
+    const result = mergeCloudSyncData(local, remote)
+
+    expect(getCloudSyncRecordKey('quickOptimizationConfigs', local.quickOptimizationConfigs[0])).toBe('uuid:quick-1')
+    expect(result.hasConflicts).toBe(false)
+    expect(result.data.quickOptimizationConfigs?.map(item => item.uuid).sort()).toEqual(['quick-1', 'quick-2'])
+  })
+
   it('applies remote-only changes against a shared base', () => {
     const base = {
       settings: [

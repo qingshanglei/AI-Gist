@@ -32,8 +32,10 @@ const mockCategoryService = {
 const mockPromptService = {
   getInstance: vi.fn(),
   getAllPromptsForTags: vi.fn(),
+  getAllPromptVariables: vi.fn(),
   getAllPromptHistories: vi.fn(),
   createPrompt: vi.fn(),
+  createPromptVariableFromBackup: vi.fn(),
   createPromptHistoryFromBackup: vi.fn(),
   upsertPrompt: vi.fn(),
 }
@@ -54,7 +56,11 @@ const mockAppSettingsService = {
   updateSettingByKey: vi.fn(),
   getSettingByKey: vi.fn().mockResolvedValue(null),
 }
-const mockQuickOptService = { getInstance: vi.fn() }
+const mockQuickOptService = {
+  getInstance: vi.fn(),
+  getAllQuickOptimizationConfigs: vi.fn(),
+  createQuickOptimizationConfigFromBackup: vi.fn(),
+}
 
 vi.mock('~/lib/services/category.service', () => ({
   CategoryService: { getInstance: () => mockCategoryService }
@@ -97,6 +103,17 @@ import { DatabaseServiceManager } from '~/lib/services/database-manager.service'
 
 const mockCategory = testDataGenerators.createMockCategory({ id: 1, name: '分类A' })
 const mockPrompt = testDataGenerators.createMockPrompt({ id: 1, categoryId: 1, title: '提示词A' })
+const mockPromptVariable = {
+  id: 1,
+  uuid: 'variable-cross-1',
+  promptId: 1,
+  name: 'tone',
+  type: 'text' as const,
+  defaultValue: 'friendly',
+  required: false,
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+}
 const mockPromptHistory = {
   id: 1,
   uuid: 'history-cross-1',
@@ -107,13 +124,26 @@ const mockPromptHistory = {
   createdAt: new Date().toISOString(),
 }
 const mockAIConfig = testDataGenerators.createMockAIConfig({ id: 1 })
+const mockQuickOptimizationConfig = {
+  id: 1,
+  uuid: 'quick-opt-cross-1',
+  name: '更清晰',
+  description: '优化表达',
+  prompt: '请优化：{{content}}',
+  enabled: true,
+  sortOrder: 1,
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+}
 const mockSetting = { key: 'theme', value: 'dark', type: 'string', description: '' }
 
 const baseData = {
   categories: [mockCategory],
   prompts: [mockPrompt],
+  promptVariables: [mockPromptVariable],
   promptHistories: [mockPromptHistory],
   aiConfigs: [mockAIConfig],
+  quickOptimizationConfigs: [mockQuickOptimizationConfig],
   aiHistory: [],
   settings: [mockSetting],
 }
@@ -159,15 +189,19 @@ describe('跨平台备份兼容性', () => {
 
     mockCategoryService.getBasicCategories.mockResolvedValue([mockCategory])
     mockPromptService.getAllPromptsForTags.mockResolvedValue([mockPrompt])
+    mockPromptService.getAllPromptVariables.mockResolvedValue([mockPromptVariable])
     mockPromptService.getAllPromptHistories.mockResolvedValue([mockPromptHistory])
     mockAIConfigService.getAllAIConfigs.mockResolvedValue([mockAIConfig])
+    mockQuickOptService.getAllQuickOptimizationConfigs.mockResolvedValue([mockQuickOptimizationConfig])
     mockAIHistoryService.getAllAIGenerationHistory.mockResolvedValue([])
     mockAppSettingsService.getAllSettings.mockResolvedValue([mockSetting])
 
     mockCategoryService.createCategory.mockResolvedValue({ ...mockCategory, id: 10 })
     mockPromptService.createPrompt.mockResolvedValue({ ...mockPrompt, id: 20 })
+    mockPromptService.createPromptVariableFromBackup.mockResolvedValue({ ...mockPromptVariable, id: 30, promptId: 20 })
     mockPromptService.createPromptHistoryFromBackup.mockResolvedValue({ ...mockPromptHistory, id: 40, promptId: 20 })
     mockAIConfigService.createAIConfig.mockResolvedValue({ ...mockAIConfig, id: 30 })
+    mockQuickOptService.createQuickOptimizationConfigFromBackup.mockResolvedValue({ ...mockQuickOptimizationConfig, id: 50 })
     mockAIHistoryService.createAIGenerationHistory.mockResolvedValue({})
     mockAppSettingsService.updateSettingByKey.mockResolvedValue({})
   })
@@ -224,11 +258,14 @@ describe('跨平台备份兼容性', () => {
 
       expect(restoredData).toHaveProperty('categories')
       expect(restoredData).toHaveProperty('prompts')
+      expect(restoredData).toHaveProperty('promptVariables')
       expect(restoredData).toHaveProperty('promptHistories')
       expect(restoredData).toHaveProperty('aiConfigs')
+      expect(restoredData).toHaveProperty('quickOptimizationConfigs')
       expect(restoredData).toHaveProperty('settings')
       expect(Array.isArray(restoredData.categories)).toBe(true)
       expect(Array.isArray(restoredData.prompts)).toBe(true)
+      expect(Array.isArray(restoredData.promptVariables)).toBe(true)
     })
 
     it('桌面备份的 data 不含嵌套 data 字段', () => {

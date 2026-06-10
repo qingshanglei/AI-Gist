@@ -89,6 +89,7 @@ export interface ExportResult extends BaseResponse {
     promptHistories?: any[];
     syncTombstones?: any[];
     aiConfigs: any[];
+    quickOptimizationConfigs?: any[];
     aiHistory: any[];
     settings: any[];
   };

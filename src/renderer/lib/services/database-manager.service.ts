@@ -305,6 +305,7 @@ export class DatabaseServiceManager {
         this.prompt.getAllPromptVariables(),
         this.prompt.getAllPromptHistories(),
         this.aiConfig.getAllAIConfigs(),
+        this.quickOptimization.getAllQuickOptimizationConfigs(),
         this.aiGenerationHistory.getAllAIGenerationHistory(),
         this.appSettings.getAllSettings()
       ]);
@@ -316,13 +317,14 @@ export class DatabaseServiceManager {
         promptVariables,
         promptHistories,
         aiConfigs,
+        quickOptimizationConfigs,
         aiHistory,
         settings
       ] = results.map((result, index) => {
         if (result.status === 'fulfilled') {
           return result.value || [];
         } else {
-          const tableNames = ['categories', 'prompts', 'promptVariables', 'promptHistories', 'aiConfigs', 'aiHistory', 'settings'];
+          const tableNames = ['categories', 'prompts', 'promptVariables', 'promptHistories', 'aiConfigs', 'quickOptimizationConfigs', 'aiHistory', 'settings'];
           console.warn(`获取 ${tableNames[index]} 数据失败:`, result.reason);
           return [];
         }
@@ -334,6 +336,7 @@ export class DatabaseServiceManager {
         promptVariables: promptVariables as any[],
         promptHistories: promptHistories as any[],
         aiConfigs: aiConfigs as any[],
+        quickOptimizationConfigs: quickOptimizationConfigs as any[],
         aiHistory: aiHistory as any[],
         settings: settings as any[]
       };
@@ -344,6 +347,7 @@ export class DatabaseServiceManager {
         提示词变量数: exportData.promptVariables.length,
         提示词历史数: exportData.promptHistories.length,
         AI配置数: exportData.aiConfigs.length,
+        快速优化配置数: exportData.quickOptimizationConfigs.length,
         AI历史数: exportData.aiHistory.length,
         设置数: exportData.settings.length
       });
@@ -558,6 +562,21 @@ export class DatabaseServiceManager {
           }
         }
       }
+
+      // 导入快速优化配置数据
+      if (data.quickOptimizationConfigs && data.quickOptimizationConfigs.length > 0) {
+        console.log(`导入快速优化配置数据: ${data.quickOptimizationConfigs.length} 条`);
+        for (const config of data.quickOptimizationConfigs) {
+          const configDataWithoutId = { ...config };
+          delete configDataWithoutId.id;
+          try {
+            await this.quickOptimization.createQuickOptimizationConfigFromBackup(configDataWithoutId);
+          } catch (err) {
+            console.warn('导入快速优化配置数据失败:', config.id, err);
+            totalErrors++;
+          }
+        }
+      }
       
       // 导入AI历史数据
       if (data.aiHistory && data.aiHistory.length > 0) {
@@ -592,6 +611,7 @@ export class DatabaseServiceManager {
       details.promptVariables = (data.promptVariables?.length || 0);
       details.promptHistories = (data.promptHistories?.length || 0);
       details.aiConfigs = (data.aiConfigs?.length || 0);
+      details.quickOptimizationConfigs = (data.quickOptimizationConfigs?.length || 0);
       details.aiHistory = (data.aiHistory?.length || 0);
       details.settings = (data.settings?.length || 0);
       
@@ -791,6 +811,21 @@ export class DatabaseServiceManager {
           }
         }
       }
+
+      // 恢复快速优化配置数据
+      if (backupData.quickOptimizationConfigs && backupData.quickOptimizationConfigs.length > 0) {
+        console.log(`恢复快速优化配置数据: ${backupData.quickOptimizationConfigs.length} 条`);
+        for (const config of backupData.quickOptimizationConfigs) {
+          const configDataWithoutId = { ...config };
+          delete configDataWithoutId.id;
+          try {
+            await this.quickOptimization.createQuickOptimizationConfigFromBackup(configDataWithoutId);
+          } catch (err) {
+            console.warn('恢复快速优化配置数据失败:', config.id, err);
+            totalErrors++;
+          }
+        }
+      }
       
       // 恢复AI历史数据
       if (backupData.aiHistory && backupData.aiHistory.length > 0) {
@@ -827,6 +862,7 @@ export class DatabaseServiceManager {
       details.promptVariables = (backupData.promptVariables?.length || 0);
       details.promptHistories = (backupData.promptHistories?.length || 0);
       details.aiConfigs = (backupData.aiConfigs?.length || 0);
+      details.quickOptimizationConfigs = (backupData.quickOptimizationConfigs?.length || 0);
       details.aiHistory = (backupData.aiHistory?.length || 0);
       details.settings = (backupData.settings?.length || 0);
       if (restoredTombstones > 0) {
@@ -1162,7 +1198,7 @@ export class DatabaseServiceManager {
     }
 
     // 需要UUID的数据类型
-    const syncableTypes = ['categories', 'prompts', 'promptVariables', 'promptHistories', 'aiConfigs', 'aiHistory', 'aiGenerationHistory'];
+    const syncableTypes = ['categories', 'prompts', 'promptVariables', 'promptHistories', 'aiConfigs', 'quickOptimizationConfigs', 'aiHistory', 'aiGenerationHistory'];
     
     for (const type of syncableTypes) {
       if (data[type] && Array.isArray(data[type])) {

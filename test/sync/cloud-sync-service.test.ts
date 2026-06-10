@@ -25,6 +25,7 @@ const baseData = {
   promptVariables: [],
   promptHistories: [],
   aiConfigs: [],
+  quickOptimizationConfigs: [],
   aiHistory: [],
   settings: [],
   syncTombstones: []
@@ -147,6 +148,7 @@ describe('CloudSyncService', () => {
       promptVariables: [],
       promptHistories: [],
       aiConfigs: [],
+      quickOptimizationConfigs: [],
       aiHistory: [],
       settings: [],
       syncTombstones: []
@@ -308,6 +310,7 @@ describe('CloudSyncService', () => {
       promptVariables: [],
       promptHistories: [],
       aiConfigs: [],
+      quickOptimizationConfigs: [],
       aiHistory: [],
       settings: [],
       syncTombstones: []

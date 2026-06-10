@@ -113,6 +113,17 @@ const mockExportData = {
     updatedAt: new Date().toISOString(),
   }],
   aiConfigs:  [testDataGenerators.createMockAIConfig({ id: 1 })],
+  quickOptimizationConfigs: [{
+    id: 1,
+    uuid: 'quick-optimization-1',
+    name: '更清晰',
+    description: '优化表达',
+    prompt: '请优化：{{content}}',
+    enabled: true,
+    sortOrder: 1,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  }],
   aiHistory:  [],
   settings:   [{ key: 'theme', value: 'dark', type: 'string', description: '' }],
 }
@@ -709,6 +720,7 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
             promptVariables: [],
             promptHistories: [],
             aiConfigs: [],
+            quickOptimizationConfigs: [],
             aiHistory: [],
             settings: [],
             syncTombstones: []
@@ -856,6 +868,7 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
       expect(restoreResult.data.categories).toHaveLength(1)
       expect(restoreResult.data.prompts).toHaveLength(1)
       expect(restoreResult.data.promptVariables).toHaveLength(1)
+      expect(restoreResult.data.quickOptimizationConfigs).toHaveLength(1)
     })
 
     it('data 字段不嵌套（不是 { data: { data: ... } }）', async () => {
@@ -927,6 +940,7 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
       expect(restoreResult.data.prompts).toHaveLength(1)
       expect(restoreResult.data.promptVariables).toHaveLength(1)
       expect(restoreResult.data.aiConfigs).toHaveLength(1)
+      expect(restoreResult.data.quickOptimizationConfigs).toHaveLength(1)
 
       // 4. 删除
       const deleteResult = await service.deleteCloudBackup('cfg-real', backupId)
