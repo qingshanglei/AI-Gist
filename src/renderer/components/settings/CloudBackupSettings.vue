@@ -46,6 +46,15 @@
                                     </NButton>
                                 </NFlex>
 
+                                <NAlert v-if="getSyncStatusText(config.id)" :type="getSyncStatusType()" :show-icon="false">
+                                    <NFlex align="center" :size="8">
+                                        <NIcon>
+                                            <Wifi />
+                                        </NIcon>
+                                        <NText>{{ getSyncStatusText(config.id) }}</NText>
+                                    </NFlex>
+                                </NAlert>
+
                                 <!-- 云端备份列表 -->
                                 <div v-if="getPaginatedBackups(config.id).length > 0">
                                     <NFlex vertical :size="12">
@@ -335,10 +344,11 @@ import {
     Recharging,
     Wifi,
 } from "@vicons/tabler";
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { useI18n } from 'vue-i18n';
 import { CloudBackupAPI } from "@/lib/api/cloud-backup.api";
 import { cloudSyncService } from "@/lib/services/cloud-sync.service";
+import type { CloudSyncStatus } from "@/lib/services/cloud-sync.service";
 import type { CloudStorageConfig, CloudBackupInfo } from "@shared/types/cloud-backup";
 
 const message = useMessage();
@@ -347,6 +357,7 @@ const { t } = useI18n();
 // 响应式数据
 const storageConfigs = ref<CloudStorageConfig[]>([]);
 const cloudBackups = ref<CloudBackupInfo[]>([]);
+const syncStatus = ref<CloudSyncStatus>(cloudSyncService.getStatus());
 const activeTabKey = ref<string>('');
 const showConfigModal = ref(false);
 const iCloudAvailability = ref<{ available: boolean; reason?: string } | null>(null);
@@ -365,6 +376,7 @@ const pageSize = 6;
 
 // 为每个存储配置维护独立的分页状态
 const paginationStates = ref<Record<string, { currentPage: number; pageSize: number }>>({});
+let unsubscribeSyncStatus: (() => void) | null = null;
 
 // 表单数据
 const configForm = ref({
@@ -584,6 +596,12 @@ const saveConfig = async () => {
             message.success(configForm.value.id ? '配置更新成功' : '配置添加成功');
             showConfigModal.value = false;
             await loadStorageConfigs();
+            if (result.config?.enabled) {
+                cloudSyncService.scheduleSync('config-change', {
+                    storageId: result.config.id,
+                    delayMs: 0
+                });
+            }
         } else {
             message.error(result.error || '操作失败');
         }
@@ -767,6 +785,42 @@ const getFriendlySyncError = (error?: string): string => {
     return `同步失败：${error}`;
 };
 
+const getSyncStatusType = (): 'success' | 'info' | 'warning' | 'error' => {
+    if (syncStatus.value.status === 'error') return 'error';
+    if (syncStatus.value.status === 'scheduled') return 'info';
+    if (syncStatus.value.status === 'syncing') return 'warning';
+    return 'success';
+};
+
+const getSyncStatusText = (storageId: string): string => {
+    const status = syncStatus.value;
+    if (status.storageId && status.storageId !== storageId) {
+        return '';
+    }
+
+    if (status.status === 'scheduled') {
+        return `自动同步已排队${formatSyncStatusTime(status.nextSyncAt, '，预计 ')}`;
+    }
+
+    if (status.status === 'syncing') {
+        return '正在同步数据';
+    }
+
+    if (status.status === 'error') {
+        return `上次同步失败：${status.error || '同步失败'}${formatSyncStatusTime(status.nextSyncAt, '，将于 ')}`;
+    }
+
+    if (status.lastResult?.success) {
+        return `${getSyncResultMessage(status.lastResult.action, status.lastResult.conflicts.length)}${formatSyncStatusTime(status.lastSyncAt, '，时间 ')}`;
+    }
+
+    return status.lastSyncAt ? `最近同步时间 ${formatDate(status.lastSyncAt)}` : '';
+};
+
+const formatSyncStatusTime = (dateString: string | undefined, prefix: string): string => {
+    return dateString ? `${prefix}${formatDate(dateString)}` : '';
+};
+
 const deleteCloudBackup = async (storageId: string, backupId: string) => {
     try {
         const result = await CloudBackupAPI.deleteCloudBackup(storageId, backupId);
@@ -874,10 +928,17 @@ watch(activeTabKey, async (newTabKey) => {
 
 // 生命周期
 onMounted(async () => {
+    unsubscribeSyncStatus = cloudSyncService.onStatusChange(status => {
+        syncStatus.value = status;
+    });
     await Promise.all([
         loadStorageConfigs(),
         checkICloudAvailability()
     ]);
+});
+
+onUnmounted(() => {
+    unsubscribeSyncStatus?.();
 });
 </script>
 

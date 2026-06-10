@@ -160,6 +160,9 @@
               <ion-icon :icon="syncOutline" slot="start"></ion-icon>
               立即同步
             </ion-button>
+            <p v-if="selectedConfig && getSyncStatusText(selectedConfig.id)" class="sync-status" :class="`sync-status-${syncStatus.status}`">
+              {{ getSyncStatusText(selectedConfig.id) }}
+            </p>
           </div>
 
           <!-- 备份列表 -->
@@ -203,7 +206,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Capacitor } from '@capacitor/core'
 import {
@@ -251,6 +254,7 @@ import {
 import { useI18n } from '~/composables/useI18n'
 import { mobileCloudBackupService } from '~/lib/services/mobile-cloud-backup.service'
 import { cloudSyncService } from '~/lib/services/cloud-sync.service'
+import type { CloudSyncStatus } from '~/lib/services/cloud-sync.service'
 import { databaseService } from '~/lib/db'
 import { presentMobileToast } from '~/lib/utils/mobile-toast'
 import type { CloudStorageConfig, CloudBackupInfo } from '@shared/types/cloud-backup'
@@ -261,6 +265,7 @@ const platform = Capacitor.getPlatform()
 
 const storageConfigs = ref<CloudStorageConfig[]>([])
 const currentBackups = ref<CloudBackupInfo[]>([])
+const syncStatus = ref<CloudSyncStatus>(cloudSyncService.getStatus())
 const selectedConfig = ref<CloudStorageConfig | null>(null)
 const editingConfig = ref<CloudStorageConfig | null>(null)
 const iCloudAvailable = ref(false)
@@ -283,6 +288,7 @@ const loading = ref({
   restoreBackup: false,
   syncNow: false
 })
+let unsubscribeSyncStatus: (() => void) | null = null
 
 const isConfigValid = computed(() => {
   if (!configForm.value.name) return false
@@ -463,6 +469,12 @@ const saveConfig = async () => {
       showToast(editingConfig.value ? t('cloudBackup.updateSuccess') : t('cloudBackup.addSuccess'))
       closeConfigModal()
       await loadStorageConfigs()
+      if (result.config?.enabled) {
+        cloudSyncService.scheduleSync('config-change', {
+          storageId: result.config.id,
+          delayMs: 0
+        })
+      }
     } else {
       showToast(result.error || t('cloudBackup.saveFailed'), 'danger')
     }
@@ -715,6 +727,35 @@ const getFriendlySyncError = (error?: string): string => {
   return `同步失败：${error}`
 }
 
+const getSyncStatusText = (storageId: string): string => {
+  const status = syncStatus.value
+  if (status.storageId && status.storageId !== storageId) {
+    return ''
+  }
+
+  if (status.status === 'scheduled') {
+    return `自动同步已排队${formatSyncStatusTime(status.nextSyncAt, '，预计 ')}`
+  }
+
+  if (status.status === 'syncing') {
+    return '正在同步数据'
+  }
+
+  if (status.status === 'error') {
+    return `上次同步失败：${status.error || '同步失败'}${formatSyncStatusTime(status.nextSyncAt, '，将于 ')}`
+  }
+
+  if (status.lastResult?.success) {
+    return `${getSyncResultMessage(status.lastResult.action, status.lastResult.conflicts.length)}${formatSyncStatusTime(status.lastSyncAt, '，时间 ')}`
+  }
+
+  return status.lastSyncAt ? `最近同步时间 ${formatDate(status.lastSyncAt)}` : ''
+}
+
+const formatSyncStatusTime = (dateString: string | undefined, prefix: string): string => {
+  return dateString ? `${prefix}${formatDate(dateString)}` : ''
+}
+
 // 将技术错误转换为用户友好的备份错误提示
 const getFriendlyBackupError = (error?: string): string => {
   if (!error) return '备份创建失败，请稍后重试'
@@ -766,8 +807,15 @@ const showToast = async (message: string, color: string = 'success') => {
 }
 
 onMounted(() => {
+  unsubscribeSyncStatus = cloudSyncService.onStatusChange(status => {
+    syncStatus.value = status
+  })
   loadStorageConfigs()
   checkICloudAvailability()
+})
+
+onUnmounted(() => {
+  unsubscribeSyncStatus?.()
 })
 </script>
 
@@ -789,5 +837,20 @@ onMounted(() => {
 
 .action-buttons {
   padding: 16px;
+}
+
+.sync-status {
+  margin: 10px 4px 0;
+  color: var(--ion-color-medium);
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.sync-status-error {
+  color: var(--ion-color-danger);
+}
+
+.sync-status-success {
+  color: var(--ion-color-success);
 }
 </style>

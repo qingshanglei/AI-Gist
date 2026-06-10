@@ -10,7 +10,7 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
 import { JSDOM } from 'jsdom'
 import { TestWebDAVServer } from '../helpers/webdav-server'
-import { testDataGenerators } from '../helpers/test-utils'
+import { asyncTestHelpers, testDataGenerators } from '../helpers/test-utils'
 
 // ---- Node.js 环境下 DOMParser polyfill（由 jsdom 提供）----
 if (typeof DOMParser === 'undefined') {
@@ -738,6 +738,88 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
         categories: expect.arrayContaining([expect.objectContaining({ uuid: mockExportData.categories[0].uuid })]),
         prompts: expect.arrayContaining([expect.objectContaining({ uuid: mockExportData.prompts[0].uuid })])
       }))
+    })
+
+    it('本机变更事件会自动排队同步并写入同一 WebDAV manifest', async () => {
+      const storageId = 'cfg-auto-sync'
+      const service = MobileCloudBackupService.getInstance()
+      await Preferences.set({
+        key: 'cloud_backup_configs',
+        value: JSON.stringify([{
+          id: storageId,
+          name: 'Auto Sync WebDAV',
+          type: 'webdav',
+          enabled: true,
+          url: `${server.baseUrl}/auto-sync-${Date.now()}`,
+          username: USERNAME,
+          password: PASSWORD,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }]),
+      })
+
+      let dataChangeListener: ((change: any) => void) | undefined
+      const syncData = {
+        ...mockExportData,
+        promptHistories: [],
+        syncTombstones: []
+      }
+      const deviceDatabase = {
+        exportAllDataForSync: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'ok',
+          data: syncData
+        }),
+        replaceAllData: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'ok'
+        })
+      }
+      const autoDevice = new CloudSyncService({
+        cloudClient: service,
+        database: deviceDatabase,
+        storage: new MemoryStorage(),
+        createDeviceId: () => 'auto-device',
+        subscribeToDataChanges: listener => {
+          dataChangeListener = listener
+          return () => {
+            dataChangeListener = undefined
+          }
+        }
+      })
+
+      try {
+        autoDevice.startAutoSync({
+          syncOnStart: false,
+          debounceMs: 1,
+          pollIntervalMs: 0,
+          retryMs: 0,
+          storageIds: [storageId],
+          deviceName: 'Auto Device',
+          platform: 'ios'
+        })
+
+        dataChangeListener?.({
+          storeName: 'prompts',
+          action: 'update',
+          id: 1,
+          timestamp: Date.now(),
+          sourceId: 'integration-test'
+        })
+
+        await asyncTestHelpers.waitFor(() =>
+          autoDevice.getStatus().status === 'success' &&
+          deviceDatabase.exportAllDataForSync.mock.calls.length > 0
+        )
+
+        const manifest = await service.getCloudSyncManifest(storageId)
+        expect(manifest.latestSnapshot?.deviceId).toBe('auto-device')
+        expect(manifest.latestSnapshot?.data.prompts).toEqual(
+          expect.arrayContaining([expect.objectContaining({ uuid: mockExportData.prompts[0].uuid })])
+        )
+      } finally {
+        autoDevice.stopAutoSync()
+      }
     })
   })
 

@@ -1,5 +1,6 @@
 import { PlatformDetector } from '@shared/platform';
 import type { ExportResult, ImportResult } from '@shared/types/data-management';
+import type { CloudStorageConfig } from '@shared/types/cloud-backup';
 import type {
   CloudSyncConflict,
   CloudSyncDataSet,
@@ -21,11 +22,36 @@ import { generateUUID } from '../utils/uuid';
 import { CloudBackupAPI } from '../api/cloud-backup.api';
 import { DatabaseServiceManager } from './database-manager.service';
 import { mobileCloudBackupService } from './mobile-cloud-backup.service';
+import type { DataChangeEventPayload, DataStoreName } from './data-change-events';
+import { onDataChange } from './data-change-events';
 
 const DEVICE_ID_STORAGE_KEY = 'ai_gist_cloud_sync_device_id';
 const LOCAL_STATE_STORAGE_PREFIX = 'ai_gist_cloud_sync_state';
+const DEFAULT_AUTO_SYNC_DEBOUNCE_MS = 3000;
+const DEFAULT_AUTO_SYNC_RETRY_MS = 30000;
+const DEFAULT_REMOTE_POLL_INTERVAL_MS = 30000;
+const SYNC_STORE_NAMES: DataStoreName[] = [
+  'categories',
+  'prompts',
+  'promptVariables',
+  'promptHistories',
+  'ai_configs',
+  'ai_generation_history',
+  'settings',
+  'syncTombstones'
+];
 
 export type CloudSyncAction = 'uploaded' | 'downloaded' | 'merged' | 'noop';
+export type CloudSyncRunReason =
+  | 'startup'
+  | 'local-change'
+  | 'manual'
+  | 'interval'
+  | 'online'
+  | 'focus'
+  | 'config-change'
+  | 'retry';
+export type CloudSyncLifecycleStatus = 'idle' | 'scheduled' | 'syncing' | 'success' | 'error';
 
 export interface CloudSyncResult {
   success: boolean;
@@ -42,6 +68,7 @@ export interface CloudSyncResult {
 export interface CloudSyncOptions extends CloudSyncMergeOptions {
   deviceName?: string;
   platform?: string;
+  reason?: CloudSyncRunReason;
 }
 
 export interface CloudSyncCloudClient {
@@ -57,6 +84,31 @@ export interface CloudSyncDatabaseClient {
   replaceAllData(data: CloudSyncDataSet): Promise<ImportResult>;
 }
 
+export interface CloudSyncConfigClient {
+  getStorageConfigs(): Promise<CloudStorageConfig[]>;
+}
+
+export interface CloudSyncStatus {
+  status: CloudSyncLifecycleStatus;
+  pending: boolean;
+  updatedAt: string;
+  storageId?: string;
+  reason?: CloudSyncRunReason;
+  nextSyncAt?: string;
+  lastSyncAt?: string;
+  lastResult?: CloudSyncResult;
+  error?: string;
+}
+
+export interface CloudSyncAutoOptions extends CloudSyncOptions {
+  enabled?: boolean;
+  storageIds?: string[];
+  debounceMs?: number;
+  retryMs?: number;
+  pollIntervalMs?: number;
+  syncOnStart?: boolean;
+}
+
 export interface CloudSyncLocalState {
   storageId: string;
   deviceId: string;
@@ -67,24 +119,45 @@ export interface CloudSyncLocalState {
 
 export interface CloudSyncServiceDeps {
   cloudClient?: CloudSyncCloudClient;
+  configClient?: CloudSyncConfigClient;
   database?: CloudSyncDatabaseClient;
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
   createDeviceId?: () => string;
+  subscribeToDataChanges?: (listener: (change: DataChangeEventPayload) => void) => () => void;
 }
+
+type CloudSyncStatusListener = (status: CloudSyncStatus) => void;
 
 export class CloudSyncService {
   private static instance: CloudSyncService;
   private readonly cloudClient?: CloudSyncCloudClient;
+  private readonly configClient?: CloudSyncConfigClient;
   private readonly database: CloudSyncDatabaseClient;
   private readonly storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
   private readonly createDeviceId: () => string;
+  private readonly subscribeToDataChanges: (listener: (change: DataChangeEventPayload) => void) => () => void;
   private readonly runningSyncs = new Map<string, Promise<CloudSyncResult>>();
+  private readonly statusListeners = new Set<CloudSyncStatusListener>();
+  private autoSyncOptions: CloudSyncAutoOptions | null = null;
+  private unsubscribeDataChanges: (() => void) | null = null;
+  private scheduledTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private browserTriggerCleanups: (() => void)[] = [];
+  private applyingRemoteDataDepth = 0;
+  private status: CloudSyncStatus = {
+    status: 'idle',
+    pending: false,
+    updatedAt: new Date().toISOString()
+  };
 
   constructor(deps: CloudSyncServiceDeps = {}) {
     this.cloudClient = deps.cloudClient;
+    this.configClient = deps.configClient;
     this.database = deps.database || DatabaseServiceManager.getInstance();
     this.storage = deps.storage || getBrowserStorage();
     this.createDeviceId = deps.createDeviceId || generateUUID;
+    this.subscribeToDataChanges = deps.subscribeToDataChanges || (listener => onDataChange(SYNC_STORE_NAMES, listener));
   }
 
   static getInstance(): CloudSyncService {
@@ -100,10 +173,118 @@ export class CloudSyncService {
       return running;
     }
 
+    this.updateStatus({
+      status: 'syncing',
+      pending: false,
+      storageId,
+      reason: options.reason || 'manual',
+      error: undefined,
+      nextSyncAt: undefined
+    });
+
     const syncPromise = this.performSync(storageId, options)
+      .then(result => {
+        this.updateStatus({
+          status: result.success ? 'success' : 'error',
+          pending: false,
+          storageId,
+          reason: options.reason || 'manual',
+          lastSyncAt: result.success ? new Date().toISOString() : this.status.lastSyncAt,
+          lastResult: result,
+          error: result.success ? undefined : result.error,
+          nextSyncAt: undefined
+        });
+        return result;
+      })
       .finally(() => this.runningSyncs.delete(storageId));
     this.runningSyncs.set(storageId, syncPromise);
     return syncPromise;
+  }
+
+  startAutoSync(options: CloudSyncAutoOptions = {}): void {
+    this.stopAutoSync();
+
+    if (options.enabled === false) {
+      return;
+    }
+
+    this.autoSyncOptions = options;
+    this.unsubscribeDataChanges = this.subscribeToDataChanges(change => this.handleLocalDataChange(change));
+    this.attachBrowserTriggers();
+
+    if ((options.pollIntervalMs ?? DEFAULT_REMOTE_POLL_INTERVAL_MS) > 0) {
+      this.pollTimer = setInterval(() => {
+        void this.runScheduledSync('interval');
+      }, options.pollIntervalMs ?? DEFAULT_REMOTE_POLL_INTERVAL_MS);
+    }
+
+    if (options.syncOnStart !== false) {
+      this.scheduleSync('startup', { delayMs: 0 });
+    }
+  }
+
+  stopAutoSync(): void {
+    this.clearScheduledTimer();
+    this.clearRetryTimer();
+
+    if (this.pollTimer) {
+      clearInterval(this.pollTimer);
+      this.pollTimer = null;
+    }
+
+    this.unsubscribeDataChanges?.();
+    this.unsubscribeDataChanges = null;
+
+    this.browserTriggerCleanups.forEach(cleanup => cleanup());
+    this.browserTriggerCleanups = [];
+    this.autoSyncOptions = null;
+
+    this.updateStatus({
+      status: 'idle',
+      pending: false,
+      nextSyncAt: undefined,
+      reason: undefined
+    });
+  }
+
+  scheduleSync(
+    reason: CloudSyncRunReason = 'manual',
+    options: { storageId?: string; delayMs?: number } = {}
+  ): void {
+    if (!this.autoSyncOptions) {
+      return;
+    }
+
+    const delayMs = options.delayMs ?? this.autoSyncOptions.debounceMs ?? DEFAULT_AUTO_SYNC_DEBOUNCE_MS;
+    const nextSyncAt = new Date(Date.now() + delayMs).toISOString();
+
+    this.clearScheduledTimer();
+    this.updateStatus({
+      status: 'scheduled',
+      pending: true,
+      storageId: options.storageId,
+      reason,
+      nextSyncAt,
+      error: undefined
+    });
+
+    this.scheduledTimer = setTimeout(() => {
+      this.scheduledTimer = null;
+      void this.runScheduledSync(reason, options.storageId);
+    }, delayMs);
+  }
+
+  getStatus(): CloudSyncStatus {
+    return { ...this.status };
+  }
+
+  onStatusChange(listener: CloudSyncStatusListener): () => void {
+    this.statusListeners.add(listener);
+    listener(this.getStatus());
+
+    return () => {
+      this.statusListeners.delete(listener);
+    };
   }
 
   private async performSync(storageId: string, options: CloudSyncOptions): Promise<CloudSyncResult> {
@@ -168,9 +349,14 @@ export class CloudSyncService {
 
       let appliedLocal = false;
       if (!mergedEqualsLocal) {
-        const importResult = await this.database.replaceAllData(mergedData);
-        if (!importResult.success) {
-          throw new Error(importResult.error || importResult.message || '同步合并数据写入本地失败');
+        this.applyingRemoteDataDepth++;
+        try {
+          const importResult = await this.database.replaceAllData(mergedData);
+          if (!importResult.success) {
+            throw new Error(importResult.error || importResult.message || '同步合并数据写入本地失败');
+          }
+        } finally {
+          this.applyingRemoteDataDepth--;
         }
         appliedLocal = true;
       }
@@ -266,6 +452,194 @@ export class CloudSyncService {
     };
   }
 
+  private getConfigClient(): CloudSyncConfigClient {
+    if (this.configClient) {
+      return this.configClient;
+    }
+
+    if (PlatformDetector.isElectron()) {
+      return {
+        getStorageConfigs: () => CloudBackupAPI.getStorageConfigs()
+      };
+    }
+
+    return {
+      getStorageConfigs: () => mobileCloudBackupService.getStorageConfigs()
+    };
+  }
+
+  private handleLocalDataChange(change: DataChangeEventPayload): void {
+    if (this.applyingRemoteDataDepth > 0) {
+      return;
+    }
+
+    if (change.action === 'clear' && change.storeName === 'syncTombstones') {
+      return;
+    }
+
+    this.scheduleSync('local-change');
+  }
+
+  private async runScheduledSync(reason: CloudSyncRunReason, storageId?: string): Promise<void> {
+    if (!this.autoSyncOptions) {
+      return;
+    }
+
+    if (isBrowserOffline()) {
+      this.scheduleRetry(reason, '当前网络不可用，等待恢复后重试');
+      return;
+    }
+
+    const storageIds = await this.resolveStorageIds(storageId);
+    if (storageIds.length === 0) {
+      this.updateStatus({
+        status: 'idle',
+        pending: false,
+        reason,
+        storageId: undefined,
+        nextSyncAt: undefined,
+        error: undefined
+      });
+      return;
+    }
+
+    let firstFailure: CloudSyncResult | null = null;
+    let lastResult: CloudSyncResult | undefined;
+
+    for (const targetStorageId of storageIds) {
+      const result = await this.syncNow(targetStorageId, {
+        ...this.autoSyncOptions,
+        reason
+      });
+      lastResult = result;
+      if (!result.success && !firstFailure) {
+        firstFailure = result;
+      }
+    }
+
+    if (firstFailure) {
+      this.scheduleRetry(reason, firstFailure.error || '自动同步失败');
+      return;
+    }
+
+    this.clearRetryTimer();
+    this.updateStatus({
+      status: 'success',
+      pending: false,
+      storageId: storageIds[storageIds.length - 1],
+      reason,
+      lastResult,
+      lastSyncAt: new Date().toISOString(),
+      error: undefined,
+      nextSyncAt: undefined
+    });
+  }
+
+  private async resolveStorageIds(storageId?: string): Promise<string[]> {
+    if (storageId) {
+      return [storageId];
+    }
+
+    if (this.autoSyncOptions?.storageIds?.length) {
+      return this.autoSyncOptions.storageIds;
+    }
+
+    try {
+      const configs = await this.getConfigClient().getStorageConfigs();
+      return configs
+        .filter(config => config.enabled)
+        .map(config => config.id);
+    } catch (error) {
+      console.warn('获取自动同步存储配置失败:', error);
+      return [];
+    }
+  }
+
+  private scheduleRetry(reason: CloudSyncRunReason, error: string): void {
+    if (!this.autoSyncOptions) {
+      return;
+    }
+
+    const retryMs = this.autoSyncOptions.retryMs ?? DEFAULT_AUTO_SYNC_RETRY_MS;
+    if (retryMs <= 0) {
+      this.updateStatus({
+        status: 'error',
+        pending: false,
+        reason,
+        error,
+        nextSyncAt: undefined
+      });
+      return;
+    }
+
+    const nextSyncAt = new Date(Date.now() + retryMs).toISOString();
+    this.clearRetryTimer();
+    this.updateStatus({
+      status: 'error',
+      pending: true,
+      reason,
+      error,
+      nextSyncAt
+    });
+
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      void this.runScheduledSync('retry');
+    }, retryMs);
+  }
+
+  private attachBrowserTriggers(): void {
+    if (typeof window !== 'undefined') {
+      const handleOnline = () => this.scheduleSync('online', { delayMs: 0 });
+      const handleFocus = () => this.scheduleSync('focus', { delayMs: 0 });
+      window.addEventListener('online', handleOnline);
+      window.addEventListener('focus', handleFocus);
+      this.browserTriggerCleanups.push(() => window.removeEventListener('online', handleOnline));
+      this.browserTriggerCleanups.push(() => window.removeEventListener('focus', handleFocus));
+    }
+
+    if (typeof document !== 'undefined') {
+      const handleVisibilityChange = () => {
+        if (document.visibilityState === 'visible') {
+          this.scheduleSync('focus', { delayMs: 0 });
+        }
+      };
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+      this.browserTriggerCleanups.push(() => document.removeEventListener('visibilitychange', handleVisibilityChange));
+    }
+  }
+
+  private clearScheduledTimer(): void {
+    if (this.scheduledTimer) {
+      clearTimeout(this.scheduledTimer);
+      this.scheduledTimer = null;
+    }
+  }
+
+  private clearRetryTimer(): void {
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
+  }
+
+  private updateStatus(update: Partial<CloudSyncStatus>): void {
+    this.status = {
+      ...this.status,
+      ...update,
+      updatedAt: new Date().toISOString()
+    };
+
+    const snapshot = this.getStatus();
+    this.statusListeners.forEach(listener => {
+      try {
+        listener(snapshot);
+      } catch (error) {
+        console.error('云同步状态监听器执行失败:', error);
+      }
+    });
+  }
+
   private getOrCreateDeviceId(): string {
     const stored = this.storage?.getItem(DEVICE_ID_STORAGE_KEY);
     if (stored) {
@@ -326,6 +700,10 @@ function getSyncAction(appliedLocal: boolean, uploadedRemote: boolean): CloudSyn
     return 'downloaded';
   }
   return uploadedRemote ? 'uploaded' : 'noop';
+}
+
+function isBrowserOffline(): boolean {
+  return typeof navigator !== 'undefined' && navigator.onLine === false;
 }
 
 function createEmptySummary(): CloudSyncMergeSummary {

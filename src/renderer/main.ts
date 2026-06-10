@@ -1,7 +1,7 @@
 import { createApp } from 'vue'
 import App from './App.vue'
 import i18n from './i18n'
-import { initDatabase, databaseService } from './lib/services'
+import { initDatabase, databaseService, cloudSyncService } from './lib/services'
 import type { SupportedLocale } from '@shared/types/preferences'
 import { PlatformDetector } from '@shared/platform'
 import './tailwind.css'
@@ -205,6 +205,11 @@ async function startApp() {
     }
 
     app.mount('#app');
+
+    cloudSyncService.startAutoSync({
+      platform: PlatformDetector.getPlatform(),
+      deviceName: navigator.userAgent
+    });
 
     // Vue 应用挂载完成后移除加载屏幕
     removeInitialLoading();

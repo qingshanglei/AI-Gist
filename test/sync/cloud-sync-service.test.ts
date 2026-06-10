@@ -1,5 +1,5 @@
-import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { CloudSyncService } from '~/lib/services/cloud-sync.service'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+import { CloudSyncService, type CloudSyncServiceDeps } from '~/lib/services/cloud-sync.service'
 import { createCloudSyncSnapshot } from '@shared/cloud-sync-engine'
 import { createEmptyCloudSyncManifest } from '@shared/cloud-sync-manifest'
 
@@ -29,7 +29,23 @@ const baseData = {
   syncTombstones: []
 }
 
-function createService(data: any, manifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')) {
+const enabledWebDAVConfig = {
+  id: 'cfg-1',
+  name: 'WebDAV',
+  type: 'webdav' as const,
+  enabled: true,
+  url: 'http://127.0.0.1/webdav',
+  username: 'user',
+  password: 'pass',
+  createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: '2026-01-01T00:00:00.000Z'
+}
+
+function createService(
+  data: any,
+  manifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z'),
+  extraDeps: CloudSyncServiceDeps = {}
+) {
   const storage = new MemoryStorage()
   const cloudClient = {
     getCloudSyncManifest: vi.fn().mockResolvedValue(manifest),
@@ -50,7 +66,8 @@ function createService(data: any, manifest = createEmptyCloudSyncManifest('2026-
     cloudClient,
     database,
     storage,
-    createDeviceId: () => 'device-a'
+    createDeviceId: () => 'device-a',
+    ...extraDeps
   })
 
   return {
@@ -64,6 +81,10 @@ function createService(data: any, manifest = createEmptyCloudSyncManifest('2026-
 describe('CloudSyncService', () => {
   beforeEach(() => {
     vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it('uploads a local snapshot when the cloud manifest is empty', async () => {
@@ -178,5 +199,109 @@ describe('CloudSyncService', () => {
     const savedManifest = cloudClient.saveCloudSyncManifest.mock.calls[0][1]
     expect(savedManifest.latestSnapshot.data.prompts).toEqual([])
     expect(savedManifest.latestSnapshot.data.syncTombstones).toHaveLength(1)
+  })
+
+  it('automatically syncs enabled storage after local data changes', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25,
+      pollIntervalMs: 0,
+      retryMs: 0
+    })
+    dataChangeListener?.({
+      storeName: 'prompts',
+      action: 'update',
+      id: 1,
+      timestamp: Date.now(),
+      sourceId: 'test'
+    })
+
+    expect(service.getStatus().status).toBe('scheduled')
+
+    await vi.advanceTimersByTimeAsync(25)
+
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(service.getStatus()).toMatchObject({
+      status: 'success',
+      pending: false,
+      storageId: 'cfg-1'
+    })
+
+    service.stopAutoSync()
+  })
+
+  it('does not schedule another upload from data changes emitted while applying remote data', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const emptyLocalData = {
+      categories: [],
+      prompts: [],
+      promptHistories: [],
+      aiConfigs: [],
+      aiHistory: [],
+      settings: [],
+      syncTombstones: []
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(baseData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot: remoteSnapshot
+    }
+    const { service, database } = createService(emptyLocalData, manifest, {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+    database.replaceAllData.mockImplementation(async () => {
+      dataChangeListener?.({
+        storeName: 'prompts',
+        action: 'create',
+        id: 1,
+        timestamp: Date.now(),
+        sourceId: 'test'
+      })
+      return {
+        success: true,
+        message: 'ok'
+      }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25,
+      pollIntervalMs: 0,
+      retryMs: 0
+    })
+
+    const result = await service.syncNow('cfg-1')
+    expect(result.success).toBe(true)
+    expect(result.action).toBe('downloaded')
+
+    await vi.advanceTimersByTimeAsync(25)
+
+    expect(database.exportAllDataForSync).toHaveBeenCalledTimes(1)
+    expect(service.getStatus()).toMatchObject({
+      status: 'success',
+      pending: false
+    })
+
+    service.stopAutoSync()
   })
 })
