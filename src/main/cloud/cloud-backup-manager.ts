@@ -380,10 +380,15 @@ export class CloudBackupManager {
   private setupSyncManifestHandlers(): void {
     ipcMain.handle('cloud:get-sync-manifest', async (_, storageId: string) => {
       try {
-        return await this.readCloudSyncManifest(storageId);
+        return {
+          success: true,
+          manifest: await this.readCloudSyncManifest(storageId)
+        };
       } catch (error) {
-        console.error('读取云同步 manifest 失败:', error);
-        throw new Error(`读取云同步 manifest 失败: ${this.getErrorMessage(error)}`);
+        return {
+          success: false,
+          error: `读取云同步 manifest 失败: ${this.getErrorMessage(error)}`
+        };
       }
     });
 
@@ -392,7 +397,6 @@ export class CloudBackupManager {
         await this.writeCloudSyncManifest(storageId, manifest);
         return { success: true };
       } catch (error) {
-        console.error('保存云同步 manifest 失败:', error);
         return {
           success: false,
           error: this.getErrorMessage(error)

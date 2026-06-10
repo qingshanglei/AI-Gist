@@ -206,7 +206,7 @@ async function startApp() {
 
     app.mount('#app');
 
-    cloudSyncService.startAutoSync({
+    await cloudSyncService.startAutoSyncFromSettings({
       platform: PlatformDetector.getPlatform(),
       deviceName: navigator.userAgent
     });

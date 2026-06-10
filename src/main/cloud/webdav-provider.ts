@@ -150,7 +150,7 @@ export class WebDAVProvider implements CloudStorageProvider {
       const files = Array.isArray(contents) ? contents : contents.data || [];
       return files.map((item: any) => this.mapFileInfo(item));
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.LIST_FILES_FAILED, error);
+      this.logOperationError(CONSTANTS.LOG_MESSAGES.LIST_FILES_FAILED, error);
       throw new Error(`${CONSTANTS.ERROR_MESSAGES.LIST_FILES_FAILED}: ${this.getErrorMessage(error)}`);
     }
   }
@@ -175,7 +175,7 @@ export class WebDAVProvider implements CloudStorageProvider {
       }
       return Buffer.from(String(data), 'utf-8');
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.READ_FILE_FAILED, error);
+      this.logOperationError(CONSTANTS.LOG_MESSAGES.READ_FILE_FAILED, error);
       throw new Error(`${CONSTANTS.ERROR_MESSAGES.READ_FILE_FAILED}: ${this.getErrorMessage(error)}`);
     }
   }
@@ -205,7 +205,7 @@ export class WebDAVProvider implements CloudStorageProvider {
 
       await this.verifyRemoteWrite(targetPath, data);
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.WRITE_FILE_FAILED, error);
+      this.logOperationError(CONSTANTS.LOG_MESSAGES.WRITE_FILE_FAILED, error);
       throw new Error(`${CONSTANTS.ERROR_MESSAGES.WRITE_FILE_FAILED}: ${this.getErrorMessage(error)}`);
     }
   }
@@ -219,7 +219,7 @@ export class WebDAVProvider implements CloudStorageProvider {
     try {
       await this.client.deleteFile(this.normalizeRemotePath(filePath));
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.DELETE_FILE_FAILED, error);
+      this.logOperationError(CONSTANTS.LOG_MESSAGES.DELETE_FILE_FAILED, error);
       throw new Error(`${CONSTANTS.ERROR_MESSAGES.DELETE_FILE_FAILED}: ${this.getErrorMessage(error)}`);
     }
   }
@@ -247,7 +247,7 @@ export class WebDAVProvider implements CloudStorageProvider {
       // 递归创建目录结构
       await this.createDirectoryRecursively(targetPath);
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.CREATE_DIRECTORY_FAILED, error);
+      this.logOperationError(CONSTANTS.LOG_MESSAGES.CREATE_DIRECTORY_FAILED, error);
       throw new Error(`${CONSTANTS.ERROR_MESSAGES.CREATE_DIRECTORY_FAILED}: ${this.getErrorMessage(error)}`);
     }
   }
@@ -283,7 +283,7 @@ export class WebDAVProvider implements CloudStorageProvider {
       try {
         await this.client.createDirectory(currentPath);
       } catch (error: any) {
-        if (await this.directoryExists(currentPath)) {
+        if (await this.directoryExists(currentPath) || this.isDirectoryAlreadyExistsError(error)) {
           continue;
         }
 
@@ -374,6 +374,40 @@ export class WebDAVProvider implements CloudStorageProvider {
    * @returns 格式化的错误信息
    */
   private getErrorMessage(error: unknown): string {
-    return error instanceof Error ? error.message : '未知错误';
+    const message = error instanceof Error ? error.message : '未知错误';
+    const code = typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: string }).code || '')
+      : '';
+    return code && !message.includes(code) ? `${message} (${code})` : message;
+  }
+
+  private isDirectoryAlreadyExistsError(error: unknown): boolean {
+    return /already exists|405|409/i.test(this.getErrorMessage(error));
+  }
+
+  private logOperationError(message: string, error: unknown): void {
+    if (this.isTransientNetworkError(error)) {
+      return;
+    }
+    console.error(message, error);
+  }
+
+  private isTransientNetworkError(error: unknown): boolean {
+    const code = typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: string }).code || '')
+      : '';
+    const message = this.getErrorMessage(error);
+    return [
+      'ECONNRESET',
+      'ECONNREFUSED',
+      'ENOTFOUND',
+      'EAI_AGAIN',
+      'ETIMEDOUT',
+      'ENETUNREACH',
+      'EHOSTUNREACH'
+    ].some(token => code.includes(token) || message.includes(token)) ||
+      message.includes('TLS connection') ||
+      message.includes('socket disconnected') ||
+      message.includes('socket hang up');
   }
 }

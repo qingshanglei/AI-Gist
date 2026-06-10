@@ -1,5 +1,9 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
-import { CloudSyncService, type CloudSyncServiceDeps } from '~/lib/services/cloud-sync.service'
+import {
+  CloudSyncService,
+  DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES,
+  type CloudSyncServiceDeps
+} from '~/lib/services/cloud-sync.service'
 import { emitDataChange } from '~/lib/services/data-change-events'
 import { createCloudSyncSnapshot } from '@shared/cloud-sync-engine'
 import { createEmptyCloudSyncManifest } from '@shared/cloud-sync-manifest'
@@ -327,6 +331,113 @@ describe('CloudSyncService', () => {
     await vi.advanceTimersByTimeAsync(25)
 
     expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+
+    service.stopAutoSync()
+  })
+
+  it('uses a 15 minute remote polling interval by default', async () => {
+    vi.useFakeTimers()
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      retryMs: 0
+    })
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES * 60 * 1000 - 30_000)
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+
+    service.stopAutoSync()
+  })
+
+  it('throttles automatic local-change syncs until the configured interval has elapsed', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25,
+      retryMs: 0
+    })
+    await service.syncNow('cfg-1')
+    cloudClient.saveCloudSyncManifest.mockClear()
+
+    dataChangeListener?.({
+      storeName: 'prompts',
+      action: 'update',
+      id: 1,
+      timestamp: Date.now(),
+      sourceId: 'test'
+    })
+
+    await vi.advanceTimersByTimeAsync(25)
+    expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
+    expect(service.getStatus()).toMatchObject({
+      status: 'scheduled',
+      pending: true
+    })
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES * 60 * 1000)
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+
+    service.stopAutoSync()
+  })
+
+  it('backs off automatic retries after a transient cloud read failure', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+    cloudClient.getCloudSyncManifest.mockRejectedValue(new Error('ECONNRESET'))
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25
+    })
+    dataChangeListener?.({
+      storeName: 'prompts',
+      action: 'update',
+      id: 1,
+      timestamp: Date.now(),
+      sourceId: 'test'
+    })
+
+    await vi.advanceTimersByTimeAsync(25)
+    expect(cloudClient.getCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(service.getStatus()).toMatchObject({
+      status: 'error',
+      pending: true,
+      failureCount: 1
+    })
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(cloudClient.getCloudSyncManifest).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES * 60 * 1000 - 30_000)
+    expect(cloudClient.getCloudSyncManifest).toHaveBeenCalledTimes(2)
 
     service.stopAutoSync()
   })

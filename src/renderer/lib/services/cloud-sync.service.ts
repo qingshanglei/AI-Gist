@@ -21,15 +21,23 @@ import {
 import { generateUUID } from '../utils/uuid';
 import { CloudBackupAPI } from '../api/cloud-backup.api';
 import { DatabaseServiceManager } from './database-manager.service';
+import { AppSettingsService } from './app-settings.service';
 import { mobileCloudBackupService } from './mobile-cloud-backup.service';
 import type { DataChangeEventPayload, DataStoreName } from './data-change-events';
 import { onDataChange } from './data-change-events';
 
 const DEVICE_ID_STORAGE_KEY = 'ai_gist_cloud_sync_device_id';
 const LOCAL_STATE_STORAGE_PREFIX = 'ai_gist_cloud_sync_state';
-const DEFAULT_AUTO_SYNC_DEBOUNCE_MS = 3000;
-const DEFAULT_AUTO_SYNC_RETRY_MS = 30000;
-const DEFAULT_REMOTE_POLL_INTERVAL_MS = 30000;
+const LAST_AUTO_ATTEMPT_STORAGE_KEY = 'ai_gist_cloud_sync_last_auto_attempt_at';
+export const CLOUD_SYNC_INTERVAL_SETTING_KEY = 'cloud.sync.intervalMinutes';
+export const DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES = 15;
+export const MIN_CLOUD_SYNC_INTERVAL_MINUTES = 5;
+export const MAX_CLOUD_SYNC_INTERVAL_MINUTES = 1440;
+const DEFAULT_AUTO_SYNC_DEBOUNCE_MS = 60000;
+const DEFAULT_REMOTE_POLL_INTERVAL_MS = DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES * 60 * 1000;
+const DEFAULT_AUTO_SYNC_RETRY_MS = DEFAULT_REMOTE_POLL_INTERVAL_MS;
+const DEFAULT_STARTUP_SYNC_DELAY_MS = 10000;
+const MAX_AUTO_SYNC_RETRY_MS = 60 * 60 * 1000;
 const MAX_REMOTE_RECHECK_ATTEMPTS = 3;
 const SYNC_STORE_NAMES: DataStoreName[] = [
   'categories',
@@ -98,6 +106,8 @@ export interface CloudSyncStatus {
   reason?: CloudSyncRunReason;
   nextSyncAt?: string;
   lastSyncAt?: string;
+  lastAttemptAt?: string;
+  failureCount?: number;
   lastResult?: CloudSyncResult;
   error?: string;
 }
@@ -108,6 +118,7 @@ export interface CloudSyncAutoOptions extends CloudSyncOptions {
   debounceMs?: number;
   retryMs?: number;
   pollIntervalMs?: number;
+  startupDelayMs?: number;
   syncOnStart?: boolean;
 }
 
@@ -123,6 +134,7 @@ export interface CloudSyncServiceDeps {
   cloudClient?: CloudSyncCloudClient;
   configClient?: CloudSyncConfigClient;
   database?: CloudSyncDatabaseClient;
+  settings?: Pick<AppSettingsService, 'getNumberValue' | 'setNumberValue'>;
   storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
   createDeviceId?: () => string;
   subscribeToDataChanges?: (listener: (change: DataChangeEventPayload) => void) => () => void;
@@ -135,6 +147,7 @@ export class CloudSyncService {
   private readonly cloudClient?: CloudSyncCloudClient;
   private readonly configClient?: CloudSyncConfigClient;
   private readonly database: CloudSyncDatabaseClient;
+  private readonly settings: Pick<AppSettingsService, 'getNumberValue' | 'setNumberValue'>;
   private readonly storage?: Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
   private readonly createDeviceId: () => string;
   private readonly subscribeToDataChanges: (listener: (change: DataChangeEventPayload) => void) => () => void;
@@ -147,6 +160,7 @@ export class CloudSyncService {
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private browserTriggerCleanups: (() => void)[] = [];
   private applyingRemoteDataDepth = 0;
+  private failureCount = 0;
   private status: CloudSyncStatus = {
     status: 'idle',
     pending: false,
@@ -157,6 +171,7 @@ export class CloudSyncService {
     this.cloudClient = deps.cloudClient;
     this.configClient = deps.configClient;
     this.database = deps.database || DatabaseServiceManager.getInstance();
+    this.settings = deps.settings || AppSettingsService.getInstance();
     this.storage = deps.storage || getBrowserStorage();
     this.createDeviceId = deps.createDeviceId || generateUUID;
     this.subscribeToDataChanges = deps.subscribeToDataChanges || (listener => onDataChange(SYNC_STORE_NAMES, listener));
@@ -175,11 +190,14 @@ export class CloudSyncService {
       return running;
     }
 
+    const attemptAt = new Date().toISOString();
+    this.saveLastAutoAttemptAt(attemptAt);
     this.updateStatus({
       status: 'syncing',
       pending: false,
       storageId,
       reason: options.reason || 'manual',
+      lastAttemptAt: attemptAt,
       error: undefined,
       nextSyncAt: undefined
     });
@@ -192,10 +210,14 @@ export class CloudSyncService {
           storageId,
           reason: options.reason || 'manual',
           lastSyncAt: result.success ? new Date().toISOString() : this.status.lastSyncAt,
+          failureCount: result.success ? 0 : this.failureCount,
           lastResult: result,
           error: result.success ? undefined : result.error,
           nextSyncAt: undefined
         });
+        if (result.success) {
+          this.failureCount = 0;
+        }
         return result;
       })
       .finally(() => this.runningSyncs.delete(storageId));
@@ -210,19 +232,63 @@ export class CloudSyncService {
       return;
     }
 
-    this.autoSyncOptions = options;
+    this.autoSyncOptions = normalizeAutoSyncOptions(options);
     this.unsubscribeDataChanges = this.subscribeToDataChanges(change => this.handleLocalDataChange(change));
     this.attachBrowserTriggers();
 
-    if ((options.pollIntervalMs ?? DEFAULT_REMOTE_POLL_INTERVAL_MS) > 0) {
+    if (this.autoSyncOptions.pollIntervalMs! > 0) {
       this.pollTimer = setInterval(() => {
         void this.runScheduledSync('interval');
-      }, options.pollIntervalMs ?? DEFAULT_REMOTE_POLL_INTERVAL_MS);
+      }, this.autoSyncOptions.pollIntervalMs);
     }
 
-    if (options.syncOnStart !== false) {
-      this.scheduleSync('startup', { delayMs: 0 });
+    if (this.autoSyncOptions.syncOnStart !== false) {
+      this.scheduleSync('startup', {
+        delayMs: this.autoSyncOptions.startupDelayMs ?? DEFAULT_STARTUP_SYNC_DELAY_MS
+      });
     }
+  }
+
+  async startAutoSyncFromSettings(options: CloudSyncAutoOptions = {}): Promise<void> {
+    const intervalMinutes = await this.getAutoSyncIntervalMinutes();
+    const intervalMs = minutesToMs(intervalMinutes);
+    this.startAutoSync({
+      ...options,
+      pollIntervalMs: options.pollIntervalMs ?? intervalMs,
+      retryMs: options.retryMs ?? intervalMs
+    });
+  }
+
+  async getAutoSyncIntervalMinutes(): Promise<number> {
+    try {
+      const storedValue = await this.settings.getNumberValue(
+        CLOUD_SYNC_INTERVAL_SETTING_KEY,
+        DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES
+      );
+      return normalizeCloudSyncIntervalMinutes(storedValue);
+    } catch {
+      return DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES;
+    }
+  }
+
+  async setAutoSyncIntervalMinutes(minutes: number): Promise<number> {
+    const normalizedMinutes = normalizeCloudSyncIntervalMinutes(minutes);
+    await this.settings.setNumberValue(
+      CLOUD_SYNC_INTERVAL_SETTING_KEY,
+      normalizedMinutes,
+      '云同步自动检查间隔（分钟）'
+    );
+
+    if (this.autoSyncOptions) {
+      const intervalMs = minutesToMs(normalizedMinutes);
+      this.startAutoSync({
+        ...this.autoSyncOptions,
+        pollIntervalMs: intervalMs,
+        retryMs: intervalMs
+      });
+    }
+
+    return normalizedMinutes;
   }
 
   stopAutoSync(): void {
@@ -513,6 +579,19 @@ export class CloudSyncService {
       return;
     }
 
+    if (this.retryTimer && reason !== 'retry' && reason !== 'config-change') {
+      return;
+    }
+
+    const throttleMs = this.getAutoRunThrottleMs(reason);
+    if (throttleMs > 0) {
+      this.scheduleSync(reason, {
+        storageId,
+        delayMs: throttleMs
+      });
+      return;
+    }
+
     if (isBrowserOffline()) {
       this.scheduleRetry(reason, '当前网络不可用，等待恢复后重试');
       return;
@@ -551,6 +630,7 @@ export class CloudSyncService {
     }
 
     this.clearRetryTimer();
+    this.failureCount = 0;
     this.updateStatus({
       status: 'success',
       pending: false,
@@ -558,6 +638,7 @@ export class CloudSyncService {
       reason,
       lastResult,
       lastSyncAt: new Date().toISOString(),
+      failureCount: 0,
       error: undefined,
       nextSyncAt: undefined
     });
@@ -588,7 +669,7 @@ export class CloudSyncService {
       return;
     }
 
-    const retryMs = this.autoSyncOptions.retryMs ?? DEFAULT_AUTO_SYNC_RETRY_MS;
+    const retryMs = this.getNextRetryDelayMs();
     if (retryMs <= 0) {
       this.updateStatus({
         status: 'error',
@@ -601,12 +682,15 @@ export class CloudSyncService {
     }
 
     const nextSyncAt = new Date(Date.now() + retryMs).toISOString();
+    this.clearScheduledTimer();
     this.clearRetryTimer();
+    this.failureCount += 1;
     this.updateStatus({
       status: 'error',
       pending: true,
       reason,
       error,
+      failureCount: this.failureCount,
       nextSyncAt
     });
 
@@ -649,6 +733,48 @@ export class CloudSyncService {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
     }
+  }
+
+  private getAutoRunThrottleMs(reason: CloudSyncRunReason): number {
+    if (reason === 'config-change') {
+      return 0;
+    }
+
+    const intervalMs = this.autoSyncOptions?.pollIntervalMs ?? DEFAULT_REMOTE_POLL_INTERVAL_MS;
+    if (intervalMs <= 0) {
+      return 0;
+    }
+
+    const lastAttemptTime = this.getLastAutoAttemptTime();
+    if (!lastAttemptTime) {
+      return 0;
+    }
+
+    return Math.max(0, lastAttemptTime + intervalMs - Date.now());
+  }
+
+  private getNextRetryDelayMs(): number {
+    const baseRetryMs = this.autoSyncOptions?.retryMs ?? DEFAULT_AUTO_SYNC_RETRY_MS;
+    if (baseRetryMs <= 0) {
+      return 0;
+    }
+
+    const multiplier = 2 ** this.failureCount;
+    return Math.min(baseRetryMs * multiplier, MAX_AUTO_SYNC_RETRY_MS);
+  }
+
+  private getLastAutoAttemptTime(): number | null {
+    const rawValue = this.storage?.getItem(LAST_AUTO_ATTEMPT_STORAGE_KEY);
+    if (!rawValue) {
+      return null;
+    }
+
+    const time = Date.parse(rawValue);
+    return Number.isNaN(time) ? null : time;
+  }
+
+  private saveLastAutoAttemptAt(isoTime: string): void {
+    this.storage?.setItem(LAST_AUTO_ATTEMPT_STORAGE_KEY, isoTime);
   }
 
   private updateStatus(update: Partial<CloudSyncStatus>): void {
@@ -728,6 +854,63 @@ function getSyncAction(appliedLocal: boolean, uploadedRemote: boolean): CloudSyn
     return 'downloaded';
   }
   return uploadedRemote ? 'uploaded' : 'noop';
+}
+
+function normalizeAutoSyncOptions(options: CloudSyncAutoOptions): CloudSyncAutoOptions {
+  const pollIntervalMs = options.pollIntervalMs ?? DEFAULT_REMOTE_POLL_INTERVAL_MS;
+  return {
+    ...options,
+    debounceMs: options.debounceMs ?? DEFAULT_AUTO_SYNC_DEBOUNCE_MS,
+    pollIntervalMs,
+    retryMs: options.retryMs ?? pollIntervalMs
+  };
+}
+
+export function normalizeCloudSyncIntervalMinutes(minutes: number): number {
+  if (!Number.isFinite(minutes)) {
+    return DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES;
+  }
+
+  return Math.min(
+    MAX_CLOUD_SYNC_INTERVAL_MINUTES,
+    Math.max(MIN_CLOUD_SYNC_INTERVAL_MINUTES, Math.round(minutes))
+  );
+}
+
+function minutesToMs(minutes: number): number {
+  return normalizeCloudSyncIntervalMinutes(minutes) * 60 * 1000;
+}
+
+export function getCloudSyncResultMessage(action?: string, conflictCount = 0): string {
+  const suffix = conflictCount > 0 ? `，已自动处理 ${conflictCount} 个冲突` : '';
+  if (action === 'uploaded') return `同步完成，已上传本机数据${suffix}`;
+  if (action === 'downloaded') return `同步完成，已更新本机数据${suffix}`;
+  if (action === 'merged') return `同步完成，已合并本机和云端数据${suffix}`;
+  return `同步完成，数据已是最新${suffix}`;
+}
+
+export function getFriendlyCloudSyncError(error?: string): string {
+  if (!error) return '同步失败，请稍后重试';
+  if (error.includes('401') || error.includes('Unauthorized') || error.includes('403')) {
+    return '存储服务认证失败，请检查用户名和密码是否正确';
+  }
+  if (
+    error.includes('ECONNRESET') ||
+    error.includes('ECONNREFUSED') ||
+    error.includes('ENOTFOUND') ||
+    error.includes('EAI_AGAIN') ||
+    error.includes('ETIMEDOUT') ||
+    error.includes('TLS connection') ||
+    error.includes('socket disconnected') ||
+    error.includes('Network') ||
+    error.includes('network')
+  ) {
+    return '暂时无法连接到云存储，应用会按同步周期自动重试';
+  }
+  if (error.includes('数据库') || error.includes('database')) {
+    return '读取或写入本地数据失败，请重启应用后再试';
+  }
+  return `同步失败：${error}`;
 }
 
 function hasRemoteRevisionChanged(

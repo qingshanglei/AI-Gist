@@ -101,7 +101,11 @@ export default interface ElectronApi {
     createBackup: (storageId: string, description?: string) => Promise<{ success: boolean; message: string; backupInfo?: CloudBackupInfo; error?: string }>
     restoreBackup: (storageId: string, backupId: string) => Promise<{ success: boolean; message: string; backupInfo?: CloudBackupInfo; error?: string }>
     deleteBackup: (storageId: string, backupId: string) => Promise<{ success: boolean; message?: string; error?: string }>
-    getSyncManifest: (storageId: string) => Promise<CloudSyncManifest>
+    getSyncManifest: (storageId: string) => Promise<
+      CloudSyncManifest |
+      { success: true; manifest: CloudSyncManifest } |
+      { success: false; error?: string }
+    >
     saveSyncManifest: (storageId: string, manifest: CloudSyncManifest) => Promise<{ success: boolean; error?: string }>
   }
 

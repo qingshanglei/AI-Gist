@@ -149,7 +149,14 @@ export class CloudBackupAPI {
     if (!this.isElectronAvailable()) {
       throw new Error('Electron API not available');
     }
-    return await window.electronAPI.cloud.getSyncManifest(storageId);
+    const response = await window.electronAPI.cloud.getSyncManifest(storageId);
+    if (response && typeof response === 'object' && 'success' in response) {
+      if (response.success && response.manifest) {
+        return response.manifest;
+      }
+      throw new Error(response.error || '读取云同步 manifest 失败');
+    }
+    return response;
   }
 
   /**
