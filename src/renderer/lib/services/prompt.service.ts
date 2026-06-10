@@ -659,6 +659,49 @@ export class PromptService extends BaseDatabaseService {
   }
 
   /**
+   * 创建备份恢复用的提示词历史记录，保留原 UUID 和创建时间。
+   * @param history PromptHistory 去除 id 后的历史记录数据
+   * @returns Promise<PromptHistory> 创建的历史记录
+   */
+  async createPromptHistoryFromBackup(history: Omit<PromptHistory, 'id'>): Promise<PromptHistory> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const transaction = this.db.transaction(['promptHistories'], 'readwrite');
+    const store = transaction.objectStore('promptHistories');
+
+    const historyToStore = {
+      ...history,
+      uuid: history.uuid || generateUUID(),
+      createdAt: history.createdAt ? new Date(history.createdAt) : new Date()
+    };
+
+    const request = store.add(historyToStore);
+
+    return new Promise((resolve, reject) => {
+      request.onsuccess = () => {
+        resolve({
+          ...historyToStore,
+          id: request.result as number
+        });
+      };
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  /**
+   * 获取所有提示词历史记录，用于完整备份。
+   */
+  async getAllPromptHistories(): Promise<PromptHistory[]> {
+    const histories = await this.getAll<PromptHistory>('promptHistories');
+    return histories.sort((a, b) => {
+      if (a.promptId !== b.promptId) {
+        return a.promptId - b.promptId;
+      }
+      return b.version - a.version;
+    });
+  }
+
+  /**
    * 获取提示词的历史记录
    * 查询指定提示词的所有历史版本
    * @param promptId number 提示词ID

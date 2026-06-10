@@ -242,34 +242,34 @@ export class DatabaseServiceManager {
   }
 
   /**
-   * 序列化 prompt 的 imageBlobs（Blob[] → base64 string[]）
+   * 序列化记录中的 imageBlobs（Blob[] → base64 string[]）
    */
-  private async serializeImageBlobs(prompts: any[]): Promise<any[]> {
-    return Promise.all(prompts.map(async (prompt) => {
-      if (!prompt.imageBlobs?.length) return prompt
+  private async serializeImageBlobs(records: any[]): Promise<any[]> {
+    return Promise.all(records.map(async (record) => {
+      if (!record.imageBlobs?.length) return record
       const serialized = await Promise.all(
-        prompt.imageBlobs
+        record.imageBlobs
           .filter((b: any) => b instanceof Blob)
           .map((b: Blob) => this.blobToBase64(b))
       )
-      return { ...prompt, imageBlobs: serialized }
+      return { ...record, imageBlobs: serialized }
     }))
   }
 
   /**
-   * 反序列化 prompt 的 imageBlobs（base64 string[] → Blob[]）
+   * 反序列化记录中的 imageBlobs（base64 string[] → Blob[]）
    */
-  private async deserializeImageBlobs(promptData: any): Promise<any> {
-    if (!promptData.imageBlobs?.length) return promptData
+  private async deserializeImageBlobs(recordData: any): Promise<any> {
+    if (!recordData.imageBlobs?.length) return recordData
     const blobs = (await Promise.all(
-      promptData.imageBlobs.map(async (item: any) => {
+      recordData.imageBlobs.map(async (item: any) => {
         if (typeof item === 'string' && item.startsWith('data:')) {
           return this.base64ToBlob(item)
         }
         return item instanceof Blob ? item : null
       })
     )).filter(Boolean)
-    return { ...promptData, imageBlobs: blobs }
+    return { ...recordData, imageBlobs: blobs }
   }
 
   /**
@@ -301,6 +301,7 @@ export class DatabaseServiceManager {
       const results = await Promise.allSettled([
         this.category.getBasicCategories(),
         this.prompt.getAllPromptsForTags(),
+        this.prompt.getAllPromptHistories(),
         this.aiConfig.getAllAIConfigs(),
         this.aiGenerationHistory.getAllAIGenerationHistory(),
         this.appSettings.getAllSettings()
@@ -310,6 +311,7 @@ export class DatabaseServiceManager {
       const [
         categories,
         prompts,
+        promptHistories,
         aiConfigs,
         aiHistory,
         settings
@@ -317,7 +319,7 @@ export class DatabaseServiceManager {
         if (result.status === 'fulfilled') {
           return result.value || [];
         } else {
-          const tableNames = ['categories', 'prompts', 'aiConfigs', 'aiHistory', 'settings'];
+          const tableNames = ['categories', 'prompts', 'promptHistories', 'aiConfigs', 'aiHistory', 'settings'];
           console.warn(`获取 ${tableNames[index]} 数据失败:`, result.reason);
           return [];
         }
@@ -326,6 +328,7 @@ export class DatabaseServiceManager {
       const exportData = {
         categories: categories as any[],
         prompts: prompts as any[],
+        promptHistories: promptHistories as any[],
         aiConfigs: aiConfigs as any[],
         aiHistory: aiHistory as any[],
         settings: settings as any[]
@@ -334,6 +337,7 @@ export class DatabaseServiceManager {
       console.log('渲染进程: 数据导出完成', {
         分类数: exportData.categories.length,
         提示词数: exportData.prompts.length,
+        提示词历史数: exportData.promptHistories.length,
         AI配置数: exportData.aiConfigs.length,
         AI历史数: exportData.aiHistory.length,
         设置数: exportData.settings.length
@@ -368,7 +372,8 @@ export class DatabaseServiceManager {
       ...result,
       data: {
         ...result.data,
-        prompts: await this.serializeImageBlobs(result.data.prompts)
+        prompts: await this.serializeImageBlobs(result.data.prompts),
+        promptHistories: await this.serializeImageBlobs(result.data.promptHistories || [])
       }
     };
   }
@@ -450,6 +455,33 @@ export class DatabaseServiceManager {
           }
         }
       }
+
+      // 导入提示词历史数据（需要处理提示词 ID 映射）
+      if (data.promptHistories && data.promptHistories.length > 0) {
+        console.log(`导入提示词历史数据: ${data.promptHistories.length} 条`);
+        for (const history of data.promptHistories) {
+          const { id, ...historyDataWithoutId } = history;
+
+          if (historyDataWithoutId.promptId !== undefined) {
+            const newPromptId = idMapping[`prompt_${historyDataWithoutId.promptId}`];
+            if (newPromptId !== undefined) {
+              historyDataWithoutId.promptId = newPromptId;
+            } else {
+              console.warn(`未找到提示词历史的提示词ID映射: ${historyDataWithoutId.promptId}`);
+              totalErrors++;
+              continue;
+            }
+          }
+
+          try {
+            const historyToCreate = await this.deserializeImageBlobs(historyDataWithoutId);
+            await this.prompt.createPromptHistoryFromBackup(historyToCreate);
+          } catch (err) {
+            console.warn('导入提示词历史数据失败:', history.id, err);
+            totalErrors++;
+          }
+        }
+      }
       
       // 导入AI配置数据
       if (data.aiConfigs && data.aiConfigs.length > 0) {
@@ -495,6 +527,7 @@ export class DatabaseServiceManager {
       // 统计导入结果
       details.categories = (data.categories?.length || 0);
       details.prompts = (data.prompts?.length || 0);
+      details.promptHistories = (data.promptHistories?.length || 0);
       details.aiConfigs = (data.aiConfigs?.length || 0);
       details.aiHistory = (data.aiHistory?.length || 0);
       details.settings = (data.settings?.length || 0);
@@ -514,7 +547,7 @@ export class DatabaseServiceManager {
           categories: details.categories,
           prompts: details.prompts,
           settings: details.settings,
-          history: details.aiHistory,
+          history: details.aiHistory + details.promptHistories,
           aiConfigs: details.aiConfigs
         }
       };
@@ -621,6 +654,33 @@ export class DatabaseServiceManager {
           }
         }
       }
+
+      // 恢复提示词历史数据（需要处理提示词 ID 映射）
+      if (backupData.promptHistories && backupData.promptHistories.length > 0) {
+        console.log(`恢复提示词历史数据: ${backupData.promptHistories.length} 条`);
+        for (const history of backupData.promptHistories) {
+          const { id, ...historyDataWithoutId } = history;
+
+          if (historyDataWithoutId.promptId !== undefined) {
+            const newPromptId = idMapping[`prompt_${historyDataWithoutId.promptId}`];
+            if (newPromptId !== undefined) {
+              historyDataWithoutId.promptId = newPromptId;
+            } else {
+              console.warn(`未找到提示词历史的提示词ID映射: ${historyDataWithoutId.promptId}`);
+              totalErrors++;
+              continue;
+            }
+          }
+
+          try {
+            const historyToCreate = await this.deserializeImageBlobs(historyDataWithoutId);
+            await this.prompt.createPromptHistoryFromBackup(historyToCreate);
+          } catch (err) {
+            console.warn('恢复提示词历史数据失败:', history.id, err);
+            totalErrors++;
+          }
+        }
+      }
       
       // 恢复AI配置数据
       if (backupData.aiConfigs && backupData.aiConfigs.length > 0) {
@@ -666,6 +726,7 @@ export class DatabaseServiceManager {
       // 统计恢复结果
       details.categories = (backupData.categories?.length || 0);
       details.prompts = (backupData.prompts?.length || 0);
+      details.promptHistories = (backupData.promptHistories?.length || 0);
       details.aiConfigs = (backupData.aiConfigs?.length || 0);
       details.aiHistory = (backupData.aiHistory?.length || 0);
       details.settings = (backupData.settings?.length || 0);
@@ -685,7 +746,7 @@ export class DatabaseServiceManager {
           categories: details.categories,
           prompts: details.prompts,
           settings: details.settings,
-          history: details.aiHistory,
+          history: details.aiHistory + details.promptHistories,
           aiConfigs: details.aiConfigs
         }
       };
@@ -783,6 +844,7 @@ export class DatabaseServiceManager {
   async getDataStats(): Promise<{
     categories: number;
     prompts: number;
+    promptHistories: number;
     aiConfigs: number;
     aiHistory: number;
     settings: number;
@@ -793,12 +855,14 @@ export class DatabaseServiceManager {
       const [
         categories,
         prompts,
+        promptHistories,
         aiConfigs,
         aiHistory,
         settings
       ] = await Promise.all([
         this.category.getBasicCategories(),
         this.prompt.getAllPromptsForTags(),
+        this.prompt.getAllPromptHistories(),
         this.aiConfig.getAllAIConfigs(),
         this.aiGenerationHistory.getAllAIGenerationHistory(),
         this.appSettings.getAllSettings()
@@ -808,6 +872,7 @@ export class DatabaseServiceManager {
       const totalSize = JSON.stringify({
         categories,
         prompts,
+        promptHistories,
         aiConfigs,
         aiHistory,
         settings
@@ -820,6 +885,7 @@ export class DatabaseServiceManager {
       return {
         categories: categories.length,
         prompts: prompts.length,
+        promptHistories: promptHistories.length,
         aiConfigs: aiConfigs.length,
         aiHistory: aiHistory.length,
         settings: settings.length,
@@ -842,12 +908,14 @@ export class DatabaseServiceManager {
       const [
         categories,
         prompts,
+        promptHistories,
         aiConfigs,
         aiHistory,
         settings
       ] = await Promise.all([
         this.category.getBasicCategories(),
         this.prompt.getAllPromptsForTags(),
+        this.prompt.getAllPromptHistories(),
         this.aiConfig.getAllAIConfigs(),
         this.aiGenerationHistory.getAllAIGenerationHistory(),
         this.appSettings.getAllSettings()
@@ -869,10 +937,10 @@ export class DatabaseServiceManager {
         categories: categories.length,
         prompts: prompts.length,
         aiConfigs: aiConfigs.length,
-        history: aiHistory.length,
+        history: promptHistories.length,
         settings: settings.length,
         totalRecords: categories.length + prompts.length + aiConfigs.length + 
-                     aiHistory.length + settings.length,
+                     promptHistories.length + aiHistory.length + settings.length,
         sensitiveData: {
           prompts: sensitivePrompts,
           aiConfigs: sensitiveAIConfigs,
@@ -910,6 +978,7 @@ export class DatabaseServiceManager {
       storeStats: {
         categories: stats.categories,
         prompts: stats.prompts,
+        promptHistories: stats.promptHistories,
         aiConfigs: stats.aiConfigs,
         aiHistory: stats.aiHistory,
         settings: stats.settings

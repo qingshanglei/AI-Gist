@@ -85,6 +85,7 @@ export interface ExportResult extends BaseResponse {
   data?: {
     categories: any[];
     prompts: any[];
+    promptHistories?: any[];
     aiConfigs: any[];
     aiHistory: any[];
     settings: any[];

@@ -32,7 +32,9 @@ const mockCategoryService = {
 const mockPromptService = {
   getInstance: vi.fn(),
   getAllPromptsForTags: vi.fn(),
+  getAllPromptHistories: vi.fn(),
   createPrompt: vi.fn(),
+  createPromptHistoryFromBackup: vi.fn(),
   upsertPrompt: vi.fn(),
 }
 const mockAIConfigService = {
@@ -95,12 +97,22 @@ import { DatabaseServiceManager } from '~/lib/services/database-manager.service'
 
 const mockCategory = testDataGenerators.createMockCategory({ id: 1, name: '分类A' })
 const mockPrompt = testDataGenerators.createMockPrompt({ id: 1, categoryId: 1, title: '提示词A' })
+const mockPromptHistory = {
+  id: 1,
+  uuid: 'history-cross-1',
+  promptId: 1,
+  title: '提示词A v1',
+  content: '历史内容',
+  version: 1,
+  createdAt: new Date().toISOString(),
+}
 const mockAIConfig = testDataGenerators.createMockAIConfig({ id: 1 })
 const mockSetting = { key: 'theme', value: 'dark', type: 'string', description: '' }
 
 const baseData = {
   categories: [mockCategory],
   prompts: [mockPrompt],
+  promptHistories: [mockPromptHistory],
   aiConfigs: [mockAIConfig],
   aiHistory: [],
   settings: [mockSetting],
@@ -147,12 +159,14 @@ describe('跨平台备份兼容性', () => {
 
     mockCategoryService.getBasicCategories.mockResolvedValue([mockCategory])
     mockPromptService.getAllPromptsForTags.mockResolvedValue([mockPrompt])
+    mockPromptService.getAllPromptHistories.mockResolvedValue([mockPromptHistory])
     mockAIConfigService.getAllAIConfigs.mockResolvedValue([mockAIConfig])
     mockAIHistoryService.getAllAIGenerationHistory.mockResolvedValue([])
     mockAppSettingsService.getAllSettings.mockResolvedValue([mockSetting])
 
     mockCategoryService.createCategory.mockResolvedValue({ ...mockCategory, id: 10 })
     mockPromptService.createPrompt.mockResolvedValue({ ...mockPrompt, id: 20 })
+    mockPromptService.createPromptHistoryFromBackup.mockResolvedValue({ ...mockPromptHistory, id: 40, promptId: 20 })
     mockAIConfigService.createAIConfig.mockResolvedValue({ ...mockAIConfig, id: 30 })
     mockAIHistoryService.createAIGenerationHistory.mockResolvedValue({})
     mockAppSettingsService.updateSettingByKey.mockResolvedValue({})
@@ -170,6 +184,7 @@ describe('跨平台备份兼容性', () => {
       expect(result.success).toBe(true)
       expect(mockCategoryService.createCategory).toHaveBeenCalledTimes(1)
       expect(mockPromptService.createPrompt).toHaveBeenCalledTimes(1)
+      expect(mockPromptService.createPromptHistoryFromBackup).toHaveBeenCalledTimes(1)
     })
 
     it('移动端备份包含 base64 图片时，桌面端能正确反序列化', async () => {
@@ -193,6 +208,8 @@ describe('跨平台备份兼容性', () => {
       // prompt 的 categoryId 应该映射到新创建的分类 ID (10)
       const promptArg = mockPromptService.createPrompt.mock.calls[0][0]
       expect(promptArg.categoryId).toBe(10)
+      const historyArg = mockPromptService.createPromptHistoryFromBackup.mock.calls[0][0]
+      expect(historyArg.promptId).toBe(20)
     })
   })
 
@@ -207,6 +224,7 @@ describe('跨平台备份兼容性', () => {
 
       expect(restoredData).toHaveProperty('categories')
       expect(restoredData).toHaveProperty('prompts')
+      expect(restoredData).toHaveProperty('promptHistories')
       expect(restoredData).toHaveProperty('aiConfigs')
       expect(restoredData).toHaveProperty('settings')
       expect(Array.isArray(restoredData.categories)).toBe(true)
@@ -241,8 +259,10 @@ describe('跨平台备份兼容性', () => {
       // 只清调用记录
       mockCategoryService.createCategory.mockClear()
       mockPromptService.createPrompt.mockClear()
+      mockPromptService.createPromptHistoryFromBackup.mockClear()
       mockCategoryService.createCategory.mockResolvedValue({ ...mockCategory, id: 10 })
       mockPromptService.createPrompt.mockResolvedValue({ ...mockPrompt, id: 20 })
+      mockPromptService.createPromptHistoryFromBackup.mockResolvedValue({ ...mockPromptHistory, id: 40, promptId: 20 })
       mockAIConfigService.createAIConfig.mockResolvedValue({ ...mockAIConfig, id: 30 })
       mockAppSettingsService.updateSettingByKey.mockResolvedValue({})
 
@@ -251,12 +271,16 @@ describe('跨平台备份兼容性', () => {
       expect(restoreResult.success).toBe(true)
       expect(mockCategoryService.createCategory).toHaveBeenCalledTimes(1)
       expect(mockPromptService.createPrompt).toHaveBeenCalledTimes(1)
+      expect(mockPromptService.createPromptHistoryFromBackup).toHaveBeenCalledTimes(1)
     })
 
     it('含图片的备份：序列化后能被反序列化恢复', async () => {
       const blob = new Blob(['img'], { type: 'image/png' })
       mockPromptService.getAllPromptsForTags.mockResolvedValue([
         { ...mockPrompt, imageBlobs: [blob] }
+      ])
+      mockPromptService.getAllPromptHistories.mockResolvedValue([
+        { ...mockPromptHistory, imageBlobs: [blob] }
       ])
 
       // 备份（序列化图片）
@@ -265,12 +289,16 @@ describe('跨平台备份兼容性', () => {
 
       const serializedPrompt = exportResult.data!.prompts[0]
       expect(typeof serializedPrompt.imageBlobs[0]).toBe('string') // base64
+      const serializedHistory = exportResult.data!.promptHistories![0]
+      expect(typeof serializedHistory.imageBlobs[0]).toBe('string')
 
       // 恢复（反序列化图片）
       mockCategoryService.createCategory.mockClear()
       mockPromptService.createPrompt.mockClear()
+      mockPromptService.createPromptHistoryFromBackup.mockClear()
       mockCategoryService.createCategory.mockResolvedValue({ ...mockCategory, id: 10 })
       mockPromptService.createPrompt.mockResolvedValue({ ...mockPrompt, id: 20 })
+      mockPromptService.createPromptHistoryFromBackup.mockResolvedValue({ ...mockPromptHistory, id: 40, promptId: 20 })
       mockAIConfigService.createAIConfig.mockResolvedValue({ ...mockAIConfig, id: 30 })
       mockAppSettingsService.updateSettingByKey.mockResolvedValue({})
 
@@ -279,6 +307,8 @@ describe('跨平台备份兼容性', () => {
 
       const promptArg = mockPromptService.createPrompt.mock.calls[0][0]
       expect(promptArg.imageBlobs[0]).toBeInstanceOf(Blob)
+      const historyArg = mockPromptService.createPromptHistoryFromBackup.mock.calls[0][0]
+      expect(historyArg.imageBlobs[0]).toBeInstanceOf(Blob)
     })
 
     it('多分类多提示词时 ID 映射全部正确', async () => {
@@ -290,6 +320,7 @@ describe('跨平台备份兼容性', () => {
 
       mockCategoryService.getBasicCategories.mockResolvedValue([cat1, cat2])
       mockPromptService.getAllPromptsForTags.mockResolvedValue([p1, p2, p3])
+      mockPromptService.getAllPromptHistories.mockResolvedValue([])
 
       let catIdCounter = 100
       mockCategoryService.createCategory.mockImplementation(async (data: any) => ({
@@ -370,6 +401,7 @@ describe('跨平台备份兼容性', () => {
       expect(result.data).toHaveProperty('prompts')
       expect(result.data).toHaveProperty('aiConfigs')
       expect(result.data).toHaveProperty('aiHistory')
+      expect(result.data).toHaveProperty('promptHistories')
       expect(result.data).toHaveProperty('settings')
     })
   })

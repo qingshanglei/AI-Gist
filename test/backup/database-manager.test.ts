@@ -31,7 +31,9 @@ const mockCategoryService = {
 const mockPromptService = {
   getInstance: vi.fn(),
   getAllPromptsForTags: vi.fn(),
+  getAllPromptHistories: vi.fn(),
   createPrompt: vi.fn(),
+  createPromptHistoryFromBackup: vi.fn(),
   upsertPrompt: vi.fn(),
 }
 const mockAIConfigService = {
@@ -95,6 +97,15 @@ import { DatabaseServiceManager } from '~/lib/services/database-manager.service'
 // 测试数据
 const mockCategory = testDataGenerators.createMockCategory({ id: 1, name: '分类A' })
 const mockPrompt = testDataGenerators.createMockPrompt({ id: 1, categoryId: 1, title: '提示词A' })
+const mockPromptHistory = {
+  id: 1,
+  uuid: 'history-1',
+  promptId: 1,
+  title: '提示词A v1',
+  content: '历史内容',
+  version: 1,
+  createdAt: new Date().toISOString(),
+}
 const mockAIConfig = testDataGenerators.createMockAIConfig({ id: 1 })
 const mockSetting = { key: 'theme', value: 'dark', type: 'string', description: '' }
 
@@ -102,6 +113,7 @@ function makeExportData() {
   return {
     categories: [mockCategory],
     prompts: [mockPrompt],
+    promptHistories: [mockPromptHistory],
     aiConfigs: [mockAIConfig],
     aiHistory: [],
     settings: [mockSetting],
@@ -129,12 +141,14 @@ describe('DatabaseServiceManager', () => {
 
     mockCategoryService.getBasicCategories.mockResolvedValue([mockCategory])
     mockPromptService.getAllPromptsForTags.mockResolvedValue([mockPrompt])
+    mockPromptService.getAllPromptHistories.mockResolvedValue([mockPromptHistory])
     mockAIConfigService.getAllAIConfigs.mockResolvedValue([mockAIConfig])
     mockAIHistoryService.getAllAIGenerationHistory.mockResolvedValue([])
     mockAppSettingsService.getAllSettings.mockResolvedValue([mockSetting])
 
     mockCategoryService.createCategory.mockResolvedValue({ ...mockCategory, id: 10 })
     mockPromptService.createPrompt.mockResolvedValue({ ...mockPrompt, id: 20 })
+    mockPromptService.createPromptHistoryFromBackup.mockResolvedValue({ ...mockPromptHistory, id: 40, promptId: 20 })
     mockAIConfigService.createAIConfig.mockResolvedValue({ ...mockAIConfig, id: 30 })
     mockAIHistoryService.createAIGenerationHistory.mockResolvedValue({})
     mockAppSettingsService.updateSettingByKey.mockResolvedValue({})
@@ -150,6 +164,7 @@ describe('DatabaseServiceManager', () => {
       expect(result.data).toBeDefined()
       expect(result.data!.categories).toHaveLength(1)
       expect(result.data!.prompts).toHaveLength(1)
+      expect(result.data!.promptHistories).toHaveLength(1)
       expect(result.data!.aiConfigs).toHaveLength(1)
       expect(result.data!.settings).toHaveLength(1)
     })
@@ -198,6 +213,7 @@ describe('DatabaseServiceManager', () => {
       expect(result.success).toBe(true)
       expect(mockCategoryService.createCategory).toHaveBeenCalledTimes(1)
       expect(mockPromptService.createPrompt).toHaveBeenCalledTimes(1)
+      expect(mockPromptService.createPromptHistoryFromBackup).toHaveBeenCalledTimes(1)
       expect(mockAIConfigService.createAIConfig).toHaveBeenCalledTimes(1)
       expect(mockAppSettingsService.updateSettingByKey).toHaveBeenCalledTimes(1)
     })
@@ -209,6 +225,8 @@ describe('DatabaseServiceManager', () => {
       // createPrompt 被调用时，categoryId 应该是新 ID (10)，而不是旧 ID (1)
       const promptArg = mockPromptService.createPrompt.mock.calls[0][0]
       expect(promptArg.categoryId).toBe(10)
+      const historyArg = mockPromptService.createPromptHistoryFromBackup.mock.calls[0][0]
+      expect(historyArg.promptId).toBe(20)
     })
 
     it('数据格式无效时返回失败', async () => {
@@ -228,6 +246,19 @@ describe('DatabaseServiceManager', () => {
       expect(mockPromptService.createPrompt).toHaveBeenCalledTimes(1)
       const promptArg = mockPromptService.createPrompt.mock.calls[0][0]
       expect(promptArg.imageBlobs[0]).toBeInstanceOf(Blob)
+    })
+
+    it('base64 promptHistories.imageBlobs 被反序列化为 Blob', async () => {
+      const dataWithBase64History = {
+        ...makeExportData(),
+        promptHistories: [{ ...mockPromptHistory, imageBlobs: ['data:image/png;base64,abc123'] }]
+      }
+
+      const result = await manager.importData(dataWithBase64History)
+      expect(result.success).toBe(true)
+
+      const historyArg = mockPromptService.createPromptHistoryFromBackup.mock.calls[0][0]
+      expect(historyArg.imageBlobs[0]).toBeInstanceOf(Blob)
     })
   })
 
