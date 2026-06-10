@@ -10,6 +10,38 @@
     </ion-header>
 
     <ion-content :fullscreen="true">
+      <ion-list>
+        <ion-list-header>
+          <ion-label>自动同步</ion-label>
+        </ion-list-header>
+        <ion-item>
+          <ion-label>
+            <h3>检查间隔</h3>
+            <p>当前每 {{ syncIntervalMinutes }} 分钟检查一次云端变化</p>
+          </ion-label>
+          <ion-input
+            class="sync-interval-input"
+            slot="end"
+            type="number"
+            inputmode="numeric"
+            :min="MIN_CLOUD_SYNC_INTERVAL_MINUTES"
+            :max="MAX_CLOUD_SYNC_INTERVAL_MINUTES"
+            :value="syncIntervalMinutes"
+            @ionInput="handleSyncIntervalInput"
+          ></ion-input>
+        </ion-item>
+        <div class="sync-interval-actions">
+          <ion-button
+            size="small"
+            fill="outline"
+            @click="saveSyncInterval"
+            :disabled="loading.saveSyncInterval"
+          >
+            保存频率
+          </ion-button>
+        </div>
+      </ion-list>
+
       <!-- 存储配置列表 -->
       <ion-list v-if="storageConfigs.length > 0">
         <ion-list-header>
@@ -160,9 +192,6 @@
               <ion-icon :icon="syncOutline" slot="start"></ion-icon>
               立即同步
             </ion-button>
-            <p v-if="selectedConfig && getSyncStatusText(selectedConfig.id)" class="sync-status" :class="`sync-status-${syncStatus.status}`">
-              {{ getSyncStatusText(selectedConfig.id) }}
-            </p>
           </div>
 
           <!-- 备份列表 -->
@@ -206,7 +235,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Capacitor } from '@capacitor/core'
 import {
@@ -253,8 +282,14 @@ import {
 } from 'ionicons/icons'
 import { useI18n } from '~/composables/useI18n'
 import { mobileCloudBackupService } from '~/lib/services/mobile-cloud-backup.service'
-import { cloudSyncService } from '~/lib/services/cloud-sync.service'
-import type { CloudSyncStatus } from '~/lib/services/cloud-sync.service'
+import {
+  cloudSyncService,
+  DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES,
+  MAX_CLOUD_SYNC_INTERVAL_MINUTES,
+  MIN_CLOUD_SYNC_INTERVAL_MINUTES,
+  getCloudSyncResultMessage,
+  getFriendlyCloudSyncError
+} from '~/lib/services/cloud-sync.service'
 import { databaseService } from '~/lib/db'
 import { presentMobileToast } from '~/lib/utils/mobile-toast'
 import type { CloudStorageConfig, CloudBackupInfo } from '@shared/types/cloud-backup'
@@ -265,7 +300,7 @@ const platform = Capacitor.getPlatform()
 
 const storageConfigs = ref<CloudStorageConfig[]>([])
 const currentBackups = ref<CloudBackupInfo[]>([])
-const syncStatus = ref<CloudSyncStatus>(cloudSyncService.getStatus())
+const syncIntervalMinutes = ref(DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES)
 const selectedConfig = ref<CloudStorageConfig | null>(null)
 const editingConfig = ref<CloudStorageConfig | null>(null)
 const iCloudAvailable = ref(false)
@@ -286,9 +321,9 @@ const configForm = ref({
 const loading = ref({
   createBackup: false,
   restoreBackup: false,
-  syncNow: false
+  syncNow: false,
+  saveSyncInterval: false
 })
-let unsubscribeSyncStatus: (() => void) | null = null
 
 const isConfigValid = computed(() => {
   if (!configForm.value.name) return false
@@ -305,6 +340,30 @@ const isConfigValid = computed(() => {
 
   return false
 })
+
+const handleSyncIntervalInput = (event: CustomEvent<{ value?: string | number | null }>) => {
+  const value = Number(event.detail?.value)
+  if (Number.isFinite(value)) {
+    syncIntervalMinutes.value = value
+  }
+}
+
+const loadSyncInterval = async () => {
+  syncIntervalMinutes.value = await cloudSyncService.getAutoSyncIntervalMinutes()
+}
+
+const saveSyncInterval = async () => {
+  loading.value.saveSyncInterval = true
+  try {
+    syncIntervalMinutes.value = await cloudSyncService.setAutoSyncIntervalMinutes(syncIntervalMinutes.value)
+    await showToast(`自动同步频率已设为 ${syncIntervalMinutes.value} 分钟`)
+  } catch (error) {
+    console.error('保存自动同步频率失败:', error)
+    await showToast('保存自动同步频率失败', 'danger')
+  } finally {
+    loading.value.saveSyncInterval = false
+  }
+}
 
 // 检查 iCloud 可用性
 const checkICloudAvailability = async () => {
@@ -555,13 +614,13 @@ const syncCloudData = async () => {
     })
 
     if (result.success) {
-      showToast(getSyncResultMessage(result.action, result.conflicts.length))
+      showToast(getCloudSyncResultMessage(result.action, result.conflicts.length))
     } else {
-      showToast(getFriendlySyncError(result.error), 'danger')
+      showToast(getFriendlyCloudSyncError(result.error), 'danger')
     }
   } catch (error) {
     console.error('云同步失败:', error)
-    showToast(getFriendlySyncError(error instanceof Error ? error.message : String(error)), 'danger')
+    showToast(getFriendlyCloudSyncError(error instanceof Error ? error.message : String(error)), 'danger')
   } finally {
     await loadingEl.dismiss()
     loading.value.syncNow = false
@@ -705,57 +764,6 @@ const formatSize = (size: number) => {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`
 }
 
-const getSyncResultMessage = (action?: string, conflictCount = 0): string => {
-  const suffix = conflictCount > 0 ? `，已自动处理 ${conflictCount} 个冲突` : ''
-  if (action === 'uploaded') return `同步完成，已上传本机数据${suffix}`
-  if (action === 'downloaded') return `同步完成，已更新本机数据${suffix}`
-  if (action === 'merged') return `同步完成，已合并本机和云端数据${suffix}`
-  return `同步完成，数据已是最新${suffix}`
-}
-
-const getFriendlySyncError = (error?: string): string => {
-  if (!error) return '同步失败，请稍后重试'
-  if (error.includes('401') || error.includes('Unauthorized') || error.includes('403')) {
-    return '存储服务认证失败，请检查用户名和密码是否正确'
-  }
-  if (error.includes('ECONNREFUSED') || error.includes('Network') || error.includes('network') || error.includes('fetch')) {
-    return '无法连接到存储服务器，请检查网络连接和服务器地址'
-  }
-  if (error.includes('数据库') || error.includes('database')) {
-    return '读取或写入本地数据失败，请重启应用后再试'
-  }
-  return `同步失败：${error}`
-}
-
-const getSyncStatusText = (storageId: string): string => {
-  const status = syncStatus.value
-  if (status.storageId && status.storageId !== storageId) {
-    return ''
-  }
-
-  if (status.status === 'scheduled') {
-    return `自动同步已排队${formatSyncStatusTime(status.nextSyncAt, '，预计 ')}`
-  }
-
-  if (status.status === 'syncing') {
-    return '正在同步数据'
-  }
-
-  if (status.status === 'error') {
-    return `上次同步失败：${status.error || '同步失败'}${formatSyncStatusTime(status.nextSyncAt, '，将于 ')}`
-  }
-
-  if (status.lastResult?.success) {
-    return `${getSyncResultMessage(status.lastResult.action, status.lastResult.conflicts.length)}${formatSyncStatusTime(status.lastSyncAt, '，时间 ')}`
-  }
-
-  return status.lastSyncAt ? `最近同步时间 ${formatDate(status.lastSyncAt)}` : ''
-}
-
-const formatSyncStatusTime = (dateString: string | undefined, prefix: string): string => {
-  return dateString ? `${prefix}${formatDate(dateString)}` : ''
-}
-
 // 将技术错误转换为用户友好的备份错误提示
 const getFriendlyBackupError = (error?: string): string => {
   if (!error) return '备份创建失败，请稍后重试'
@@ -807,15 +815,9 @@ const showToast = async (message: string, color: string = 'success') => {
 }
 
 onMounted(() => {
-  unsubscribeSyncStatus = cloudSyncService.onStatusChange(status => {
-    syncStatus.value = status
-  })
+  loadSyncInterval()
   loadStorageConfigs()
   checkICloudAvailability()
-})
-
-onUnmounted(() => {
-  unsubscribeSyncStatus?.()
 })
 </script>
 
@@ -839,18 +841,12 @@ onUnmounted(() => {
   padding: 16px;
 }
 
-.sync-status {
-  margin: 10px 4px 0;
-  color: var(--ion-color-medium);
-  font-size: 13px;
-  line-height: 1.4;
+.sync-interval-input {
+  width: 88px;
+  text-align: right;
 }
 
-.sync-status-error {
-  color: var(--ion-color-danger);
-}
-
-.sync-status-success {
-  color: var(--ion-color-success);
+.sync-interval-actions {
+  padding: 0 16px 12px;
 }
 </style>
