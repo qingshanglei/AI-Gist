@@ -1047,49 +1047,7 @@ export class PromptService extends BaseDatabaseService {
    * 不触发同步的批量删除方法（内部使用）
    */
   private async batchDeleteWithoutSync(storeName: string, ids: number[]): Promise<{ success: number; failed: number; errors: string[] }> {
-    let success = 0;
-    let failed = 0;
-    const errors: string[] = [];
-
-    const db = await this.ensureDB();
-
-    // 使用事务进行批量操作
-    return new Promise((resolve) => {
-      const transaction = db.transaction([storeName], 'readwrite');
-      const store = transaction.objectStore(storeName);
-      
-      let completed = 0;
-      const total = ids.length;
-
-      if (total === 0) {
-        resolve({ success: 0, failed: 0, errors: [] });
-        return;
-      }
-
-      // 批量删除所有记录
-      ids.forEach(id => {
-        const request = store.delete(id);
-        
-        request.onsuccess = () => {
-          success++;
-          completed++;
-          
-          if (completed === total) {
-            resolve({ success, failed, errors });
-          }
-        };
-
-        request.onerror = () => {
-          failed++;
-          errors.push(`删除记录 ${id} 失败: ${request.error?.message || '未知错误'}`);
-          completed++;
-          
-          if (completed === total) {
-            resolve({ success, failed, errors });
-          }
-        };
-      });
-    });
+    return this.batchDeleteSilently(storeName, ids);
   }
 
   /**

@@ -16,6 +16,7 @@ const mockCategoryService = {
   initialize: vi.fn().mockResolvedValue(undefined),
   waitForInitialization: vi.fn().mockResolvedValue(undefined),
   getBasicCategories: vi.fn(),
+  getSyncTombstones: vi.fn(),
   createCategory: vi.fn(),
   checkObjectStoreExists: vi.fn().mockResolvedValue(true),
   repairDatabase: vi.fn().mockResolvedValue({ success: true }),
@@ -108,6 +109,14 @@ const mockPromptHistory = {
 }
 const mockAIConfig = testDataGenerators.createMockAIConfig({ id: 1 })
 const mockSetting = { key: 'theme', value: 'dark', type: 'string', description: '' }
+const mockSyncTombstone = {
+  id: 1,
+  storeName: 'prompts',
+  collectionName: 'prompts',
+  recordKey: 'uuid:prompt-1',
+  recordUuid: 'prompt-1',
+  deletedAt: new Date().toISOString(),
+}
 
 function makeExportData() {
   return {
@@ -140,6 +149,7 @@ describe('DatabaseServiceManager', () => {
     }) as any
 
     mockCategoryService.getBasicCategories.mockResolvedValue([mockCategory])
+    mockCategoryService.getSyncTombstones.mockResolvedValue([mockSyncTombstone])
     mockPromptService.getAllPromptsForTags.mockResolvedValue([mockPrompt])
     mockPromptService.getAllPromptHistories.mockResolvedValue([mockPromptHistory])
     mockAIConfigService.getAllAIConfigs.mockResolvedValue([mockAIConfig])
@@ -201,6 +211,15 @@ describe('DatabaseServiceManager', () => {
 
       expect(result.success).toBe(true)
       expect(result.data!.prompts[0].imageBlobs).toBeUndefined()
+    })
+  })
+
+  describe('exportAllDataForSync', () => {
+    it('同步导出包含删除标记', async () => {
+      const result = await manager.exportAllDataForSync()
+
+      expect(result.success).toBe(true)
+      expect(result.data!.syncTombstones).toEqual([mockSyncTombstone])
     })
   })
 

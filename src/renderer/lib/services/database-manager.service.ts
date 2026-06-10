@@ -107,7 +107,8 @@ export class DatabaseServiceManager {
       'ai_configs',
       'ai_generation_history',
       'settings',
-      'quick_optimization_configs'
+      'quick_optimization_configs',
+      'syncTombstones'
     ];
 
     const missingStores: string[] = [];
@@ -374,6 +375,30 @@ export class DatabaseServiceManager {
         ...result.data,
         prompts: await this.serializeImageBlobs(result.data.prompts),
         promptHistories: await this.serializeImageBlobs(result.data.promptHistories || [])
+      }
+    };
+  }
+
+  /**
+   * 导出云同步快照数据。
+   * 与普通备份相比，同步快照额外包含删除标记，避免多端硬删除丢失。
+   */
+  async exportAllDataForSync(): Promise<DataExportResult> {
+    const result = await this.exportAllDataForBackup();
+    if (!result.success || !result.data) return result;
+
+    let syncTombstones: any[] = [];
+    try {
+      syncTombstones = await this.category.getSyncTombstones();
+    } catch (error) {
+      console.warn('获取同步删除标记失败:', error);
+    }
+
+    return {
+      ...result,
+      data: {
+        ...result.data,
+        syncTombstones
       }
     };
   }
@@ -795,7 +820,7 @@ export class DatabaseServiceManager {
         throw new Error('无法获取数据库连接');
       }
       
-      const tableNames = ['categories', 'prompts', 'promptVariables', 'promptHistories', 'ai_configs', 'ai_generation_history', 'settings'];
+      const tableNames = ['categories', 'prompts', 'promptVariables', 'promptHistories', 'ai_configs', 'ai_generation_history', 'settings', 'syncTombstones'];
       
       for (const tableName of tableNames) {
         if (db.objectStoreNames.contains(tableName)) {

@@ -172,6 +172,20 @@ export interface PromptHistory {
 }
 
 /**
+ * 同步删除标记。
+ * 业务表仍然执行硬删除；同步层依靠 tombstone 将删除传播到其他设备。
+ */
+export interface SyncTombstone {
+  id?: number;
+  storeName: string;
+  collectionName: string;
+  recordKey: string;
+  recordUuid?: string;
+  deletedAt: Date;
+  recordSnapshot?: any;
+}
+
+/**
  * 提示词填充结果
  */
 export interface PromptFillResult {
