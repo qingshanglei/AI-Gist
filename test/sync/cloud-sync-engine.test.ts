@@ -152,4 +152,53 @@ describe('cloud sync engine', () => {
     })
     expect(data.aiConfigs[0].name).toBe('OpenAI')
   })
+
+  it('applies tombstones so deleted records do not come back from older remote data', () => {
+    const local = {
+      prompts: [],
+      syncTombstones: [
+        {
+          collectionName: 'prompts',
+          recordKey: 'uuid:prompt-1',
+          recordUuid: 'prompt-1',
+          deletedAt: '2026-01-03T00:00:00.000Z'
+        }
+      ]
+    }
+    const remote = {
+      prompts: [
+        { id: 3, uuid: 'prompt-1', title: 'Deleted remotely stale', updatedAt: '2026-01-02T00:00:00.000Z' }
+      ],
+      syncTombstones: []
+    }
+
+    const result = mergeCloudSyncData(local, remote)
+
+    expect(result.data.prompts).toEqual([])
+    expect(result.data.syncTombstones).toHaveLength(1)
+  })
+
+  it('does not let an older tombstone delete a newer record update', () => {
+    const local = {
+      prompts: [],
+      syncTombstones: [
+        {
+          collectionName: 'prompts',
+          recordKey: 'uuid:prompt-1',
+          recordUuid: 'prompt-1',
+          deletedAt: '2026-01-02T00:00:00.000Z'
+        }
+      ]
+    }
+    const remote = {
+      prompts: [
+        { id: 3, uuid: 'prompt-1', title: 'Newer remote edit', updatedAt: '2026-01-03T00:00:00.000Z' }
+      ]
+    }
+
+    const result = mergeCloudSyncData(local, remote)
+
+    expect(result.data.prompts).toHaveLength(1)
+    expect(result.data.prompts?.[0].title).toBe('Newer remote edit')
+  })
 })

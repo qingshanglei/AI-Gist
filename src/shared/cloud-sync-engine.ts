@@ -20,7 +20,18 @@ export interface CloudSyncDataSet {
   aiConfigs?: any[];
   aiHistory?: any[];
   settings?: any[];
+  syncTombstones?: CloudSyncTombstone[];
   [collection: string]: any[] | undefined;
+}
+
+export interface CloudSyncTombstone {
+  id?: number;
+  storeName?: string;
+  collectionName: string;
+  recordKey: string;
+  recordUuid?: string;
+  deletedAt: string | Date;
+  recordSnapshot?: any;
 }
 
 export interface CloudSyncSnapshot {
@@ -85,7 +96,8 @@ const IDENTITY_FIELDS: Record<string, string[]> = {
   promptHistories: ['uuid', 'id'],
   aiConfigs: ['uuid', 'configId', 'id'],
   aiHistory: ['uuid', 'historyId', 'id'],
-  settings: ['key', 'id']
+  settings: ['key', 'id'],
+  syncTombstones: ['recordKey', 'recordUuid', 'id']
 };
 
 export function createCloudSyncSnapshot(
@@ -138,8 +150,10 @@ export function mergeCloudSyncData<TData extends CloudSyncDataSet>(
     summary.conflicts += merged.summary.conflicts;
   }
 
+  const dataWithDeletesApplied = applyCloudSyncTombstones(resultData) as TData;
+
   return {
-    data: resultData as TData,
+    data: dataWithDeletesApplied,
     conflicts,
     summary,
     hasConflicts: conflicts.length > 0
@@ -147,6 +161,13 @@ export function mergeCloudSyncData<TData extends CloudSyncDataSet>(
 }
 
 export function getCloudSyncRecordKey(collection: string, record: any): string {
+  if (collection === 'syncTombstones') {
+    const tombstoneKey = getCloudSyncTombstoneKey(record);
+    if (tombstoneKey) {
+      return `tombstone:${tombstoneKey}`;
+    }
+  }
+
   const fields = IDENTITY_FIELDS[collection] || ['uuid', 'key', 'id'];
 
   for (const field of fields) {
@@ -157,6 +178,29 @@ export function getCloudSyncRecordKey(collection: string, record: any): string {
   }
 
   return `hash:${stableSerialize(normalizeForCompare(collection, record))}`;
+}
+
+export function applyCloudSyncTombstones<TData extends CloudSyncDataSet>(data: TData): TData {
+  const cloned = cloneValue(data) as CloudSyncDataSet;
+  const tombstones = normalizeCloudSyncTombstones(cloned.syncTombstones || []);
+
+  for (const collection of Object.keys(cloned)) {
+    if (collection === 'syncTombstones') {
+      continue;
+    }
+
+    const records = cloned[collection];
+    if (!Array.isArray(records)) {
+      continue;
+    }
+
+    cloned[collection] = records.filter(record =>
+      !tombstones.some(tombstone => tombstoneDeletesRecord(tombstone, collection, record))
+    );
+  }
+
+  cloned.syncTombstones = tombstones;
+  return cloned as TData;
 }
 
 function mergeCollection(
@@ -396,7 +440,10 @@ function chooseRecord(
 }
 
 function isPresent(record: any | undefined): boolean {
-  return !!record && record._deleted !== true && record.deletedAt === undefined && record.isDeleted !== true;
+  return !!record &&
+    record._deleted !== true &&
+    (record.deletedAt === undefined || isCloudSyncTombstone(record)) &&
+    record.isDeleted !== true;
 }
 
 function recordsEqual(collection: string, left: any, right: any): boolean {
@@ -514,6 +561,84 @@ function getRecordTime(record: any): number {
   }
 
   return 0;
+}
+
+function normalizeCloudSyncTombstones(tombstones: any[]): CloudSyncTombstone[] {
+  const indexed = new Map<string, CloudSyncTombstone>();
+
+  for (const tombstone of tombstones) {
+    if (!isCloudSyncTombstone(tombstone)) {
+      continue;
+    }
+
+    const key = getCloudSyncTombstoneKey(tombstone);
+    if (!key) {
+      continue;
+    }
+
+    const normalized = cloneValue(tombstone);
+    const current = indexed.get(key);
+    if (!current || getTombstoneTime(normalized) >= getTombstoneTime(current)) {
+      indexed.set(key, normalized);
+    }
+  }
+
+  return Array.from(indexed.values())
+    .sort((left, right) => getCloudSyncTombstoneKey(left).localeCompare(getCloudSyncTombstoneKey(right)));
+}
+
+function isCloudSyncTombstone(value: any): value is CloudSyncTombstone {
+  return !!value &&
+    typeof value === 'object' &&
+    typeof value.collectionName === 'string' &&
+    typeof value.recordKey === 'string' &&
+    value.recordKey.length > 0;
+}
+
+function getCloudSyncTombstoneKey(tombstone: any): string {
+  if (!tombstone || typeof tombstone !== 'object') {
+    return '';
+  }
+
+  const collectionName = typeof tombstone.collectionName === 'string'
+    ? tombstone.collectionName
+    : '';
+  const recordKey = typeof tombstone.recordKey === 'string'
+    ? tombstone.recordKey
+    : '';
+
+  if (collectionName && recordKey) {
+    return `${collectionName}:${recordKey}`;
+  }
+
+  if (collectionName && typeof tombstone.recordUuid === 'string' && tombstone.recordUuid) {
+    return `${collectionName}:uuid:${tombstone.recordUuid}`;
+  }
+
+  return '';
+}
+
+function tombstoneDeletesRecord(tombstone: CloudSyncTombstone, collection: string, record: any): boolean {
+  if (tombstone.collectionName !== collection || !isPresent(record)) {
+    return false;
+  }
+
+  const recordKey = getCloudSyncRecordKey(collection, record);
+  const matchesKey = tombstone.recordKey === recordKey;
+  const matchesUuid = !!tombstone.recordUuid && tombstone.recordUuid === record?.uuid;
+
+  if (!matchesKey && !matchesUuid) {
+    return false;
+  }
+
+  const tombstoneTime = getTombstoneTime(tombstone);
+  const recordTime = getRecordTime(record);
+  return tombstoneTime === 0 || recordTime === 0 || tombstoneTime >= recordTime;
+}
+
+function getTombstoneTime(tombstone: CloudSyncTombstone): number {
+  const time = new Date(tombstone.deletedAt).getTime();
+  return Number.isNaN(time) ? 0 : time;
 }
 
 function cloneValue<T>(value: T): T {
