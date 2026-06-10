@@ -1,5 +1,6 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import { CloudSyncService, type CloudSyncServiceDeps } from '~/lib/services/cloud-sync.service'
+import { emitDataChange } from '~/lib/services/data-change-events'
 import { createCloudSyncSnapshot } from '@shared/cloud-sync-engine'
 import { createEmptyCloudSyncManifest } from '@shared/cloud-sync-manifest'
 
@@ -297,6 +298,35 @@ describe('CloudSyncService', () => {
       pending: false,
       storageId: 'cfg-1'
     })
+
+    service.stopAutoSync()
+  })
+
+  it('automatically syncs quick optimization config changes through the default event bus', async () => {
+    vi.useFakeTimers()
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25,
+      pollIntervalMs: 0,
+      retryMs: 0
+    })
+    emitDataChange({
+      storeName: 'quick_optimization_configs',
+      action: 'update',
+      id: 1
+    })
+
+    expect(service.getStatus().status).toBe('scheduled')
+
+    await vi.advanceTimersByTimeAsync(25)
+
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
 
     service.stopAutoSync()
   })

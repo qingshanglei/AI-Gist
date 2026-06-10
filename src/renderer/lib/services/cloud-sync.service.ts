@@ -37,6 +37,7 @@ const SYNC_STORE_NAMES: DataStoreName[] = [
   'promptVariables',
   'promptHistories',
   'ai_configs',
+  'quick_optimization_configs',
   'ai_generation_history',
   'settings',
   'syncTombstones'
