@@ -201,6 +201,61 @@ describe('CloudSyncService', () => {
     expect(savedManifest.latestSnapshot.data.syncTombstones).toHaveLength(1)
   })
 
+  it('rechecks the remote revision before upload and retries against newer cloud data', async () => {
+    const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
+    const localData = {
+      ...baseData,
+      prompts: [{ id: 1, uuid: 'prompt-1', title: 'Local edit', updatedAt: '2026-01-03T00:00:00.000Z' }]
+    }
+    const remoteDataWrittenByOtherDevice = {
+      ...baseData,
+      categories: [
+        ...baseData.categories,
+        { id: 2, uuid: 'cat-2', name: 'Remote category', updatedAt: '2026-01-02T00:00:00.000Z' }
+      ]
+    }
+    const initialManifest = {
+      ...createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z'),
+      latestSnapshot: baseSnapshot,
+      baseSnapshot
+    }
+    const changedManifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: createCloudSyncSnapshot(remoteDataWrittenByOtherDevice, 'device-b', 'rev-remote-newer'),
+      baseSnapshot
+    }
+    const { service, cloudClient, database, storage } = createService(localData, initialManifest)
+    storage.setItem('ai_gist_cloud_sync_state:cfg-1', JSON.stringify({
+      storageId: 'cfg-1',
+      deviceId: 'device-a',
+      lastSyncAt: '2026-01-01T00:00:00.000Z',
+      lastKnownRevision: 'rev-base',
+      baseSnapshot
+    }))
+    cloudClient.getCloudSyncManifest
+      .mockReset()
+      .mockResolvedValueOnce(initialManifest)
+      .mockResolvedValueOnce(changedManifest)
+      .mockResolvedValueOnce(changedManifest)
+      .mockResolvedValueOnce(changedManifest)
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(database.replaceAllData).toHaveBeenCalledWith(expect.objectContaining({
+      categories: expect.arrayContaining([expect.objectContaining({ uuid: 'cat-2' })]),
+      prompts: expect.arrayContaining([expect.objectContaining({ title: 'Local edit' })])
+    }))
+    const savedManifest = cloudClient.saveCloudSyncManifest.mock.calls[0][1]
+    expect(savedManifest.latestSnapshot.data.categories).toEqual(
+      expect.arrayContaining([expect.objectContaining({ uuid: 'cat-2' })])
+    )
+    expect(savedManifest.latestSnapshot.data.prompts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ title: 'Local edit' })])
+    )
+  })
+
   it('automatically syncs enabled storage after local data changes', async () => {
     vi.useFakeTimers()
     let dataChangeListener: ((change: any) => void) | undefined

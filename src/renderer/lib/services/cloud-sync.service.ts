@@ -30,6 +30,7 @@ const LOCAL_STATE_STORAGE_PREFIX = 'ai_gist_cloud_sync_state';
 const DEFAULT_AUTO_SYNC_DEBOUNCE_MS = 3000;
 const DEFAULT_AUTO_SYNC_RETRY_MS = 30000;
 const DEFAULT_REMOTE_POLL_INTERVAL_MS = 30000;
+const MAX_REMOTE_RECHECK_ATTEMPTS = 3;
 const SYNC_STORE_NAMES: DataStoreName[] = [
   'categories',
   'prompts',
@@ -287,7 +288,11 @@ export class CloudSyncService {
     };
   }
 
-  private async performSync(storageId: string, options: CloudSyncOptions): Promise<CloudSyncResult> {
+  private async performSync(
+    storageId: string,
+    options: CloudSyncOptions,
+    attempt = 0
+  ): Promise<CloudSyncResult> {
     try {
       const deviceId = this.getOrCreateDeviceId();
       const now = new Date().toISOString();
@@ -297,8 +302,13 @@ export class CloudSyncService {
       const remoteSnapshot = manifest.latestSnapshot;
 
       if (!remoteSnapshot) {
+        const latestManifest = await this.getCloudClient().getCloudSyncManifest(storageId);
+        if (latestManifest.latestSnapshot) {
+          return await this.retryWithLatestRemote(storageId, options, attempt);
+        }
+
         const snapshot = createCloudSyncSnapshot(localData, deviceId);
-        await this.saveManifest(storageId, this.buildManifest(manifest, snapshot, [], deviceId, now, options));
+        await this.saveManifest(storageId, this.buildManifest(latestManifest, snapshot, [], deviceId, now, options));
         this.saveLocalState(storageId, deviceId, snapshot, now);
 
         return {
@@ -339,10 +349,15 @@ export class CloudSyncService {
       let finalSnapshot = remoteSnapshot;
       let uploadedRemote = false;
       if (!mergedEqualsRemote) {
+        const latestManifest = await this.getCloudClient().getCloudSyncManifest(storageId);
+        if (hasRemoteRevisionChanged(remoteSnapshot, latestManifest.latestSnapshot)) {
+          return await this.retryWithLatestRemote(storageId, options, attempt);
+        }
+
         finalSnapshot = createCloudSyncSnapshot(mergedData, deviceId);
         await this.saveManifest(
           storageId,
-          this.buildManifest(manifest, finalSnapshot, mergeResult.conflicts, deviceId, now, options)
+          this.buildManifest(latestManifest, finalSnapshot, mergeResult.conflicts, deviceId, now, options)
         );
         uploadedRemote = true;
       }
@@ -391,6 +406,18 @@ export class CloudSyncService {
       throw new Error(exportResult.error || exportResult.message || '导出同步数据失败');
     }
     return applyCloudSyncTombstones(exportResult.data);
+  }
+
+  private async retryWithLatestRemote(
+    storageId: string,
+    options: CloudSyncOptions,
+    attempt: number
+  ): Promise<CloudSyncResult> {
+    if (attempt + 1 >= MAX_REMOTE_RECHECK_ATTEMPTS) {
+      throw new Error('云端同步文件正在被其他设备更新，请稍后重试');
+    }
+
+    return await this.performSync(storageId, options, attempt + 1);
   }
 
   private buildManifest(
@@ -700,6 +727,13 @@ function getSyncAction(appliedLocal: boolean, uploadedRemote: boolean): CloudSyn
     return 'downloaded';
   }
   return uploadedRemote ? 'uploaded' : 'noop';
+}
+
+function hasRemoteRevisionChanged(
+  previousSnapshot: CloudSyncSnapshot,
+  latestSnapshot?: CloudSyncSnapshot
+): boolean {
+  return !!latestSnapshot && latestSnapshot.revision !== previousSnapshot.revision;
 }
 
 function isBrowserOffline(): boolean {
