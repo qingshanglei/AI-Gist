@@ -8,6 +8,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { testDataGenerators } from '../helpers/test-utils'
+import { createBackupPayload } from '../../src/shared/backup-integrity'
 
 // ---- mock 子服务（与 database-manager.test.ts 相同）----
 
@@ -151,24 +152,24 @@ const baseData = {
 // 移动端备份文件格式（createCloudBackup 生成的）
 function makeMobileBackupFile(data = baseData) {
   const id = `mobile-${Date.now()}`
-  return {
+  return createBackupPayload({
     id,
     name: `backup-2026-03-12-${id.substring(0, 8)}`,
     description: '移动端云端备份',
     createdAt: new Date().toISOString(),
     data,
-  }
+  })
 }
 
 // 桌面端备份文件格式（cloud-backup-manager.ts 生成的）
 function makeDesktopBackupFile(data = baseData) {
-  return {
+  return createBackupPayload({
     id: 'desktop-backup-001',
     name: 'backup-2026-03-12-desktop0',
     description: '桌面端云端备份',
     createdAt: new Date().toISOString(),
     data,
-  }
+  })
 }
 
 describe('跨平台备份兼容性', () => {

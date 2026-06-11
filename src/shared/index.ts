@@ -4,6 +4,8 @@
 
 export * from './types/index';
 export * from './ai-provider-metadata';
+export * from './backup-integrity';
 export * from './cloud-backup-paths';
 export * from './cloud-sync-engine';
 export * from './cloud-sync-manifest';
+export * from './data-checksum';

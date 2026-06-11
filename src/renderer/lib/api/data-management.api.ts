@@ -3,7 +3,20 @@
  * 所有业务逻辑都在前端，主进程只负责文件操作
  */
 
+import {
+  createBackupPayload,
+  unwrapBackupData
+} from '@shared/backup-integrity';
+
 export class DataManagementAPI {
+  private static createBackupId(): string {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
   /**
    * 检查 Electron API 是否可用
    */
@@ -207,8 +220,16 @@ export class DataManagementAPI {
         return { success: false, message: '未选择导出路径' };
       }
       
+      const backupPayload = createBackupPayload({
+        id: this.createBackupId(),
+        name: defaultName.replace(/\.json$/i, ''),
+        description: '完整备份',
+        createdAt: new Date().toISOString(),
+        data
+      });
+
       // 3. 导出数据
-      const success = await this.exportDataToFile(data, filePath, 'json');
+      const success = await this.exportDataToFile(backupPayload, filePath, 'json');
       
       return {
         success,
@@ -236,9 +257,20 @@ export class DataManagementAPI {
       }
       
       // 2. 读取并解析数据
-      const data = await this.importDataFromFile(filePath, 'json');
-      if (!data) {
+      const imported = await this.importDataFromFile(filePath, 'json');
+      if (!imported) {
         return { success: false, message: '文件读取失败' };
+      }
+
+      let data: any;
+      try {
+        data = unwrapBackupData(imported);
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : '备份文件校验失败',
+          error
+        };
       }
       
       // 3. 导入到数据库

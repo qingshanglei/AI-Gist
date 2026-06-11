@@ -35,6 +35,10 @@ import {
 import { WebDAVProvider } from './webdav-provider';
 import { ICloudProvider } from './icloud-provider';
 import { DataManagementService } from '../data/data-management-service';
+import {
+  createBackupPayload,
+  parseBackupPayload
+} from '@shared/backup-integrity';
 
 /**
  * 常量定义
@@ -300,13 +304,13 @@ export class CloudBackupManager {
         const timestamp = new Date().toISOString();
         const backupName = `backup-${timestamp.split('T')[0]}-${backupId.substring(0, 8)}`;
         
-        const localBackup = {
+        const localBackup = createBackupPayload({
           id: backupId,
           name: backupName,
           description: description || '云端备份',
           createdAt: timestamp,
           data: exportResult.data
-        };
+        });
         
         const provider = this.createProvider(config);
         const cloudBackup = await this.uploadBackupToCloud(provider, config, localBackup);
@@ -602,7 +606,8 @@ export class CloudBackupManager {
     for (const file of backupFiles) {
       try {
         const data = await provider.readFile(file.path);
-        const backupInfo: CloudBackupInfo = JSON.parse(data.toString());
+        const parsedBackup = parseBackupPayload(JSON.parse(data.toString()));
+        const backupInfo = parsedBackup.payload;
         
         // 计算文件大小（优先使用文件的实际大小，如果没有则使用数据长度）
         const size = file.size || data.length || backupInfo.size || 0;
@@ -612,6 +617,7 @@ export class CloudBackupManager {
           size,
           cloudPath: file.path,
           storageId,
+          checksum: parsedBackup.checksum,
         });
       } catch (error) {
         console.warn(`${CONSTANTS.ERROR_MESSAGES.BACKUP_PARSE_FAILED}: ${file.path}`, error);
@@ -658,7 +664,7 @@ export class CloudBackupManager {
    */
   private async readBackupData(provider: any, backupFile: any): Promise<any> {
     const data = await provider.readFile(backupFile.path);
-    return JSON.parse(data.toString());
+    return parseBackupPayload(JSON.parse(data.toString())).payload;
   }
 
   /**
@@ -689,6 +695,7 @@ export class CloudBackupManager {
       size: Buffer.byteLength(backupData, 'utf-8'), // 设置正确的文件大小
       cloudPath,
       storageId: config.id,
+      checksum: localBackup.checksum,
     };
   }
 

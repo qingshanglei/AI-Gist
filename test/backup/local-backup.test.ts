@@ -5,6 +5,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { testDataGenerators } from '../helpers/test-utils'
+import { createBackupPayload } from '../../src/shared/backup-integrity'
 
 // DataManagementAPI 通过 window.electronAPI 和 window.databaseAPI 操作
 // 直接测试其静态方法，mock window 对象
@@ -148,6 +149,13 @@ describe('DataManagementAPI - 本地备份/恢复', () => {
       const result = await DataManagementAPI.exportFullBackup()
       expect(result.success).toBe(true)
       expect(result.filePath).toBe('/mock/path/backup.json')
+
+      const writeCall = (window as any).electronAPI.invoke.mock.calls.find(
+        (c: any[]) => c[0] === 'data:write-file'
+      )
+      const payload = JSON.parse(writeCall[1].content)
+      expect(payload.data.categories).toHaveLength(1)
+      expect(payload.checksum).toMatch(/^fnv1a32:/)
     })
 
     it('用户取消选择路径时返回失败', async () => {
@@ -166,6 +174,47 @@ describe('DataManagementAPI - 本地备份/恢复', () => {
     it('成功导入完整备份', async () => {
       const result = await DataManagementAPI.importFullBackup()
       expect(result.success).toBe(true)
+    })
+
+    it('兼容旧版本裸数据完整备份导入', async () => {
+      ;(window as any).electronAPI.invoke = vi.fn().mockImplementation(async (channel: string) => {
+        if (channel === 'data:select-import-file') return '/path/legacy.json'
+        if (channel === 'data:read-file') return { success: true, content: JSON.stringify(mockExportData) }
+        return { success: true }
+      })
+
+      const result = await DataManagementAPI.importFullBackup()
+      expect(result.success).toBe(true)
+      expect((window as any).databaseAPI.replaceAllData).toHaveBeenCalledWith(mockExportData)
+    })
+
+    it('checksum 不匹配时拒绝导入且不替换数据库', async () => {
+      const data = {
+        ...mockExportData,
+        categories: [...mockExportData.categories],
+        prompts: [...mockExportData.prompts],
+        aiConfigs: [...mockExportData.aiConfigs],
+        aiHistory: [...mockExportData.aiHistory],
+        settings: [...mockExportData.settings]
+      }
+      const payload = createBackupPayload({
+        id: 'bad-backup',
+        name: 'bad-backup',
+        createdAt: '2026-06-12T00:00:00.000Z',
+        data
+      })
+      payload.data.prompts.push(testDataGenerators.createMockPrompt({ id: 2, title: '损坏数据' }))
+
+      ;(window as any).electronAPI.invoke = vi.fn().mockImplementation(async (channel: string) => {
+        if (channel === 'data:select-import-file') return '/path/bad-checksum.json'
+        if (channel === 'data:read-file') return { success: true, content: JSON.stringify(payload) }
+        return { success: true }
+      })
+
+      const result = await DataManagementAPI.importFullBackup()
+      expect(result.success).toBe(false)
+      expect(result.message).toContain('备份数据校验失败')
+      expect((window as any).databaseAPI.replaceAllData).not.toHaveBeenCalled()
     })
 
     it('用户取消选择文件时返回失败', async () => {
@@ -217,8 +266,9 @@ describe('DataManagementAPI - 本地备份/恢复', () => {
 
       // 验证写入的内容是有效 JSON
       const parsed = JSON.parse(writtenContent)
-      expect(parsed.categories).toBeDefined()
-      expect(parsed.prompts).toBeDefined()
+      expect(parsed.data.categories).toBeDefined()
+      expect(parsed.data.prompts).toBeDefined()
+      expect(parsed.checksum).toMatch(/^fnv1a32:/)
     })
   })
 })

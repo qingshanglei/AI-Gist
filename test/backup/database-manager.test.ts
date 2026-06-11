@@ -5,6 +5,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { testDataGenerators } from '../helpers/test-utils'
+import { createBackupPayload } from '../../src/shared/backup-integrity'
 
 // ---- mock 所有外部依赖 ----
 
@@ -394,6 +395,27 @@ describe('DatabaseServiceManager', () => {
       })
       expect(restoredTombstones[0].id).toBeUndefined()
       expect(restoredTombstones[0].deletedAt).toBeInstanceOf(Date)
+    })
+
+    it('备份校验失败时不会先清空本地数据', async () => {
+      const data = {
+        ...makeExportData(),
+        prompts: [...makeExportData().prompts]
+      }
+      const payload = createBackupPayload({
+        id: 'bad-backup',
+        name: 'bad-backup',
+        createdAt: '2026-06-12T00:00:00.000Z',
+        data
+      })
+      payload.data.prompts.push({ ...mockPrompt, id: 2, title: '损坏数据' })
+      const cleanSpy = vi.spyOn(manager, 'forceCleanAllTables').mockResolvedValue()
+
+      const result = await manager.replaceAllData(payload)
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('备份数据校验失败')
+      expect(cleanSpy).not.toHaveBeenCalled()
     })
   })
 })

@@ -16,6 +16,7 @@ import { AppSettingsService } from './app-settings.service';
 import { QuickOptimizationService } from './quick-optimization.service';
 import { generateUUID } from '../utils/uuid';
 import { emitDataChange } from './data-change-events';
+import { unwrapBackupData } from '@shared/backup-integrity';
 
 /**
  * 统一的数据库服务管理类
@@ -434,6 +435,7 @@ export class DatabaseServiceManager {
   async importData(data: any): Promise<DataImportResult> {
     try {
       console.log('渲染进程: 开始导入数据库数据...');
+      data = unwrapBackupData(data);
       
       if (!data || typeof data !== 'object') {
         throw new Error('导入数据格式无效');
@@ -675,6 +677,7 @@ export class DatabaseServiceManager {
   async restoreData(backupData: any): Promise<DataImportResult> {
     try {
       console.log('渲染进程: 开始恢复数据...');
+      backupData = unwrapBackupData(backupData);
       
       if (!backupData || typeof backupData !== 'object') {
         throw new Error('恢复数据格式无效');
@@ -921,12 +924,13 @@ export class DatabaseServiceManager {
   async replaceAllData(backupData: any): Promise<DataImportResult> {
     try {
       console.log('渲染进程: 开始完全替换数据...');
+      const dataToRestore = unwrapBackupData(backupData);
       
       // 先清空所有数据
       await this.forceCleanAllTables();
       
       // 然后恢复数据
-      return await this.restoreData(backupData);
+      return await this.restoreData(dataToRestore);
     } catch (error) {
       console.error('渲染进程: 完全替换数据失败:', error);
       return {

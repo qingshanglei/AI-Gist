@@ -35,6 +35,10 @@ import {
   createEmptyCloudSyncManifest,
   normalizeCloudSyncManifest
 } from '@shared/cloud-sync-manifest'
+import {
+  createBackupPayload,
+  parseBackupPayload
+} from '@shared/backup-integrity'
 
 const STORAGE_KEYS = {
   CONFIGS: 'cloud_backup_configs'
@@ -481,15 +485,20 @@ export class MobileCloudBackupService {
 
         if (fileResponse.status === 200) {
           let backupData
+          let checksum: string | undefined
           let actualSize = 0
 
           if (typeof fileResponse.data === 'string') {
             actualSize = new Blob([fileResponse.data]).size
-            backupData = JSON.parse(fileResponse.data)
+            const parsed = parseBackupPayload(JSON.parse(fileResponse.data))
+            backupData = parsed.payload
+            checksum = parsed.checksum
           } else if (typeof fileResponse.data === 'object') {
             const jsonString = JSON.stringify(fileResponse.data)
             actualSize = new Blob([jsonString]).size
-            backupData = fileResponse.data
+            const parsed = parseBackupPayload(fileResponse.data)
+            backupData = parsed.payload
+            checksum = parsed.checksum
           } else {
             continue
           }
@@ -503,7 +512,8 @@ export class MobileCloudBackupService {
             cloudPath: layout === 'standard'
               ? getCloudBackupFilePath(file.name)
               : joinCloudPath(file.name),
-            storageId: config.id
+            storageId: config.id,
+            checksum
           })
         } else {
           console.warn('读取备份文件失败，状态码:', fileResponse.status, file.name)
@@ -653,7 +663,8 @@ export class MobileCloudBackupService {
               encoding: Encoding.UTF8
             })
 
-            const backupData = JSON.parse(fileResult.data as string)
+            const parsedBackup = parseBackupPayload(JSON.parse(fileResult.data as string))
+            const backupData = parsedBackup.payload
             backups.push({
               id: backupData.id,
               name: backupData.name,
@@ -661,7 +672,8 @@ export class MobileCloudBackupService {
               createdAt: backupData.createdAt,
               size: file.size || 0,
               cloudPath: `${dirPath}/${file.name}`,
-              storageId: config.id
+              storageId: config.id,
+              checksum: parsedBackup.checksum
             })
           } catch (error) {
             console.warn('解析 iCloud 备份文件失败:', file.name, error)
@@ -939,13 +951,13 @@ export class MobileCloudBackupService {
       // 使用与桌面端一致的命名格式：backup-YYYY-MM-DD-xxxxxxxx
       const backupName = `backup-${timestamp.split('T')[0]}-${backupId.substring(0, 8)}`
 
-      const backupData = {
+      const backupData = createBackupPayload({
         id: backupId,
         name: backupName,
         description: description || '移动端云端备份',
         createdAt: timestamp,
         data
-      }
+      })
 
       const jsonString = JSON.stringify(backupData, null, 2)
       // 文件名使用完整的 backup-{id}.json 格式
@@ -1008,7 +1020,8 @@ export class MobileCloudBackupService {
           createdAt: backupData.createdAt,
           size: new Blob([jsonString]).size,
           cloudPath,
-          storageId: config.id
+          storageId: config.id,
+          checksum: backupData.checksum
         }
 
         console.log('备份创建成功:', backupInfo)
@@ -1104,7 +1117,8 @@ export class MobileCloudBackupService {
         createdAt: backupData.createdAt,
         size: new Blob([jsonString]).size,
         cloudPath: `${dirPath}/${fileName}`,
-        storageId: config.id
+        storageId: config.id,
+        checksum: backupData.checksum
       }
 
       return {
@@ -1203,9 +1217,9 @@ export class MobileCloudBackupService {
       // CapacitorHttp 可能返回字符串或对象
       let backupData
       if (typeof response.data === 'string') {
-        backupData = JSON.parse(response.data)
+        backupData = parseBackupPayload(JSON.parse(response.data)).payload
       } else if (typeof response.data === 'object') {
-        backupData = response.data
+        backupData = parseBackupPayload(response.data).payload
       } else {
         return {
           success: false,
@@ -1259,7 +1273,7 @@ export class MobileCloudBackupService {
         encoding: Encoding.UTF8
       })
 
-      const backupData = JSON.parse(result.data as string)
+      const backupData = parseBackupPayload(JSON.parse(result.data as string)).payload
 
       return {
         success: true,
