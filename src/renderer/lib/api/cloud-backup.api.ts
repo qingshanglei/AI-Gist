@@ -154,7 +154,7 @@ export class CloudBackupAPI {
       if (response.success && response.manifest) {
         return response.manifest;
       }
-      throw new Error(response.error || '读取云同步 manifest 失败');
+      throw new Error(('error' in response && response.error) || '读取云同步 manifest 失败');
     }
     return response;
   }

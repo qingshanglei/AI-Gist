@@ -49,6 +49,7 @@ export interface Prompt {
   imageBlobs?: Blob[]; // 图片数据数组，支持多张图片
 
   shortcutKey?: string; // 快捷键组合
+  isShortcutTrigger?: boolean; // 是否作为全局快捷键触发提示词
   createdAt: Date;
   updatedAt: Date;
 }
