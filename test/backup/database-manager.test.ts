@@ -370,7 +370,7 @@ describe('DatabaseServiceManager', () => {
 
       const result = await manager.replaceAllData(makeExportData())
 
-      expect(cleanSpy).toHaveBeenCalled()
+      expect(cleanSpy).toHaveBeenCalledTimes(1)
       expect(result.success).toBe(true)
     })
 
@@ -384,7 +384,7 @@ describe('DatabaseServiceManager', () => {
         syncTombstones: [mockSyncTombstone]
       })
 
-      expect(cleanSpy).toHaveBeenCalled()
+      expect(cleanSpy).toHaveBeenCalledTimes(1)
       expect(result.success).toBe(true)
       expect(result.details?.syncTombstones).toBe(1)
       expect(restoredTombstones).toHaveLength(1)

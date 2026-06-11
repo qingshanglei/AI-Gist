@@ -674,7 +674,7 @@ export class DatabaseServiceManager {
   /**
    * 恢复数据
    */
-  async restoreData(backupData: any): Promise<DataImportResult> {
+  async restoreData(backupData: any, options: { skipClean?: boolean } = {}): Promise<DataImportResult> {
     try {
       console.log('渲染进程: 开始恢复数据...');
       backupData = unwrapBackupData(backupData);
@@ -688,7 +688,7 @@ export class DatabaseServiceManager {
       const hasStandalonePromptVariables = Array.isArray(backupData.promptVariables);
       
       // 清空现有数据表（如果支持的话）
-      if (this.forceCleanAllTables) {
+      if (!options.skipClean && this.forceCleanAllTables) {
         console.log('清空现有数据表...');
         await this.forceCleanAllTables();
       }
@@ -934,7 +934,7 @@ export class DatabaseServiceManager {
       await this.forceCleanAllTables();
       
       // 然后恢复数据
-      return await this.restoreData(dataToRestore);
+      return await this.restoreData(dataToRestore, { skipClean: true });
     } catch (error) {
       console.error('渲染进程: 完全替换数据失败:', error);
       return {
