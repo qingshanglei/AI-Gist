@@ -122,7 +122,13 @@ export async function readCloudSyncManifestWithFallback(
   const describeError = options.describeError || describeCloudSyncManifestError;
 
   try {
-    return await options.readPrimary();
+    const primaryManifest = await options.readPrimary();
+    try {
+      const backupManifest = await options.readBackup();
+      return selectNewestManifest(primaryManifest, backupManifest);
+    } catch {
+      return primaryManifest;
+    }
   } catch (primaryError) {
     try {
       return await options.readBackup();
@@ -151,6 +157,32 @@ export function updateCloudSyncManifestDevice(
       [device.deviceId]: device
     }
   };
+}
+
+function selectNewestManifest(
+  primaryManifest: CloudSyncManifest,
+  backupManifest: CloudSyncManifest
+): CloudSyncManifest {
+  return getManifestTime(backupManifest) > getManifestTime(primaryManifest)
+    ? backupManifest
+    : primaryManifest;
+}
+
+function getManifestTime(manifest: CloudSyncManifest): number {
+  const candidates = [
+    manifest.updatedAt,
+    manifest.latestSnapshot?.createdAt,
+    manifest.baseSnapshot?.createdAt
+  ];
+
+  for (const candidate of candidates) {
+    const time = new Date(candidate || '').getTime();
+    if (!Number.isNaN(time)) {
+      return time;
+    }
+  }
+
+  return 0;
 }
 
 export function sanitizeCloudSyncConflictsForMetadata(input: unknown): CloudSyncConflict[] {
