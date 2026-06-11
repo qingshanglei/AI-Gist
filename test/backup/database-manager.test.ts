@@ -397,6 +397,17 @@ describe('DatabaseServiceManager', () => {
       expect(restoredTombstones[0].deletedAt).toBeInstanceOf(Date)
     })
 
+    it('任一记录恢复失败时返回失败，避免同步状态误标为成功', async () => {
+      vi.spyOn(manager, 'forceCleanAllTables').mockResolvedValue()
+      mockAppSettingsService.updateSettingByKey.mockRejectedValueOnce(new Error('settings write failed'))
+
+      const result = await manager.replaceAllData(makeExportData())
+
+      expect(result.success).toBe(false)
+      expect(result.totalErrors).toBe(1)
+      expect(result.error).toContain('恢复过程中有 1 条记录失败')
+    })
+
     it('备份校验失败时不会先清空本地数据', async () => {
       const data = {
         ...makeExportData(),

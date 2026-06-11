@@ -889,13 +889,17 @@ export class DatabaseServiceManager {
       }
       
       const totalRestored = Object.values(details).reduce((sum, count) => sum + count, 0);
+      const success = totalErrors === 0;
       
       console.log(`渲染进程: 数据恢复完成，总计恢复记录数: ${totalRestored}, 错误数: ${totalErrors}`);
       console.log('ID映射表:', idMapping);
       
       return {
-        success: true,
-        message: `数据恢复成功，共恢复 ${totalRestored} 条记录${totalErrors > 0 ? `，失败 ${totalErrors} 条` : ''}`,
+        success,
+        message: success
+          ? `数据恢复成功，共恢复 ${totalRestored} 条记录`
+          : `数据恢复失败，共恢复 ${totalRestored} 条记录，失败 ${totalErrors} 条`,
+        error: success ? undefined : `恢复过程中有 ${totalErrors} 条记录失败`,
         totalImported: totalRestored,
         totalErrors,
         details,
