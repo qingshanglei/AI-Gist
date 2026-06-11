@@ -427,6 +427,32 @@ describe('DatabaseServiceManager', () => {
       expect(restoredTombstones[0].deletedAt).toBeInstanceOf(Date)
     })
 
+    it('同步删除标记格式无效时恢复失败，避免静默丢失删除历史', async () => {
+      vi.spyOn(manager, 'forceCleanAllTables').mockResolvedValue()
+      mockCategoryService.db = createMockDbWithSyncTombstones([])
+
+      const result = await manager.replaceAllData({
+        ...makeExportData(),
+        syncTombstones: [{ collectionName: 'prompts' }]
+      })
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('同步删除标记格式无效')
+    })
+
+    it('数据库缺少删除标记表时恢复失败，避免误标同步成功', async () => {
+      vi.spyOn(manager, 'forceCleanAllTables').mockResolvedValue()
+      mockCategoryService.db = createMockDbWithoutSyncTombstones()
+
+      const result = await manager.replaceAllData({
+        ...makeExportData(),
+        syncTombstones: [mockSyncTombstone]
+      })
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('数据库缺少 syncTombstones 表')
+    })
+
     it('任一记录恢复失败时返回失败，避免同步状态误标为成功', async () => {
       vi.spyOn(manager, 'forceCleanAllTables').mockResolvedValue()
       mockAppSettingsService.updateSettingByKey.mockRejectedValueOnce(new Error('settings write failed'))
@@ -483,6 +509,16 @@ function createMockDbWithSyncTombstones(restoredTombstones: any[]) {
       }
       return transaction
     }),
+    version: 1
+  }
+}
+
+function createMockDbWithoutSyncTombstones() {
+  return {
+    objectStoreNames: {
+      contains: vi.fn(() => false)
+    },
+    transaction: vi.fn(),
     version: 1
   }
 }

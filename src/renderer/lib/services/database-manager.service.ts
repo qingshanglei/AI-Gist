@@ -1017,17 +1017,18 @@ export class DatabaseServiceManager {
       return 0;
     }
 
+    const invalidTombstones = syncTombstones
+      .filter(tombstone => !isRestorableSyncTombstone(tombstone));
+    if (invalidTombstones.length > 0) {
+      throw new Error(`同步删除标记格式无效: ${invalidTombstones.length} 条`);
+    }
+
     const db = await this.getDatabase();
     if (!db || !db.objectStoreNames.contains('syncTombstones')) {
-      return 0;
+      throw new Error('无法恢复同步删除标记：数据库缺少 syncTombstones 表');
     }
 
     const validTombstones = syncTombstones
-      .filter(tombstone =>
-        tombstone &&
-        typeof tombstone.collectionName === 'string' &&
-        typeof tombstone.recordKey === 'string'
-      )
       .map(tombstone => {
         const dataWithoutId = { ...tombstone };
         delete dataWithoutId.id;
@@ -1056,7 +1057,7 @@ export class DatabaseServiceManager {
           restoredCount++;
         };
         request.onerror = () => {
-          console.warn('恢复同步删除标记失败:', request.error);
+          reject(request.error || new Error('恢复同步删除标记失败'));
         };
       }
     });
@@ -1337,4 +1338,12 @@ export class DatabaseServiceManager {
       };
     }
   }
+}
+
+function isRestorableSyncTombstone(tombstone: any): boolean {
+  return !!tombstone &&
+    typeof tombstone.collectionName === 'string' &&
+    tombstone.collectionName.length > 0 &&
+    typeof tombstone.recordKey === 'string' &&
+    tombstone.recordKey.length > 0;
 }
