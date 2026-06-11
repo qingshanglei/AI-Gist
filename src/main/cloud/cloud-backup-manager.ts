@@ -236,28 +236,28 @@ export class CloudBackupManager {
     ipcMain.handle('cloud:get-backup-list', async (_, storageId: string) => {
       try {
         const config = this.getStorageConfig(storageId);
-        console.log(`开始获取云端备份列表，存储类型: ${config.type}, 存储ID: ${storageId}`);
+        this.debugLog(`开始获取云端备份列表，存储类型: ${config.type}, 存储ID: ${storageId}`);
         
         const provider = this.createProvider(config);
         
         // 对于WebDAV，确保目录已初始化
         if (config.type === 'webdav' && provider.initializeDirectories) {
           try {
-            console.log('正在初始化WebDAV目录...');
+            this.debugLog('正在初始化WebDAV目录...');
             await provider.initializeDirectories();
-            console.log('WebDAV目录初始化完成');
+            this.debugLog('WebDAV目录初始化完成');
           } catch (error) {
             console.warn('WebDAV 目录初始化失败，继续尝试列出文件:', error);
           }
         }
         
-        console.log('正在列出文件...');
+        this.debugLog('正在列出文件...');
         const backupFiles = await this.listBackupCandidateFiles(provider, config);
         
-        console.log(`过滤后找到 ${backupFiles.length} 个备份文件`);
+        this.debugLog(`过滤后找到 ${backupFiles.length} 个备份文件`);
         
         const backups = await this.parseBackupFiles(provider, backupFiles, storageId);
-        console.log(`解析完成，共 ${backups.length} 个备份`);
+        this.debugLog(`解析完成，共 ${backups.length} 个备份`);
         
         return this.sortBackupsByDate(backups);
       } catch (error) {
@@ -569,7 +569,7 @@ export class CloudBackupManager {
       try {
         const files = await provider.listFiles(searchPath || '/');
         const filtered = this.filterBackupFiles(files);
-        console.log(`从 ${searchPath || '/'} 找到 ${filtered.length} 个备份文件`);
+        this.debugLog(`从 ${searchPath || '/'} 找到 ${filtered.length} 个备份文件`);
         backupFiles.push(...filtered);
       } catch (error) {
         console.warn(`从 ${searchPath || '/'} 列出备份文件失败:`, error);
@@ -937,6 +937,18 @@ export class CloudBackupManager {
       ? String((error as { code?: string }).code || '')
       : '';
     return code === 'ENOENT';
+  }
+
+  private debugLog(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return;
+    }
+    console.debug(...args);
+  }
+
+  private isDebugLoggingEnabled(): boolean {
+    return process.env.AI_GIST_DEBUG_CLOUD === '1' ||
+      (process.env.DEBUG || '').split(',').some(scope => scope.trim() === 'ai-gist:cloud');
   }
 
   private formatErrorMessage(error: unknown): string {

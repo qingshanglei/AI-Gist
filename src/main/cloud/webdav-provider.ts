@@ -100,7 +100,7 @@ export class WebDAVProvider implements CloudStorageProvider {
     }
 
     await this.createDirectory(defaultBackupDir);
-    console.log('WebDAV 目录初始化成功');
+    this.debugLog('WebDAV 目录初始化成功');
   }
 
   // ==================== 连接测试 ====================
@@ -453,6 +453,18 @@ export class WebDAVProvider implements CloudStorageProvider {
 
   private isRequestTimeoutError(error: unknown): boolean {
     return this.getErrorMessage(error).includes('超时');
+  }
+
+  private debugLog(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return;
+    }
+    console.debug(...args);
+  }
+
+  private isDebugLoggingEnabled(): boolean {
+    return process.env.AI_GIST_DEBUG_CLOUD === '1' ||
+      (process.env.DEBUG || '').split(',').some(scope => scope.trim() === 'ai-gist:cloud');
   }
 
   private logOperationError(message: string, error: unknown): void {
