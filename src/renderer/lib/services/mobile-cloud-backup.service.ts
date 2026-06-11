@@ -387,7 +387,7 @@ export class MobileCloudBackupService {
 
       return { success: false, error: '不支持的存储类型' }
     } catch (error) {
-      console.error('保存云同步 manifest 失败:', error)
+      this.debugLog('保存云同步 manifest 失败:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : '保存云同步 manifest 失败'

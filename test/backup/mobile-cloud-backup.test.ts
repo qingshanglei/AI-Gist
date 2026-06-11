@@ -383,9 +383,12 @@ describe('MobileCloudBackupService', () => {
         .mockResolvedValueOnce({ status: 201, data: '' })
         .mockResolvedValueOnce({ status: 500, data: '' })
 
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
       const result = await service.saveCloudSyncManifest('cfg-1', manifest)
 
       expect(result.success).toBe(false)
+      expect(errorSpy).not.toHaveBeenCalled()
+      errorSpy.mockRestore()
       const putCalls = mockCapacitorHttp.request.mock.calls
         .map((call: any[]) => call[0])
         .filter((call: any) => call.method === 'PUT')
