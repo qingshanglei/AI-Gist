@@ -121,6 +121,10 @@ async function startApp() {
       exportAllData: async () => {
         return await databaseService.exportAllData();
       },
+
+      exportAllDataForBackup: async () => {
+        return await databaseService.exportAllDataForBackup();
+      },
       
       // 数据导入方法
       importData: async (data: any) => {

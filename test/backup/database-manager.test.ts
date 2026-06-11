@@ -248,6 +248,45 @@ describe('DatabaseServiceManager', () => {
       expect(result.success).toBe(true)
       expect(result.data!.prompts[0].imageBlobs).toBeUndefined()
     })
+
+    it('已序列化的 data URL 图片不会在再次备份时丢失', async () => {
+      const dataUrl = 'data:image/png;base64,existingbase64'
+      mockPromptService.getAllPromptsForTags.mockResolvedValue([
+        { ...mockPrompt, imageBlobs: [dataUrl] }
+      ])
+      mockPromptService.getAllPromptHistories.mockResolvedValue([
+        { ...mockPromptHistory, imageBlobs: [dataUrl] }
+      ])
+
+      const result = await manager.exportAllDataForBackup()
+
+      expect(result.success).toBe(true)
+      expect(result.data!.prompts[0].imageBlobs).toEqual([dataUrl])
+      expect(result.data!.promptHistories![0].imageBlobs).toEqual([dataUrl])
+    })
+
+    it('遇到无法序列化的图片数据时不生成部分缺图备份', async () => {
+      mockPromptService.getAllPromptsForTags.mockResolvedValue([
+        { ...mockPrompt, imageBlobs: [{ invalid: true }] }
+      ])
+
+      const result = await manager.exportAllDataForBackup()
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('图片数据格式无效')
+    })
+
+    it('backupData 使用备份专用图片序列化', async () => {
+      const blob = new Blob(['img'], { type: 'image/png' })
+      mockPromptService.getAllPromptsForTags.mockResolvedValue([
+        { ...mockPrompt, imageBlobs: [blob] }
+      ])
+
+      const result = await manager.backupData()
+
+      expect(result.success).toBe(true)
+      expect(result.data!.prompts[0].imageBlobs[0]).toMatch(/^data:/)
+    })
   })
 
   describe('exportAllDataForSync', () => {

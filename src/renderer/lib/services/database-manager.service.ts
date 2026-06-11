@@ -248,11 +248,19 @@ export class DatabaseServiceManager {
   private async serializeImageBlobs(records: any[]): Promise<any[]> {
     return Promise.all(records.map(async (record) => {
       if (!record.imageBlobs?.length) return record
-      const serialized = await Promise.all(
-        record.imageBlobs
-          .filter((b: any) => b instanceof Blob)
-          .map((b: Blob) => this.blobToBase64(b))
-      )
+      if (!Array.isArray(record.imageBlobs)) {
+        throw new Error('图片数据格式无效，无法创建完整备份')
+      }
+
+      const serialized = await Promise.all(record.imageBlobs.map((item: any, index: number) => {
+        if (item instanceof Blob) {
+          return this.blobToBase64(item)
+        }
+        if (typeof item === 'string' && item.startsWith('data:')) {
+          return item
+        }
+        throw new Error(`图片数据格式无效，无法创建完整备份（第 ${index + 1} 张）`)
+      }))
       return { ...record, imageBlobs: serialized }
     }))
   }
@@ -375,16 +383,25 @@ export class DatabaseServiceManager {
    * 移动端备份时使用此方法，确保 imageBlobs 能正确序列化为 JSON
    */
   async exportAllDataForBackup(): Promise<DataExportResult> {
-    const result = await this.exportAllData();
-    if (!result.success || !result.data) return result;
-    return {
-      ...result,
-      data: {
-        ...result.data,
-        prompts: await this.serializeImageBlobs(result.data.prompts),
-        promptHistories: await this.serializeImageBlobs(result.data.promptHistories || [])
-      }
-    };
+    try {
+      const result = await this.exportAllData();
+      if (!result.success || !result.data) return result;
+      return {
+        ...result,
+        data: {
+          ...result.data,
+          prompts: await this.serializeImageBlobs(result.data.prompts),
+          promptHistories: await this.serializeImageBlobs(result.data.promptHistories || [])
+        }
+      };
+    } catch (error) {
+      console.error('导出备份数据失败:', error);
+      return {
+        success: false,
+        message: '备份数据导出失败',
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
   }
 
   /**
@@ -649,8 +666,7 @@ export class DatabaseServiceManager {
    * 备份数据
    */
   async backupData(): Promise<DataExportResult> {
-    // 备份和导出是相同的逻辑
-    return await this.exportAllData();
+    return await this.exportAllDataForBackup();
   }
   
   /**

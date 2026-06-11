@@ -121,8 +121,8 @@ export function useDataManagement() {
       
       console.log('开始创建备份...');
       
-      // 1. 导出所有数据
-      const result = await safeDbOperation(() => databaseService.exportAllData());
+      // 1. 导出所有备份数据
+      const result = await safeDbOperation(() => databaseService.exportAllDataForBackup());
       if (!result || !result.success) {
         throw new Error('导出数据失败');
       }
@@ -297,8 +297,8 @@ export function useDataManagement() {
       setLoading('export', true);
       clearMessages();
       
-      // 1. 从数据库获取所有数据
-      const result = await safeDbOperation(() => databaseService.exportAllData());
+      // 1. 从数据库获取所有备份数据
+      const result = await safeDbOperation(() => databaseService.exportAllDataForBackup());
       if (!result || !result.success) {
         throw new Error('导出数据失败');
       }
@@ -382,7 +382,7 @@ export function useDataManagement() {
       }
       
       // 2. 根据选项过滤数据
-      let filteredData: any = {};
+      const filteredData: any = {};
       
       if (options.includeCategories) {
         filteredData.categories = result.data?.categories || [];

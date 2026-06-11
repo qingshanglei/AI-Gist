@@ -300,7 +300,9 @@ export class DataManagementAPI {
     try {
       // 从 window 对象获取数据库服务
       if (typeof window !== 'undefined' && (window as any).databaseAPI) {
-        const result = await (window as any).databaseAPI.exportAllData();
+        const exportForBackup = (window as any).databaseAPI.exportAllDataForBackup ||
+          (window as any).databaseAPI.exportAllData;
+        const result = await exportForBackup();
         return result.data || {
           categories: [],
           prompts: [],
