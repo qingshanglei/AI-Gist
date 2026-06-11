@@ -993,8 +993,6 @@ export class BaseDatabaseService {
     ids: number[],
     emitChange: boolean
   ): Promise<{ success: number; failed: number; errors: string[] }> {
-    let success = 0;
-    let failed = 0;
     const errors: string[] = [];
 
     const db = await this.ensureDB();
@@ -1011,81 +1009,75 @@ export class BaseDatabaseService {
       console.warn('获取删除记录时出错:', error);
     }
 
-    // 使用事务进行批量操作
     return new Promise((resolve) => {
       const transaction = db.transaction(this.getDeleteTransactionStores(db, storeName), 'readwrite');
       const store = transaction.objectStore(storeName);
-      
-      let completed = 0;
       const total = ids.length;
+      const committedIds = new Set<number>();
+      let settled = false;
 
       if (total === 0) {
         resolve({ success: 0, failed: 0, errors: [] });
         return;
       }
 
-      // 批量删除所有记录
+      const resolveOnce = (result: { success: number; failed: number; errors: string[] }) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve(result);
+      };
+
+      transaction.oncomplete = () => {
+        const committedIdList = ids.filter(id => committedIds.has(id));
+        if (emitChange && committedIdList.length > 0) {
+          emitDataChange({
+            storeName,
+            action: 'batch-delete',
+            ids: committedIdList
+          });
+        }
+
+        resolveOnce({
+          success: committedIdList.length,
+          failed: total - committedIdList.length,
+          errors
+        });
+      };
+
+      const resolveTransactionFailure = () => {
+        resolveOnce({
+          success: 0,
+          failed: total,
+          errors: errors.length > 0
+            ? errors
+            : [`批量删除事务失败: ${transaction.error?.message || '未知错误'}`]
+        });
+      };
+
+      transaction.onerror = resolveTransactionFailure;
+      transaction.onabort = resolveTransactionFailure;
+
       ids.forEach(id => {
         const request = store.delete(id);
         
         request.onsuccess = () => {
-          const finalizeSuccess = () => {
-            success++;
-            completed++;
-
-            if (completed === total) {
-              // 所有操作完成后，直接返回结果
-              if (emitChange && success > 0) {
-                emitDataChange({
-                  storeName,
-                  action: 'batch-delete',
-                  ids: ids.filter(id => !errors.some(error => error.includes(`记录 ${id} `)))
-                });
-              }
-              resolve({ success, failed, errors });
-            }
-          };
-
           this.writeTombstoneForDeletedRecord(
             transaction,
             storeName,
             deletedRecords.get(id),
-            finalizeSuccess,
+            () => {
+              committedIds.add(id);
+            },
             error => {
-              failed++;
               errors.push(`记录 ${id} 删除标记写入失败: ${error instanceof Error ? error.message : '未知错误'}`);
-              completed++;
-
-              if (completed === total) {
-                if (emitChange && success > 0) {
-                  emitDataChange({
-                    storeName,
-                    action: 'batch-delete',
-                    ids: ids.filter(id => !errors.some(error => error.includes(`记录 ${id} `)))
-                  });
-                }
-                resolve({ success, failed, errors });
-              }
             }
           );
         };
 
         request.onerror = () => {
-          failed++;
           errors.push(`删除记录 ${id} 失败: ${request.error?.message || '未知错误'}`);
-          completed++;
-          
-          if (completed === total) {
-            // 所有操作完成后，直接返回结果
-            if (emitChange && success > 0) {
-              emitDataChange({
-                storeName,
-                action: 'batch-delete',
-                ids: ids.filter(id => !errors.some(error => error.includes(`记录 ${id} `)))
-              });
-            }
-            resolve({ success, failed, errors });
-          }
         };
       });
     });
