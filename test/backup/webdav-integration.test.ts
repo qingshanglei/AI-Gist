@@ -700,6 +700,31 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
       expect(loaded.latestSnapshot?.revision).toBe('rev-backup')
       expect(loaded.latestSnapshot?.data.promptVariables).toHaveLength(1)
     })
+
+    it('主 manifest 缺失时能从备份副本恢复读取', async () => {
+      const service = MobileCloudBackupService.getInstance()
+      await saveConfig(service)
+
+      const manifest = {
+        ...createEmptyCloudSyncManifest('2026-03-15T00:00:00.000Z'),
+        latestSnapshot: {
+          schemaVersion: 1 as const,
+          deviceId: 'ios-device',
+          revision: 'rev-backup-only',
+          createdAt: '2026-03-15T00:00:00.000Z',
+          data: mockExportData
+        }
+      }
+
+      const saveResult = await service.saveCloudSyncManifest('cfg-real', manifest)
+      expect(saveResult.success).toBe(true)
+      await fsp.unlink(path.join(server.rootDir, 'AI-Gist-Backup', 'sync-manifest.json'))
+
+      const loaded = await service.getCloudSyncManifest('cfg-real')
+
+      expect(loaded.latestSnapshot?.revision).toBe('rev-backup-only')
+      expect(loaded.latestSnapshot?.data.quickOptimizationConfigs).toHaveLength(1)
+    })
   })
 
   // ----------------------------------------------------------------

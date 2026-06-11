@@ -29,8 +29,8 @@ import {
 import type { CloudSyncManifest } from '@shared/cloud-sync-manifest';
 import {
   assertValidCloudSyncManifest,
-  createEmptyCloudSyncManifest,
-  normalizeCloudSyncManifest
+  normalizeCloudSyncManifest,
+  readCloudSyncManifestWithFallback
 } from '@shared/cloud-sync-manifest';
 import { WebDAVProvider } from './webdav-provider';
 import { ICloudProvider } from './icloud-provider';
@@ -748,23 +748,12 @@ export class CloudBackupManager {
     const manifestPath = this.getSyncManifestCloudPath(config);
     const backupPath = this.getSyncManifestBackupCloudPath(config);
 
-    try {
-      return await this.readCloudSyncManifestFile(provider, manifestPath);
-    } catch (error) {
-      if (this.isNotFoundError(error)) {
-        return createEmptyCloudSyncManifest();
-      }
-
-      console.warn('读取云同步 manifest 失败，尝试读取备份副本:', error);
-      try {
-        return await this.readCloudSyncManifestFile(provider, backupPath);
-      } catch (backupError) {
-        throw new Error(
-          `读取云同步 manifest 失败，且备份副本不可用: ${this.formatErrorMessage(error)}；` +
-          `备份副本错误: ${this.formatErrorMessage(backupError)}`
-        );
-      }
-    }
+    return readCloudSyncManifestWithFallback({
+      readPrimary: () => this.readCloudSyncManifestFile(provider, manifestPath),
+      readBackup: () => this.readCloudSyncManifestFile(provider, backupPath),
+      isNotFoundError: error => this.isNotFoundError(error),
+      describeError: error => this.formatErrorMessage(error)
+    });
   }
 
   private async readCloudSyncManifestFile(

@@ -31,6 +31,13 @@ export interface CloudSyncManifestValidationResult {
   manifest?: CloudSyncManifest;
 }
 
+export interface CloudSyncManifestFallbackReadOptions {
+  readPrimary: () => Promise<CloudSyncManifest>;
+  readBackup: () => Promise<CloudSyncManifest>;
+  isNotFoundError?: (error: unknown) => boolean;
+  describeError?: (error: unknown) => string;
+}
+
 export function createEmptyCloudSyncManifest(now = new Date().toISOString()): CloudSyncManifest {
   return {
     kind: CLOUD_SYNC_MANIFEST_KIND,
@@ -105,6 +112,30 @@ export function assertValidCloudSyncManifest(input: unknown): CloudSyncManifest 
   return result.manifest;
 }
 
+export async function readCloudSyncManifestWithFallback(
+  options: CloudSyncManifestFallbackReadOptions
+): Promise<CloudSyncManifest> {
+  const isNotFoundError = options.isNotFoundError || isCloudSyncManifestNotFoundError;
+  const describeError = options.describeError || describeCloudSyncManifestError;
+
+  try {
+    return await options.readPrimary();
+  } catch (primaryError) {
+    try {
+      return await options.readBackup();
+    } catch (backupError) {
+      if (isNotFoundError(primaryError) && isNotFoundError(backupError)) {
+        return createEmptyCloudSyncManifest();
+      }
+
+      throw new Error(
+        `读取云同步 manifest 失败，且备份副本不可用: ${describeError(primaryError)}；` +
+        `备份副本错误: ${describeError(backupError)}`
+      );
+    }
+  }
+}
+
 export function updateCloudSyncManifestDevice(
   manifest: CloudSyncManifest,
   device: CloudSyncDeviceState
@@ -117,6 +148,15 @@ export function updateCloudSyncManifestDevice(
       [device.deviceId]: device
     }
   };
+}
+
+export function isCloudSyncManifestNotFoundError(error: unknown): boolean {
+  const message = describeCloudSyncManifestError(error);
+  return /404|not\s*found|no such file|does not exist|ENOENT|不存在|未找到/i.test(message);
+}
+
+function describeCloudSyncManifestError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function isCloudSyncSnapshot(value: unknown): value is CloudSyncSnapshot {

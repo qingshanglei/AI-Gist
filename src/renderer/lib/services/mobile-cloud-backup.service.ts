@@ -32,8 +32,8 @@ import {
 import type { CloudSyncManifest } from '@shared/cloud-sync-manifest'
 import {
   assertValidCloudSyncManifest,
-  createEmptyCloudSyncManifest,
-  normalizeCloudSyncManifest
+  normalizeCloudSyncManifest,
+  readCloudSyncManifestWithFallback
 } from '@shared/cloud-sync-manifest'
 import {
   createBackupPayload,
@@ -527,23 +527,12 @@ export class MobileCloudBackupService {
   }
 
   private async getWebDAVSyncManifest(config: any): Promise<CloudSyncManifest> {
-    try {
-      return await this.readWebDAVSyncManifestFile(config, getCloudSyncManifestPath())
-    } catch (error) {
-      if (this.isNotFoundError(error)) {
-        return createEmptyCloudSyncManifest()
-      }
-
-      console.warn('读取云同步 manifest 失败，尝试读取备份副本:', error)
-      try {
-        return await this.readWebDAVSyncManifestFile(config, getCloudSyncManifestBackupPath())
-      } catch (backupError) {
-        throw new Error(
-          `读取云同步 manifest 失败，且备份副本不可用: ${this.formatErrorMessage(error)}；` +
-          `备份副本错误: ${this.formatErrorMessage(backupError)}`
-        )
-      }
-    }
+    return readCloudSyncManifestWithFallback({
+      readPrimary: () => this.readWebDAVSyncManifestFile(config, getCloudSyncManifestPath()),
+      readBackup: () => this.readWebDAVSyncManifestFile(config, getCloudSyncManifestBackupPath()),
+      isNotFoundError: error => this.isNotFoundError(error),
+      describeError: error => this.formatErrorMessage(error)
+    })
   }
 
   private async readWebDAVSyncManifestFile(config: any, cloudPath: string): Promise<CloudSyncManifest> {
@@ -701,23 +690,12 @@ export class MobileCloudBackupService {
     const dirPath = config.path || CLOUD_BACKUP_DIR
     await this.ensureICloudDirectory(dirPath)
 
-    try {
-      return await this.readICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_FILE)
-    } catch (error) {
-      if (this.isNotFoundError(error)) {
-        return createEmptyCloudSyncManifest()
-      }
-
-      console.warn('读取 iCloud 同步 manifest 失败，尝试读取备份副本:', error)
-      try {
-        return await this.readICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_BACKUP_FILE)
-      } catch (backupError) {
-        throw new Error(
-          `读取 iCloud 同步 manifest 失败，且备份副本不可用: ${this.formatErrorMessage(error)}；` +
-          `备份副本错误: ${this.formatErrorMessage(backupError)}`
-        )
-      }
-    }
+    return readCloudSyncManifestWithFallback({
+      readPrimary: () => this.readICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_FILE),
+      readBackup: () => this.readICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_BACKUP_FILE),
+      isNotFoundError: error => this.isNotFoundError(error),
+      describeError: error => this.formatErrorMessage(error)
+    })
   }
 
   private async readICloudSyncManifestFile(dirPath: string, fileName: string): Promise<CloudSyncManifest> {

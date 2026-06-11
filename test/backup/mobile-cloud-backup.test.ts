@@ -304,13 +304,45 @@ describe('MobileCloudBackupService', () => {
   describe('cloud sync manifest', () => {
     it('WebDAV manifest 不存在时返回空 manifest', async () => {
       await saveConfig(service)
-      mockCapacitorHttp.request.mockResolvedValueOnce({ status: 404, data: '' })
+      mockCapacitorHttp.request
+        .mockResolvedValueOnce({ status: 404, data: '' })
+        .mockResolvedValueOnce({ status: 404, data: '' })
 
       const manifest = await service.getCloudSyncManifest('cfg-1')
 
       expect(manifest.schemaVersion).toBe(1)
       expect(manifest.devices).toEqual({})
       expect(manifest.conflicts).toEqual([])
+    })
+
+    it('WebDAV manifest 主文件不存在时读取备份副本', async () => {
+      await saveConfig(service)
+      const backupManifest = {
+        ...createEmptyCloudSyncManifest('2026-03-12T00:00:00.000Z'),
+        latestSnapshot: {
+          schemaVersion: 1 as const,
+          deviceId: 'ios-device',
+          revision: 'backup-only-rev',
+          createdAt: '2026-03-12T00:00:00.000Z',
+          data: mockExportData
+        }
+      }
+
+      mockCapacitorHttp.request
+        .mockResolvedValueOnce({ status: 404, data: '' })
+        .mockResolvedValueOnce({ status: 200, data: JSON.stringify(backupManifest) })
+
+      const manifest = await service.getCloudSyncManifest('cfg-1')
+
+      expect(manifest.latestSnapshot?.revision).toBe('backup-only-rev')
+      const getUrls = mockCapacitorHttp.request.mock.calls
+        .map((call: any[]) => call[0])
+        .filter((call: any) => call.method === 'GET')
+        .map((call: any) => call.url)
+      expect(getUrls).toEqual([
+        'https://dav.example.com/backup/AI-Gist-Backup/sync-manifest.json',
+        'https://dav.example.com/backup/AI-Gist-Backup/sync-manifest.backup.json'
+      ])
     })
 
     it('保存 WebDAV manifest 到统一目录', async () => {
@@ -377,6 +409,36 @@ describe('MobileCloudBackupService', () => {
 
       expect(result.success).toBe(true)
       expect((Filesystem.writeFile as any).mock.calls.map((call: any[]) => call[0].path)).toEqual([
+        'AI-Gist-Backup/sync-manifest.json',
+        'AI-Gist-Backup/sync-manifest.backup.json'
+      ])
+    })
+
+    it('iCloud manifest 主文件不存在时读取备份副本', async () => {
+      await saveConfig(service, {
+        ...webdavConfig,
+        id: 'cfg-icloud',
+        type: 'icloud',
+        path: 'AI-Gist-Backup'
+      } as any)
+      const backupManifest = {
+        ...createEmptyCloudSyncManifest('2026-03-12T00:00:00.000Z'),
+        latestSnapshot: {
+          schemaVersion: 1 as const,
+          deviceId: 'ios-device',
+          revision: 'icloud-backup-rev',
+          createdAt: '2026-03-12T00:00:00.000Z',
+          data: mockExportData
+        }
+      }
+      ;(Filesystem.readFile as any)
+        .mockRejectedValueOnce(new Error('File does not exist'))
+        .mockResolvedValueOnce({ data: JSON.stringify(backupManifest) })
+
+      const manifest = await service.getCloudSyncManifest('cfg-icloud')
+
+      expect(manifest.latestSnapshot?.revision).toBe('icloud-backup-rev')
+      expect((Filesystem.readFile as any).mock.calls.map((call: any[]) => call[0].path)).toEqual([
         'AI-Gist-Backup/sync-manifest.json',
         'AI-Gist-Backup/sync-manifest.backup.json'
       ])
