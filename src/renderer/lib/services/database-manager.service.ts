@@ -1058,6 +1058,35 @@ export class DatabaseServiceManager {
     if (invalidFields.length > 0) {
       throw new Error(`恢复数据格式无效：${invalidFields.join(', ')} 必须是数组`);
     }
+
+    this.assertRestorableImageBlobShape(data.prompts, 'prompts');
+    this.assertRestorableImageBlobShape(data.promptHistories, 'promptHistories');
+  }
+
+  private assertRestorableImageBlobShape(records: any[] | undefined, collectionName: string): void {
+    if (!Array.isArray(records)) {
+      return;
+    }
+
+    records.forEach((record, recordIndex) => {
+      if (!record?.imageBlobs?.length) {
+        return;
+      }
+
+      if (!Array.isArray(record.imageBlobs)) {
+        throw new Error(`图片数据格式无效，无法恢复完整数据（${collectionName}[${recordIndex}].imageBlobs 必须是数组）`);
+      }
+
+      record.imageBlobs.forEach((item: any, imageIndex: number) => {
+        const isBlobItem = typeof Blob !== 'undefined' && item instanceof Blob;
+        const isDataUrl = typeof item === 'string' && item.startsWith('data:');
+        if (!isBlobItem && !isDataUrl) {
+          throw new Error(
+            `图片数据格式无效，无法恢复完整数据（${collectionName}[${recordIndex}].imageBlobs[${imageIndex}]）`
+          );
+        }
+      });
+    });
   }
 
   private async restoreSyncTombstones(syncTombstones: any[]): Promise<number> {
