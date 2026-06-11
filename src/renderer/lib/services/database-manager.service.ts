@@ -42,6 +42,8 @@ const RESTORABLE_DATA_FIELDS = [
   'syncTombstones'
 ];
 
+const DATABASE_DEBUG_STORAGE_KEY = 'ai-gist.debug.database';
+
 /**
  * 统一的数据库服务管理类
  * 提供对所有数据库服务的统一访问接口和高级管理功能
@@ -118,6 +120,22 @@ export class DatabaseServiceManager {
     this.category.close();
   }
 
+  private debugLog(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return;
+    }
+    console.debug(...args);
+  }
+
+  private isDebugLoggingEnabled(): boolean {
+    try {
+      return typeof localStorage !== 'undefined' &&
+        localStorage.getItem(DATABASE_DEBUG_STORAGE_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * 获取数据库健康状态
    * 检查所有关键表是否存在
@@ -146,13 +164,13 @@ export class DatabaseServiceManager {
    */
   async repairDatabase(): Promise<{ success: boolean; message: string }> {
     try {
-      console.log('DatabaseServiceManager: 开始修复数据库...');
+      this.debugLog('DatabaseServiceManager: 开始修复数据库...');
       
       // 使用基础服务的修复功能
       const repairResult = await this.category.repairDatabase();
       
       if (repairResult.success) {
-        console.log('DatabaseServiceManager: 数据库修复成功');
+        this.debugLog('DatabaseServiceManager: 数据库修复成功');
         
         // 重新检查健康状态
         const healthStatus = await this.getHealthStatus();
@@ -192,7 +210,7 @@ export class DatabaseServiceManager {
     missingStores?: string[];
   }> {
     try {
-      console.log('正在检查数据库健康状态...');
+      this.debugLog('正在检查数据库健康状态...');
       
       const healthStatus = await this.getHealthStatus();
       
@@ -204,10 +222,10 @@ export class DatabaseServiceManager {
         };
       }
       
-      console.log('检测到数据库问题，缺失的对象存储:', healthStatus.missingStores);
+      this.debugLog('检测到数据库问题，缺失的对象存储:', healthStatus.missingStores);
       
       // 首先尝试普通修复
-      console.log('尝试修复数据库...');
+      this.debugLog('尝试修复数据库...');
       const repairResult = await this.repairDatabase();
       
       if (repairResult.success) {
@@ -306,24 +324,24 @@ export class DatabaseServiceManager {
    */
   async exportAllData(): Promise<DataExportResult> {
     try {
-      console.log('渲染进程: 开始导出数据库数据...');
+      this.debugLog('渲染进程: 开始导出数据库数据...');
       
       // 首先检查数据库健康状态
-      console.log('正在检查数据库健康状态...');
+      this.debugLog('正在检查数据库健康状态...');
       const healthStatus = await this.getHealthStatus();
       
       if (!healthStatus.healthy) {
         console.warn('检测到数据库异常，缺失的对象存储:', healthStatus.missingStores);
         
         // 尝试修复数据库
-        console.log('正在尝试修复数据库...');
+        this.debugLog('正在尝试修复数据库...');
         const repairResult = await this.repairDatabase();
         
         if (!repairResult.success) {
           throw new Error(`数据库修复失败: ${repairResult.message}`);
         }
         
-        console.log('数据库修复成功，继续导出数据...');
+        this.debugLog('数据库修复成功，继续导出数据...');
       }
       
       // 安全地获取所有数据
@@ -374,7 +392,7 @@ export class DatabaseServiceManager {
         settings: settings as any[]
       };
       
-      console.log('渲染进程: 数据导出完成', {
+      this.debugLog('渲染进程: 数据导出完成', {
         分类数: exportData.categories.length,
         提示词数: exportData.prompts.length,
         提示词变量数: exportData.promptVariables.length,
@@ -463,7 +481,7 @@ export class DatabaseServiceManager {
    */
   async importData(data: any): Promise<DataImportResult> {
     try {
-      console.log('渲染进程: 开始导入数据库数据...');
+      this.debugLog('渲染进程: 开始导入数据库数据...');
       data = unwrapBackupData(data);
       
       if (!data || typeof data !== 'object') {
@@ -482,7 +500,7 @@ export class DatabaseServiceManager {
       
       // 导入分类数据
       if (data.categories && data.categories.length > 0) {
-        console.log(`导入分类数据: ${data.categories.length} 条`);
+        this.debugLog(`导入分类数据: ${data.categories.length} 条`);
         for (const category of data.categories) {
           const oldId = category.id;
           const { id, ...categoryDataWithoutId } = category;
@@ -492,7 +510,7 @@ export class DatabaseServiceManager {
             // 记录ID映射：旧ID -> 新ID
             if (oldId !== undefined) {
               idMapping[`category_${oldId}`] = newCategory.id!;
-              console.log(`分类ID映射: ${oldId} -> ${newCategory.id}`);
+              this.debugLog(`分类ID映射: ${oldId} -> ${newCategory.id}`);
             }
           } catch (err) {
             console.warn('导入分类数据失败:', category.id, err);
@@ -503,7 +521,7 @@ export class DatabaseServiceManager {
       
       // 导入提示词数据（需要处理分类ID映射）
       if (data.prompts && data.prompts.length > 0) {
-        console.log(`导入提示词数据: ${data.prompts.length} 条`);
+        this.debugLog(`导入提示词数据: ${data.prompts.length} 条`);
         for (const prompt of data.prompts) {
           const oldPromptId = prompt.id;
           const promptDataWithoutId = { ...prompt };
@@ -520,7 +538,7 @@ export class DatabaseServiceManager {
             
             if (newCategoryId !== undefined) {
               promptDataWithoutId.categoryId = newCategoryId;
-              console.log(`提示词分类ID映射: ${oldCategoryId} -> ${newCategoryId}`);
+              this.debugLog(`提示词分类ID映射: ${oldCategoryId} -> ${newCategoryId}`);
             } else {
               console.warn(`未找到分类ID映射: ${oldCategoryId}，将提示词设为未分类`);
               promptDataWithoutId.categoryId = undefined;
@@ -534,7 +552,7 @@ export class DatabaseServiceManager {
             // 记录提示词ID映射：旧ID -> 新ID
             if (oldPromptId !== undefined) {
               idMapping[`prompt_${oldPromptId}`] = newPrompt.id!;
-              console.log(`提示词ID映射: ${oldPromptId} -> ${newPrompt.id}`);
+              this.debugLog(`提示词ID映射: ${oldPromptId} -> ${newPrompt.id}`);
             }
           } catch (err) {
             console.warn('导入提示词数据失败:', prompt.id, err);
@@ -545,7 +563,7 @@ export class DatabaseServiceManager {
 
       // 导入提示词变量数据（需要处理提示词 ID 映射）
       if (data.promptVariables && data.promptVariables.length > 0) {
-        console.log(`导入提示词变量数据: ${data.promptVariables.length} 条`);
+        this.debugLog(`导入提示词变量数据: ${data.promptVariables.length} 条`);
         for (const variable of data.promptVariables) {
           const variableDataWithoutId = { ...variable };
           delete variableDataWithoutId.id;
@@ -572,7 +590,7 @@ export class DatabaseServiceManager {
 
       // 导入提示词历史数据（需要处理提示词 ID 映射）
       if (data.promptHistories && data.promptHistories.length > 0) {
-        console.log(`导入提示词历史数据: ${data.promptHistories.length} 条`);
+        this.debugLog(`导入提示词历史数据: ${data.promptHistories.length} 条`);
         for (const history of data.promptHistories) {
           const { id, ...historyDataWithoutId } = history;
 
@@ -599,7 +617,7 @@ export class DatabaseServiceManager {
       
       // 导入AI配置数据
       if (data.aiConfigs && data.aiConfigs.length > 0) {
-        console.log(`导入AI配置数据: ${data.aiConfigs.length} 条`);
+        this.debugLog(`导入AI配置数据: ${data.aiConfigs.length} 条`);
         for (const config of data.aiConfigs) {
           const { id, ...configDataWithoutId } = config;
           try {
@@ -613,7 +631,7 @@ export class DatabaseServiceManager {
 
       // 导入快速优化配置数据
       if (data.quickOptimizationConfigs && data.quickOptimizationConfigs.length > 0) {
-        console.log(`导入快速优化配置数据: ${data.quickOptimizationConfigs.length} 条`);
+        this.debugLog(`导入快速优化配置数据: ${data.quickOptimizationConfigs.length} 条`);
         for (const config of data.quickOptimizationConfigs) {
           const configDataWithoutId = { ...config };
           delete configDataWithoutId.id;
@@ -628,7 +646,7 @@ export class DatabaseServiceManager {
       
       // 导入AI历史数据
       if (data.aiHistory && data.aiHistory.length > 0) {
-        console.log(`导入AI历史数据: ${data.aiHistory.length} 条`);
+        this.debugLog(`导入AI历史数据: ${data.aiHistory.length} 条`);
         for (const history of data.aiHistory) {
           const { id, ...historyDataWithoutId } = history;
           try {
@@ -642,7 +660,7 @@ export class DatabaseServiceManager {
       
       // 导入设置数据
       if (data.settings && data.settings.length > 0) {
-        console.log(`导入设置数据: ${data.settings.length} 条`);
+        this.debugLog(`导入设置数据: ${data.settings.length} 条`);
         for (const setting of data.settings) {
           try {
             await this.appSettings.updateSettingByKey(setting.key, setting.value, setting.type, setting.description);
@@ -665,8 +683,8 @@ export class DatabaseServiceManager {
       
       const totalImported = Object.values(details).reduce((sum, count) => sum + count, 0);
       
-      console.log('渲染进程: 数据导入完成', details);
-      console.log('ID映射表:', idMapping);
+      this.debugLog('渲染进程: 数据导入完成', details);
+      this.debugLog('ID映射表:', idMapping);
 
       const hasErrors = totalErrors > 0;
       
@@ -710,7 +728,7 @@ export class DatabaseServiceManager {
    */
   async restoreData(backupData: any, options: { skipClean?: boolean } = {}): Promise<DataImportResult> {
     try {
-      console.log('渲染进程: 开始恢复数据...');
+      this.debugLog('渲染进程: 开始恢复数据...');
       backupData = unwrapBackupData(backupData);
       
       if (!backupData || typeof backupData !== 'object') {
@@ -725,7 +743,7 @@ export class DatabaseServiceManager {
       
       // 清空现有数据表（如果支持的话）
       if (!options.skipClean && this.forceCleanAllTables) {
-        console.log('清空现有数据表...');
+        this.debugLog('清空现有数据表...');
         await this.forceCleanAllTables();
       }
       
@@ -738,7 +756,7 @@ export class DatabaseServiceManager {
       
       // 恢复分类数据
       if (backupData.categories && backupData.categories.length > 0) {
-        console.log(`恢复分类数据: ${backupData.categories.length} 条`);
+        this.debugLog(`恢复分类数据: ${backupData.categories.length} 条`);
         for (const category of backupData.categories) {
           const oldId = category.id;
           const { id, ...categoryDataWithoutId } = category;
@@ -748,7 +766,7 @@ export class DatabaseServiceManager {
             // 记录ID映射：旧ID -> 新ID
             if (oldId !== undefined) {
               idMapping[`category_${oldId}`] = newCategory.id!;
-              console.log(`分类ID映射: ${oldId} -> ${newCategory.id}`);
+              this.debugLog(`分类ID映射: ${oldId} -> ${newCategory.id}`);
             }
           } catch (err) {
             console.warn('恢复分类数据失败:', category.id, err);
@@ -759,7 +777,7 @@ export class DatabaseServiceManager {
       
       // 恢复提示词数据（需要处理分类ID映射）
       if (backupData.prompts && backupData.prompts.length > 0) {
-        console.log(`恢复提示词数据: ${backupData.prompts.length} 条`);
+        this.debugLog(`恢复提示词数据: ${backupData.prompts.length} 条`);
         for (const prompt of backupData.prompts) {
           const oldPromptId = prompt.id;
           const promptDataWithoutId = { ...prompt };
@@ -776,7 +794,7 @@ export class DatabaseServiceManager {
             
             if (newCategoryId !== undefined) {
               promptDataWithoutId.categoryId = newCategoryId;
-              console.log(`提示词分类ID映射: ${oldCategoryId} -> ${newCategoryId}`);
+              this.debugLog(`提示词分类ID映射: ${oldCategoryId} -> ${newCategoryId}`);
             } else {
               console.warn(`未找到分类ID映射: ${oldCategoryId}，将提示词设为未分类`);
               promptDataWithoutId.categoryId = undefined;
@@ -790,7 +808,7 @@ export class DatabaseServiceManager {
             // 记录提示词ID映射：旧ID -> 新ID
             if (oldPromptId !== undefined) {
               idMapping[`prompt_${oldPromptId}`] = newPrompt.id!;
-              console.log(`提示词ID映射: ${oldPromptId} -> ${newPrompt.id}`);
+              this.debugLog(`提示词ID映射: ${oldPromptId} -> ${newPrompt.id}`);
             }
           } catch (err) {
             console.warn('恢复提示词数据失败:', prompt.id, err);
@@ -801,7 +819,7 @@ export class DatabaseServiceManager {
 
       // 恢复提示词变量数据（需要处理提示词 ID 映射）
       if (backupData.promptVariables && backupData.promptVariables.length > 0) {
-        console.log(`恢复提示词变量数据: ${backupData.promptVariables.length} 条`);
+        this.debugLog(`恢复提示词变量数据: ${backupData.promptVariables.length} 条`);
         for (const variable of backupData.promptVariables) {
           const variableDataWithoutId = { ...variable };
           delete variableDataWithoutId.id;
@@ -828,7 +846,7 @@ export class DatabaseServiceManager {
 
       // 恢复提示词历史数据（需要处理提示词 ID 映射）
       if (backupData.promptHistories && backupData.promptHistories.length > 0) {
-        console.log(`恢复提示词历史数据: ${backupData.promptHistories.length} 条`);
+        this.debugLog(`恢复提示词历史数据: ${backupData.promptHistories.length} 条`);
         for (const history of backupData.promptHistories) {
           const { id, ...historyDataWithoutId } = history;
 
@@ -855,7 +873,7 @@ export class DatabaseServiceManager {
       
       // 恢复AI配置数据
       if (backupData.aiConfigs && backupData.aiConfigs.length > 0) {
-        console.log(`恢复AI配置数据: ${backupData.aiConfigs.length} 条`);
+        this.debugLog(`恢复AI配置数据: ${backupData.aiConfigs.length} 条`);
         for (const config of backupData.aiConfigs) {
           const { id, ...configDataWithoutId } = config;
           try {
@@ -869,7 +887,7 @@ export class DatabaseServiceManager {
 
       // 恢复快速优化配置数据
       if (backupData.quickOptimizationConfigs && backupData.quickOptimizationConfigs.length > 0) {
-        console.log(`恢复快速优化配置数据: ${backupData.quickOptimizationConfigs.length} 条`);
+        this.debugLog(`恢复快速优化配置数据: ${backupData.quickOptimizationConfigs.length} 条`);
         for (const config of backupData.quickOptimizationConfigs) {
           const configDataWithoutId = { ...config };
           delete configDataWithoutId.id;
@@ -884,7 +902,7 @@ export class DatabaseServiceManager {
       
       // 恢复AI历史数据
       if (backupData.aiHistory && backupData.aiHistory.length > 0) {
-        console.log(`恢复AI历史数据: ${backupData.aiHistory.length} 条`);
+        this.debugLog(`恢复AI历史数据: ${backupData.aiHistory.length} 条`);
         for (const history of backupData.aiHistory) {
           const { id, ...historyDataWithoutId } = history;
           try {
@@ -898,7 +916,7 @@ export class DatabaseServiceManager {
       
       // 恢复设置数据
       if (backupData.settings && backupData.settings.length > 0) {
-        console.log(`恢复设置数据: ${backupData.settings.length} 条`);
+        this.debugLog(`恢复设置数据: ${backupData.settings.length} 条`);
         for (const setting of backupData.settings) {
           try {
             await this.appSettings.updateSettingByKey(setting.key, setting.value, setting.type, setting.description);
@@ -927,8 +945,8 @@ export class DatabaseServiceManager {
       const totalRestored = Object.values(details).reduce((sum, count) => sum + count, 0);
       const success = totalErrors === 0;
       
-      console.log(`渲染进程: 数据恢复完成，总计恢复记录数: ${totalRestored}, 错误数: ${totalErrors}`);
-      console.log('ID映射表:', idMapping);
+      this.debugLog(`渲染进程: 数据恢复完成，总计恢复记录数: ${totalRestored}, 错误数: ${totalErrors}`);
+      this.debugLog('ID映射表:', idMapping);
       
       return {
         success,
@@ -963,7 +981,7 @@ export class DatabaseServiceManager {
    */
   async replaceAllData(backupData: any): Promise<DataImportResult> {
     try {
-      console.log('渲染进程: 开始完全替换数据...');
+      this.debugLog('渲染进程: 开始完全替换数据...');
       const dataToRestore = unwrapBackupData(backupData);
       this.assertRestorableDataShape(dataToRestore);
       
@@ -987,7 +1005,7 @@ export class DatabaseServiceManager {
    */
   async forceCleanAllTables(): Promise<void> {
     try {
-      console.log('开始清空所有数据表...');
+      this.debugLog('开始清空所有数据表...');
       
       const db = await this.getDatabase();
       if (!db) {
@@ -1003,7 +1021,7 @@ export class DatabaseServiceManager {
 
             transaction.oncomplete = () => {
               if (clearSucceeded) {
-                console.log(`清空表 ${tableName} 成功`);
+                this.debugLog(`清空表 ${tableName} 成功`);
                 emitDataChange({
                   storeName: tableName,
                   action: 'clear'
@@ -1023,7 +1041,7 @@ export class DatabaseServiceManager {
         }
       }
       
-      console.log('所有数据表清空完成');
+      this.debugLog('所有数据表清空完成');
     } catch (error) {
       console.error('清空数据表失败:', error);
       throw error;
@@ -1208,7 +1226,7 @@ export class DatabaseServiceManager {
    */
   async getDataStatistics(): Promise<{ success: boolean; data?: any; error?: string }> {
     try {
-      console.log('开始获取数据统计信息...');
+      this.debugLog('开始获取数据统计信息...');
       
       const [
         categories,
@@ -1253,7 +1271,7 @@ export class DatabaseServiceManager {
         }
       };
 
-      console.log('数据统计获取成功:', stats);
+      this.debugLog('数据统计获取成功:', stats);
       return { success: true, data: stats };
     } catch (error) {
       console.error('获取数据统计失败:', error);
@@ -1321,7 +1339,7 @@ export class DatabaseServiceManager {
       if (data[type] && Array.isArray(data[type])) {
         data[type] = data[type].map((item: any) => {
           if (!item.uuid) {
-            console.log(`为导入的 ${type} 数据补全 UUID: ${item.id || item.name || '未知条目'}`);
+            this.debugLog(`为导入的 ${type} 数据补全 UUID: ${item.id || item.name || '未知条目'}`);
             item.uuid = generateUUID();
           }
           return item;
@@ -1338,7 +1356,7 @@ export class DatabaseServiceManager {
    */
   async syncImportData(data: any): Promise<DataImportResult> {
     try {
-      console.log('渲染进程: 开始同步导入数据...');
+      this.debugLog('渲染进程: 开始同步导入数据...');
       
       if (!data || typeof data !== 'object') {
         throw new Error('同步导入数据格式无效');
@@ -1399,7 +1417,7 @@ export class DatabaseServiceManager {
 
       errors.forEach(error => console.warn('同步导入项目失败:', error));
       
-      console.log('渲染进程: 同步导入完成:', details);
+      this.debugLog('渲染进程: 同步导入完成:', details);
       const totalImported = Object.values(details).reduce((sum, count) => sum + count, 0);
       const totalErrors = errors.length;
       
