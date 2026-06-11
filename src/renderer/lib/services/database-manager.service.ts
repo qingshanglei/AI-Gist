@@ -319,7 +319,20 @@ export class DatabaseServiceManager {
         this.appSettings.getAllSettings()
       ]);
       
-      // 处理结果，对失败的操作返回空数组
+      const tableNames = ['categories', 'prompts', 'promptVariables', 'promptHistories', 'aiConfigs', 'quickOptimizationConfigs', 'aiHistory', 'settings'];
+      const failedTables = results
+        .map((result, index) => result.status === 'rejected'
+          ? { tableName: tableNames[index], reason: result.reason }
+          : null)
+        .filter((failure): failure is { tableName: string; reason: unknown } => !!failure);
+
+      if (failedTables.length > 0) {
+        failedTables.forEach(failure => {
+          console.warn(`获取 ${failure.tableName} 数据失败:`, failure.reason);
+        });
+        throw new Error(`读取数据表失败: ${failedTables.map(failure => failure.tableName).join(', ')}`);
+      }
+
       const [
         categories,
         prompts,
@@ -329,15 +342,7 @@ export class DatabaseServiceManager {
         quickOptimizationConfigs,
         aiHistory,
         settings
-      ] = results.map((result, index) => {
-        if (result.status === 'fulfilled') {
-          return result.value || [];
-        } else {
-          const tableNames = ['categories', 'prompts', 'promptVariables', 'promptHistories', 'aiConfigs', 'quickOptimizationConfigs', 'aiHistory', 'settings'];
-          console.warn(`获取 ${tableNames[index]} 数据失败:`, result.reason);
-          return [];
-        }
-      });
+      ] = results.map(result => result.status === 'fulfilled' ? (result.value || []) : []);
       
       const exportData = {
         categories: categories as any[],

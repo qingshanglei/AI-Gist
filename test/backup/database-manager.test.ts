@@ -216,14 +216,14 @@ describe('DatabaseServiceManager', () => {
       expect(result.data!.settings).toHaveLength(1)
     })
 
-    it('某个子服务失败时，其他数据仍然导出', async () => {
+    it('任一子服务失败时不生成部分数据导出', async () => {
       mockAIConfigService.getAllAIConfigs.mockRejectedValue(new Error('DB error'))
 
       const result = await manager.exportAllData()
 
-      expect(result.success).toBe(true)
-      expect(result.data!.categories).toHaveLength(1)
-      expect(result.data!.aiConfigs).toEqual([]) // 失败的返回空数组
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('读取数据表失败: aiConfigs')
+      expect(result.data).toBeUndefined()
     })
   })
 
