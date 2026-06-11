@@ -1004,7 +1004,11 @@ export class CloudSyncService {
       lastKnownRevision: snapshot.revision,
       baseSnapshot: snapshot
     };
-    this.storage?.setItem(this.getLocalStateStorageKey(storageId), JSON.stringify(state));
+    try {
+      this.storage?.setItem(this.getLocalStateStorageKey(storageId), JSON.stringify(state));
+    } catch (error) {
+      console.warn('保存本地同步状态失败:', error);
+    }
   }
 
   private recordConflictLog(

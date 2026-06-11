@@ -127,7 +127,8 @@ describe('CloudSyncService', () => {
       .mockImplementation((key: string, value: string) => {
         if (
           key === 'ai_gist_cloud_sync_last_auto_attempt_at' ||
-          key === 'ai_gist_cloud_sync_device_id'
+          key === 'ai_gist_cloud_sync_device_id' ||
+          key.startsWith('ai_gist_cloud_sync_state:')
         ) {
           throw new Error('QuotaExceededError')
         }
@@ -148,6 +149,10 @@ describe('CloudSyncService', () => {
       )
       expect(warnSpy).toHaveBeenCalledWith(
         '保存云同步设备 ID 失败:',
+        expect.any(Error)
+      )
+      expect(warnSpy).toHaveBeenCalledWith(
+        '保存本地同步状态失败:',
         expect.any(Error)
       )
     } finally {
