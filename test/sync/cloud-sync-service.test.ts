@@ -813,6 +813,50 @@ describe('CloudSyncService', () => {
     service.stopAutoSync()
   })
 
+  it('keeps retry status when focus triggers during retry backoff', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+    cloudClient.getCloudSyncManifest.mockRejectedValue(new Error('ECONNRESET'))
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25
+    })
+    dataChangeListener?.({
+      storeName: 'prompts',
+      action: 'update',
+      id: 1,
+      timestamp: Date.now(),
+      sourceId: 'test'
+    })
+
+    await vi.advanceTimersByTimeAsync(25)
+    const retryStatus = service.getStatus()
+
+    service.scheduleSync('focus', { delayMs: 0 })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(cloudClient.getCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(service.getStatus()).toMatchObject({
+      status: 'error',
+      pending: true,
+      reason: 'local-change',
+      failureCount: 1
+    })
+    expect(service.getStatus().nextSyncAt).toBe(retryStatus.nextSyncAt)
+
+    service.stopAutoSync()
+  })
+
   it('surfaces storage config failures and retries instead of going idle', async () => {
     vi.useFakeTimers()
     let dataChangeListener: ((change: any) => void) | undefined

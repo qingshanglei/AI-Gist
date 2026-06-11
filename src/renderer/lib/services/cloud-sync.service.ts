@@ -341,6 +341,10 @@ export class CloudSyncService {
       return;
     }
 
+    if (this.retryTimer && reason !== 'retry' && reason !== 'config-change') {
+      return;
+    }
+
     const delayMs = options.delayMs ?? this.autoSyncOptions.debounceMs ?? DEFAULT_AUTO_SYNC_DEBOUNCE_MS;
     const nextSyncAt = new Date(Date.now() + delayMs).toISOString();
 
