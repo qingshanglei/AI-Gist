@@ -938,6 +938,59 @@ describe('CloudSyncService', () => {
     service.stopAutoSync()
   })
 
+  it('retries immediately when browser comes online during retry backoff', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+    cloudClient.getCloudSyncManifest.mockRejectedValueOnce(new Error('ECONNRESET'))
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25,
+      pollIntervalMs: 0,
+      retryMs: 60_000
+    })
+    dataChangeListener?.({
+      storeName: 'prompts',
+      action: 'update',
+      id: 1,
+      timestamp: Date.now(),
+      sourceId: 'test'
+    })
+
+    await vi.advanceTimersByTimeAsync(25)
+    expect(service.getStatus()).toMatchObject({
+      status: 'error',
+      pending: true,
+      failureCount: 1
+    })
+    const callsAfterFailure = cloudClient.getCloudSyncManifest.mock.calls.length
+
+    service.scheduleSync('online', { delayMs: 0 })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(cloudClient.getCloudSyncManifest.mock.calls.length).toBeGreaterThan(callsAfterFailure)
+    expect(service.getStatus()).toMatchObject({
+      status: 'success',
+      pending: false,
+      failureCount: 0
+    })
+
+    const callsAfterOnlineRecovery = cloudClient.getCloudSyncManifest.mock.calls.length
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(cloudClient.getCloudSyncManifest).toHaveBeenCalledTimes(callsAfterOnlineRecovery)
+
+    service.stopAutoSync()
+  })
+
   it('clears pending automatic retry after a manual sync succeeds', async () => {
     vi.useFakeTimers()
     let dataChangeListener: ((change: any) => void) | undefined

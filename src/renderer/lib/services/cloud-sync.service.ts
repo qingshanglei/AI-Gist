@@ -342,7 +342,10 @@ export class CloudSyncService {
     }
 
     if (this.retryTimer && reason !== 'retry' && reason !== 'config-change') {
-      return;
+      if (reason !== 'online') {
+        return;
+      }
+      this.clearRetryTimer();
     }
 
     const delayMs = options.delayMs ?? this.autoSyncOptions.debounceMs ?? DEFAULT_AUTO_SYNC_DEBOUNCE_MS;
@@ -881,7 +884,7 @@ export class CloudSyncService {
   }
 
   private getAutoRunThrottleMs(reason: CloudSyncRunReason): number {
-    if (reason === 'config-change') {
+    if (reason === 'config-change' || reason === 'retry' || (reason === 'online' && this.failureCount > 0)) {
       return 0;
     }
 
