@@ -502,6 +502,56 @@ describe('CloudSyncService', () => {
     expect(service.getStatus().conflictLogCount).toBe(0)
   })
 
+  it('keeps conflict audit logs lightweight by omitting image payloads', async () => {
+    const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
+    const largeImage = `data:image/png;base64,${'x'.repeat(5000)}`
+    const localData = {
+      ...baseData,
+      prompts: [{
+        id: 1,
+        uuid: 'prompt-1',
+        title: 'Local edit',
+        updatedAt: '2026-01-03T00:00:00.000Z',
+        imageBlobs: [largeImage]
+      }]
+    }
+    const remoteData = {
+      ...baseData,
+      prompts: [{
+        id: 9,
+        uuid: 'prompt-1',
+        title: 'Remote edit',
+        updatedAt: '2026-01-02T00:00:00.000Z',
+        imageBlobs: [largeImage]
+      }]
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(remoteData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot
+    }
+    const { service, storage } = createService(localData, manifest)
+    storage.setItem('ai_gist_cloud_sync_state:cfg-1', JSON.stringify({
+      storageId: 'cfg-1',
+      deviceId: 'device-a',
+      lastSyncAt: '2026-01-01T00:00:00.000Z',
+      lastKnownRevision: 'rev-base',
+      baseSnapshot
+    }))
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    const conflictLog = service.getConflictLog('cfg-1')
+    expect(conflictLog[0].conflicts[0].local.imageBlobs).toEqual({
+      omitted: true,
+      type: 'imageBlobs',
+      itemCount: 1
+    })
+    expect(JSON.stringify(conflictLog)).not.toContain(largeImage)
+  })
+
   it('does not fail sync when conflict audit log storage is unavailable', async () => {
     const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
     const localData = {
@@ -546,6 +596,33 @@ describe('CloudSyncService', () => {
         expect.any(Error)
       )
       expect(storageSetSpy).toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('does not throw when clearing conflict audit log storage is unavailable', async () => {
+    const storage = new MemoryStorage()
+    storage.setItem('ai_gist_cloud_sync_conflict_log', JSON.stringify([{
+      id: 'entry-1',
+      storageId: 'cfg-1',
+      detectedAt: '2026-01-01T00:00:00.000Z',
+      conflicts: []
+    }]))
+    const removeSpy = vi.spyOn(storage, 'removeItem')
+      .mockImplementation(() => {
+        throw new Error('QuotaExceededError')
+      })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { service } = createService(baseData, createEmptyCloudSyncManifest(), { storage })
+
+    try {
+      expect(() => service.clearConflictLog()).not.toThrow()
+      expect(removeSpy).toHaveBeenCalledWith('ai_gist_cloud_sync_conflict_log')
+      expect(warnSpy).toHaveBeenCalledWith(
+        '清空同步冲突审计记录失败:',
+        expect.any(Error)
+      )
     } finally {
       warnSpy.mockRestore()
     }
