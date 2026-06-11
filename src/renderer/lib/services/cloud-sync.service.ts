@@ -689,7 +689,14 @@ export class CloudSyncService {
       return;
     }
 
-    const storageIds = await this.resolveStorageIds(storageId);
+    let storageIds: string[];
+    try {
+      storageIds = await this.resolveStorageIds(storageId);
+    } catch (error) {
+      this.scheduleRetry(reason, error instanceof Error ? error.message : String(error));
+      return;
+    }
+
     if (storageIds.length === 0) {
       this.updateStatus({
         status: 'idle',
@@ -751,8 +758,7 @@ export class CloudSyncService {
         .filter(config => config.enabled)
         .map(config => config.id);
     } catch (error) {
-      console.warn('获取自动同步存储配置失败:', error);
-      return [];
+      throw new Error(`获取自动同步存储配置失败: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 

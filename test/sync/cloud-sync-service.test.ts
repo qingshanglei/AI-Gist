@@ -569,6 +569,48 @@ describe('CloudSyncService', () => {
     service.stopAutoSync()
   })
 
+  it('surfaces storage config failures and retries instead of going idle', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const getStorageConfigs = vi.fn().mockRejectedValue(new Error('settings unavailable'))
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25
+    })
+    dataChangeListener?.({
+      storeName: 'prompts',
+      action: 'update',
+      id: 1,
+      timestamp: Date.now(),
+      sourceId: 'test'
+    })
+
+    await vi.advanceTimersByTimeAsync(25)
+    expect(getStorageConfigs).toHaveBeenCalledTimes(1)
+    expect(cloudClient.getCloudSyncManifest).not.toHaveBeenCalled()
+    expect(service.getStatus()).toMatchObject({
+      status: 'error',
+      pending: true,
+      failureCount: 1
+    })
+    expect(service.getStatus().error).toContain('获取自动同步存储配置失败')
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES * 60 * 1000)
+    expect(getStorageConfigs).toHaveBeenCalledTimes(2)
+
+    service.stopAutoSync()
+  })
+
   it('does not schedule another upload from data changes emitted while applying remote data', async () => {
     vi.useFakeTimers()
     let dataChangeListener: ((change: any) => void) | undefined
