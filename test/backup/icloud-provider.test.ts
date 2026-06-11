@@ -46,6 +46,18 @@ describe('ICloudProvider', () => {
     const readBack = await provider.readFile('sync-manifest.json')
     expect(Buffer.compare(readBack, payload)).toBe(0)
   })
+
+  it('returns read failures without duplicating provider-level console errors', async () => {
+    const provider = new ICloudProvider(createICloudConfig())
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+    try {
+      await expect(provider.readFile('missing.json')).rejects.toThrow('读取文件失败')
+      expect(errorSpy).not.toHaveBeenCalled()
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
 })
 
 function createICloudConfig() {

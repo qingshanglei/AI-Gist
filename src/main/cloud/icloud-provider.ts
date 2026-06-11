@@ -334,7 +334,7 @@ export class ICloudProvider implements CloudStorageProvider {
       
       return true;
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.CONNECTION_TEST_FAILED.replace('{error}', String(error)));
+      this.debugLog(CONSTANTS.LOG_MESSAGES.CONNECTION_TEST_FAILED.replace('{error}', String(error)));
       return false;
     }
   }
@@ -371,7 +371,7 @@ export class ICloudProvider implements CloudStorageProvider {
       
       return files;
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.LIST_FILES_FAILED.replace('{error}', String(error)));
+      this.debugLog(CONSTANTS.LOG_MESSAGES.LIST_FILES_FAILED.replace('{error}', String(error)));
       throw new Error(this.handleFileOperationError('列出文件', error));
     }
   }
@@ -387,7 +387,7 @@ export class ICloudProvider implements CloudStorageProvider {
       const fullPath = this.buildFullPath(basePath, filePath);
       return await fs.readFile(fullPath);
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.READ_FILE_FAILED.replace('{error}', String(error)));
+      this.debugLog(CONSTANTS.LOG_MESSAGES.READ_FILE_FAILED.replace('{error}', String(error)));
       throw new Error(this.handleFileOperationError('读取文件', error));
     }
   }
@@ -409,7 +409,7 @@ export class ICloudProvider implements CloudStorageProvider {
       await fs.writeFile(fullPath, data);
       await this.verifyLocalWrite(fullPath, data);
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.WRITE_FILE_FAILED.replace('{error}', String(error)));
+      this.debugLog(CONSTANTS.LOG_MESSAGES.WRITE_FILE_FAILED.replace('{error}', String(error)));
       throw new Error(this.handleFileOperationError('写入文件', error));
     }
   }
@@ -424,7 +424,7 @@ export class ICloudProvider implements CloudStorageProvider {
       const fullPath = this.buildFullPath(basePath, filePath);
       await fs.unlink(fullPath);
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.DELETE_FILE_FAILED.replace('{error}', String(error)));
+      this.debugLog(CONSTANTS.LOG_MESSAGES.DELETE_FILE_FAILED.replace('{error}', String(error)));
       throw new Error(this.handleFileOperationError('删除文件', error));
     }
   }
@@ -451,7 +451,7 @@ export class ICloudProvider implements CloudStorageProvider {
       // 递归创建目录
       await fs.mkdir(fullPath, { recursive: true });
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.CREATE_DIRECTORY_FAILED.replace('{error}', String(error)));
+      this.debugLog(CONSTANTS.LOG_MESSAGES.CREATE_DIRECTORY_FAILED.replace('{error}', String(error)));
       throw new Error(this.handleFileOperationError('创建目录', error));
     }
   }
