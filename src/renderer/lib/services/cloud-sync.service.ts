@@ -495,19 +495,15 @@ export class CloudSyncService {
       }
 
       let finalSnapshot = remoteSnapshot;
-      let uploadedRemote = false;
+      let latestManifestForUpload: CloudSyncManifest | null = null;
       if (!mergedEqualsRemote) {
         const latestManifest = await this.getCloudClient().getCloudSyncManifest(storageId);
         if (hasRemoteRevisionChanged(remoteSnapshot, latestManifest.latestSnapshot)) {
           return await this.retryWithLatestRemote(storageId, options, attempt);
         }
 
+        latestManifestForUpload = latestManifest;
         finalSnapshot = createCloudSyncSnapshot(mergedData, deviceId);
-        await this.saveManifest(
-          storageId,
-          this.buildManifest(latestManifest, finalSnapshot, mergeResult.conflicts, deviceId, now, options)
-        );
-        uploadedRemote = true;
       }
 
       let appliedLocal = false;
@@ -522,6 +518,15 @@ export class CloudSyncService {
           this.applyingRemoteDataDepth--;
         }
         appliedLocal = true;
+      }
+
+      let uploadedRemote = false;
+      if (latestManifestForUpload) {
+        await this.saveManifest(
+          storageId,
+          this.buildManifest(latestManifestForUpload, finalSnapshot, mergeResult.conflicts, deviceId, now, options)
+        );
+        uploadedRemote = true;
       }
 
       this.recordConflictLog(storageId, mergeResult.conflicts, {

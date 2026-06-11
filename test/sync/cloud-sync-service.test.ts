@@ -364,6 +364,51 @@ describe('CloudSyncService', () => {
     )
   })
 
+  it('does not upload a merged snapshot when applying merged data locally fails', async () => {
+    const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
+    const localData = {
+      ...baseData,
+      prompts: [{ id: 1, uuid: 'prompt-1', title: 'Local edit', updatedAt: '2026-01-03T00:00:00.000Z' }]
+    }
+    const remoteData = {
+      ...baseData,
+      categories: [
+        ...baseData.categories,
+        { id: 2, uuid: 'cat-2', name: 'Remote category', updatedAt: '2026-01-02T00:00:00.000Z' }
+      ]
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(remoteData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot
+    }
+    const { service, cloudClient, database, storage } = createService(localData, manifest)
+    storage.setItem('ai_gist_cloud_sync_state:cfg-1', JSON.stringify({
+      storageId: 'cfg-1',
+      deviceId: 'device-a',
+      lastSyncAt: '2026-01-01T00:00:00.000Z',
+      lastKnownRevision: 'rev-base',
+      baseSnapshot
+    }))
+    database.replaceAllData.mockResolvedValue({
+      success: false,
+      message: 'write failed',
+      error: 'IndexedDB write failed'
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('IndexedDB write failed')
+    expect(database.replaceAllData).toHaveBeenCalledWith(expect.objectContaining({
+      categories: expect.arrayContaining([expect.objectContaining({ uuid: 'cat-2' })]),
+      prompts: expect.arrayContaining([expect.objectContaining({ title: 'Local edit' })])
+    }))
+    expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain('rev-base')
+  })
+
   it('ignores corrupted local base snapshots before merging', async () => {
     const localData = {
       ...baseData,
