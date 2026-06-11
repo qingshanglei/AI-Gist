@@ -17,6 +17,7 @@ import {
 import type { CloudSyncManifest } from '@shared/cloud-sync-manifest';
 import {
   createEmptyCloudSyncManifest,
+  sanitizeCloudSyncConflictsForMetadata,
   updateCloudSyncManifestDevice
 } from '@shared/cloud-sync-manifest';
 import { generateUUID } from '../utils/uuid';
@@ -32,9 +33,6 @@ const LOCAL_STATE_STORAGE_PREFIX = 'ai_gist_cloud_sync_state';
 const LAST_AUTO_ATTEMPT_STORAGE_KEY = 'ai_gist_cloud_sync_last_auto_attempt_at';
 const CONFLICT_LOG_STORAGE_KEY = 'ai_gist_cloud_sync_conflict_log';
 const MAX_CONFLICT_LOG_ENTRIES = 50;
-const MAX_CONFLICT_LOG_STRING_LENGTH = 512;
-const MAX_CONFLICT_LOG_ARRAY_ITEMS = 10;
-const MAX_CONFLICT_LOG_OBJECT_KEYS = 40;
 export const CLOUD_SYNC_INTERVAL_SETTING_KEY = 'cloud.sync.intervalMinutes';
 export const DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES = 15;
 export const MIN_CLOUD_SYNC_INTERVAL_MINUTES = 5;
@@ -590,7 +588,7 @@ export class CloudSyncService {
         updatedAt: now,
         latestSnapshot: snapshot,
         baseSnapshot: snapshot,
-        conflicts
+        conflicts: sanitizeCloudSyncConflictsForMetadata(conflicts)
       },
       {
         deviceId,
@@ -1048,7 +1046,7 @@ export class CloudSyncService {
       localRevision: metadata.localRevision,
       remoteRevision: metadata.remoteRevision,
       resolvedRevision: metadata.resolvedRevision,
-      conflicts: cloneConflictsForLog(conflicts)
+      conflicts: sanitizeCloudSyncConflictsForMetadata(conflicts)
     };
 
     const entries = [entry, ...this.getConflictLog()]
@@ -1088,113 +1086,8 @@ function normalizeConflictLogEntry(value: unknown): CloudSyncConflictLogEntry | 
     localRevision: typeof entry.localRevision === 'string' ? entry.localRevision : undefined,
     remoteRevision: typeof entry.remoteRevision === 'string' ? entry.remoteRevision : undefined,
     resolvedRevision: typeof entry.resolvedRevision === 'string' ? entry.resolvedRevision : undefined,
-    conflicts: cloneConflictsForLog(entry.conflicts)
+    conflicts: sanitizeCloudSyncConflictsForMetadata(entry.conflicts)
   };
-}
-
-function cloneConflictsForLog(conflicts: CloudSyncConflict[]): CloudSyncConflict[] {
-  return conflicts.map(conflict => {
-    const cloned: CloudSyncConflict = {
-      collection: conflict.collection,
-      key: conflict.key,
-      reason: conflict.reason,
-      resolution: conflict.resolution
-    };
-
-    if (conflict.local !== undefined) {
-      cloned.local = sanitizeConflictValueForLog(conflict.local);
-    }
-    if (conflict.remote !== undefined) {
-      cloned.remote = sanitizeConflictValueForLog(conflict.remote);
-    }
-    if (conflict.base !== undefined) {
-      cloned.base = sanitizeConflictValueForLog(conflict.base);
-    }
-
-    return cloned;
-  });
-}
-
-function sanitizeConflictValueForLog(value: unknown, seen = new WeakSet<object>(), fieldName?: string): any {
-  if (fieldName === 'imageBlobs') {
-    if (isOmittedImageBlobsSummary(value)) {
-      return value;
-    }
-    return summarizeOmittedImageBlobs(value);
-  }
-
-  if (value === null || value === undefined) {
-    return value;
-  }
-
-  if (typeof value === 'string') {
-    return value.length > MAX_CONFLICT_LOG_STRING_LENGTH
-      ? `${value.slice(0, MAX_CONFLICT_LOG_STRING_LENGTH)}...`
-      : value;
-  }
-
-  if (typeof value !== 'object') {
-    return value;
-  }
-
-  if (typeof Blob !== 'undefined' && value instanceof Blob) {
-    return {
-      omitted: true,
-      type: 'Blob',
-      size: value.size,
-      mimeType: value.type || undefined
-    };
-  }
-
-  if (value instanceof Date) {
-    return value.toISOString();
-  }
-
-  if (seen.has(value)) {
-    return '[Circular]';
-  }
-  seen.add(value);
-
-  if (Array.isArray(value)) {
-    const items = value
-      .slice(0, MAX_CONFLICT_LOG_ARRAY_ITEMS)
-      .map(item => sanitizeConflictValueForLog(item, seen));
-    if (value.length > MAX_CONFLICT_LOG_ARRAY_ITEMS) {
-      items.push({
-        omitted: true,
-        type: 'array-items',
-        itemCount: value.length - MAX_CONFLICT_LOG_ARRAY_ITEMS
-      });
-    }
-    return items;
-  }
-
-  const sanitized: Record<string, any> = {};
-  const entries = Object.entries(value);
-  for (const [key, item] of entries.slice(0, MAX_CONFLICT_LOG_OBJECT_KEYS)) {
-    sanitized[key] = sanitizeConflictValueForLog(item, seen, key);
-  }
-  if (entries.length > MAX_CONFLICT_LOG_OBJECT_KEYS) {
-    sanitized.__omittedKeys = entries.length - MAX_CONFLICT_LOG_OBJECT_KEYS;
-  }
-
-  return sanitized;
-}
-
-function summarizeOmittedImageBlobs(value: unknown): Record<string, unknown> {
-  return {
-    omitted: true,
-    type: 'imageBlobs',
-    itemCount: Array.isArray(value) ? value.length : undefined
-  };
-}
-
-function isOmittedImageBlobsSummary(value: unknown): value is Record<string, unknown> {
-  return !!value &&
-    typeof value === 'object' &&
-    !Array.isArray(value) &&
-    (value as Record<string, unknown>).omitted === true &&
-    (value as Record<string, unknown>).type === 'imageBlobs';
 }
 
 function getBrowserStorage(): Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | undefined {

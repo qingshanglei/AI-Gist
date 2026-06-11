@@ -531,7 +531,7 @@ describe('CloudSyncService', () => {
       latestSnapshot: remoteSnapshot,
       baseSnapshot
     }
-    const { service, storage } = createService(localData, manifest)
+    const { service, cloudClient, storage } = createService(localData, manifest)
     storage.setItem('ai_gist_cloud_sync_state:cfg-1', JSON.stringify({
       storageId: 'cfg-1',
       deviceId: 'device-a',
@@ -550,6 +550,14 @@ describe('CloudSyncService', () => {
       itemCount: 1
     })
     expect(JSON.stringify(conflictLog)).not.toContain(largeImage)
+
+    const savedManifest = cloudClient.saveCloudSyncManifest.mock.calls[0][1]
+    expect(savedManifest.conflicts[0].local.imageBlobs).toEqual({
+      omitted: true,
+      type: 'imageBlobs',
+      itemCount: 1
+    })
+    expect(JSON.stringify(savedManifest.conflicts)).not.toContain(largeImage)
   })
 
   it('does not fail sync when conflict audit log storage is unavailable', async () => {

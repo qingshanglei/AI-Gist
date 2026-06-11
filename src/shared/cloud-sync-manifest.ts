@@ -6,6 +6,9 @@ import { validateCloudSyncSnapshot } from './cloud-sync-engine';
 
 export const CLOUD_SYNC_MANIFEST_KIND = 'ai-gist-cloud-sync-manifest';
 export const CLOUD_SYNC_MANIFEST_SCHEMA_VERSION = 1;
+const MAX_CONFLICT_METADATA_STRING_LENGTH = 512;
+const MAX_CONFLICT_METADATA_ARRAY_ITEMS = 10;
+const MAX_CONFLICT_METADATA_OBJECT_KEYS = 40;
 
 export interface CloudSyncDeviceState {
   deviceId: string;
@@ -61,7 +64,7 @@ export function normalizeCloudSyncManifest(input: unknown): CloudSyncManifest {
     latestSnapshot: isCloudSyncSnapshot(value.latestSnapshot) ? value.latestSnapshot : undefined,
     baseSnapshot: isCloudSyncSnapshot(value.baseSnapshot) ? value.baseSnapshot : undefined,
     devices: normalizeDeviceStates(value.devices),
-    conflicts: Array.isArray(value.conflicts) ? value.conflicts : []
+    conflicts: sanitizeCloudSyncConflictsForMetadata(value.conflicts)
   };
 }
 
@@ -150,6 +153,16 @@ export function updateCloudSyncManifestDevice(
   };
 }
 
+export function sanitizeCloudSyncConflictsForMetadata(input: unknown): CloudSyncConflict[] {
+  if (!Array.isArray(input)) {
+    return [];
+  }
+
+  return input
+    .map(conflict => sanitizeCloudSyncConflictForMetadata(conflict))
+    .filter((conflict): conflict is CloudSyncConflict => !!conflict);
+}
+
 export function isCloudSyncManifestNotFoundError(error: unknown): boolean {
   const message = describeCloudSyncManifestError(error);
   return /404|not\s*found|no such file|does not exist|ENOENT|不存在|未找到/i.test(message);
@@ -208,4 +221,133 @@ function normalizeDeviceStates(input: unknown): Record<string, CloudSyncDeviceSt
   }
 
   return devices;
+}
+
+function sanitizeCloudSyncConflictForMetadata(value: unknown): CloudSyncConflict | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const conflict = value as Partial<CloudSyncConflict>;
+  if (
+    typeof conflict.collection !== 'string' ||
+    typeof conflict.key !== 'string' ||
+    !isCloudSyncConflictReason(conflict.reason) ||
+    !isCloudSyncResolution(conflict.resolution)
+  ) {
+    return null;
+  }
+
+  const sanitized: CloudSyncConflict = {
+    collection: conflict.collection,
+    key: conflict.key,
+    reason: conflict.reason,
+    resolution: conflict.resolution
+  };
+
+  if (conflict.local !== undefined) {
+    sanitized.local = sanitizeConflictValueForMetadata(conflict.local);
+  }
+  if (conflict.remote !== undefined) {
+    sanitized.remote = sanitizeConflictValueForMetadata(conflict.remote);
+  }
+  if (conflict.base !== undefined) {
+    sanitized.base = sanitizeConflictValueForMetadata(conflict.base);
+  }
+
+  return sanitized;
+}
+
+function sanitizeConflictValueForMetadata(value: unknown, seen = new WeakSet<object>(), fieldName?: string): any {
+  if (fieldName === 'imageBlobs') {
+    if (isOmittedImageBlobsSummary(value)) {
+      return value;
+    }
+    return summarizeOmittedImageBlobs(value);
+  }
+
+  if (value === null || value === undefined) {
+    return value;
+  }
+
+  if (typeof value === 'string') {
+    return value.length > MAX_CONFLICT_METADATA_STRING_LENGTH
+      ? `${value.slice(0, MAX_CONFLICT_METADATA_STRING_LENGTH)}...`
+      : value;
+  }
+
+  if (typeof value !== 'object') {
+    return value;
+  }
+
+  if (typeof Blob !== 'undefined' && value instanceof Blob) {
+    return {
+      omitted: true,
+      type: 'Blob',
+      size: value.size,
+      mimeType: value.type || undefined
+    };
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  if (seen.has(value)) {
+    return '[Circular]';
+  }
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    const items = value
+      .slice(0, MAX_CONFLICT_METADATA_ARRAY_ITEMS)
+      .map(item => sanitizeConflictValueForMetadata(item, seen));
+    if (value.length > MAX_CONFLICT_METADATA_ARRAY_ITEMS) {
+      items.push({
+        omitted: true,
+        type: 'array-items',
+        itemCount: value.length - MAX_CONFLICT_METADATA_ARRAY_ITEMS
+      });
+    }
+    return items;
+  }
+
+  const sanitized: Record<string, any> = {};
+  const entries = Object.entries(value);
+  for (const [key, item] of entries.slice(0, MAX_CONFLICT_METADATA_OBJECT_KEYS)) {
+    sanitized[key] = sanitizeConflictValueForMetadata(item, seen, key);
+  }
+  if (entries.length > MAX_CONFLICT_METADATA_OBJECT_KEYS) {
+    sanitized.__omittedKeys = entries.length - MAX_CONFLICT_METADATA_OBJECT_KEYS;
+  }
+
+  return sanitized;
+}
+
+function summarizeOmittedImageBlobs(value: unknown): Record<string, unknown> {
+  return {
+    omitted: true,
+    type: 'imageBlobs',
+    itemCount: Array.isArray(value) ? value.length : undefined
+  };
+}
+
+function isOmittedImageBlobsSummary(value: unknown): value is Record<string, unknown> {
+  return !!value &&
+    typeof value === 'object' &&
+    !Array.isArray(value) &&
+    (value as Record<string, unknown>).omitted === true &&
+    (value as Record<string, unknown>).type === 'imageBlobs';
+}
+
+function isCloudSyncConflictReason(value: unknown): value is CloudSyncConflict['reason'] {
+  return value === 'both_modified' ||
+    value === 'create_collision' ||
+    value === 'delete_vs_update';
+}
+
+function isCloudSyncResolution(value: unknown): value is CloudSyncConflict['resolution'] {
+  return value === 'keep-local' ||
+    value === 'take-remote' ||
+    value === 'take-newer';
 }
