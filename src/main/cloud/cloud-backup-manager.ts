@@ -175,7 +175,7 @@ export class CloudBackupManager {
         return Array.from(this.storageConfigs.values());
       } catch (error) {
         console.error(CONSTANTS.LOG_MESSAGES.GET_STORAGE_CONFIGS_FAILED, error);
-        return [];
+        throw new Error(`获取存储配置失败: ${this.getErrorMessage(error)}`);
       }
     });
 
@@ -862,8 +862,12 @@ export class CloudBackupManager {
         this.storageConfigs.set(config.id, config);
       }
     } catch (error) {
-      // 配置文件不存在或读取失败，使用空配置
-      this.storageConfigs.clear();
+      if (this.isFileNotFoundError(error)) {
+        this.storageConfigs.clear();
+        return;
+      }
+
+      throw new Error(`读取云存储配置失败: ${this.getErrorMessage(error)}`);
     }
   }
 
@@ -927,6 +931,13 @@ export class CloudBackupManager {
   private isNotFoundError(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error);
     return /404|not\s*found|no such file|does not exist|ENOENT|不存在|未找到/i.test(message);
+  }
+
+  private isFileNotFoundError(error: unknown): boolean {
+    const code = typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: string }).code || '')
+      : '';
+    return code === 'ENOENT';
   }
 
   private formatErrorMessage(error: unknown): string {

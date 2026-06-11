@@ -183,6 +183,12 @@ describe('MobileCloudBackupService', () => {
       const configs = await service.getStorageConfigs()
       expect(configs[0].name).toBe('Updated')
     })
+
+    it('配置存储损坏时不静默返回空列表', async () => {
+      await Preferences.set({ key: 'cloud_backup_configs', value: '{"broken":' })
+
+      await expect(service.getStorageConfigs()).rejects.toThrow('获取存储配置失败')
+    })
   })
 
   // ---- WebDAV 连接测试 ----

@@ -104,7 +104,7 @@ export class MobileCloudBackupService {
       return JSON.parse(value)
     } catch (error) {
       console.error('获取存储配置失败:', error)
-      return []
+      throw new Error(`获取存储配置失败: ${error instanceof Error ? error.message : '未知错误'}`)
     }
   }
 
