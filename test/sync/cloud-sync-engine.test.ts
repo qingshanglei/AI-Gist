@@ -57,6 +57,15 @@ describe('cloud sync engine', () => {
     expect(result.data.prompts).toHaveLength(1)
   })
 
+  it('fails instead of silently overwriting duplicate sync keys', () => {
+    expect(() => mergeCloudSyncData({
+      prompts: [
+        { id: 1, uuid: 'prompt-dup', title: 'First', updatedAt: '2026-01-01T00:00:00.000Z' },
+        { id: 2, uuid: 'prompt-dup', title: 'Second', updatedAt: '2026-01-02T00:00:00.000Z' }
+      ]
+    }, {})).toThrow('同步数据包含重复记录: prompts uuid:prompt-dup')
+  })
+
   it('merges prompt variables as first-class metadata', () => {
     const local = {
       promptVariables: [

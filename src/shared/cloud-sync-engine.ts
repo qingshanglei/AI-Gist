@@ -465,7 +465,11 @@ function mergeWithBase(
 function indexBySyncKey(collection: string, records: any[]): Map<string, any> {
   const indexed = new Map<string, any>();
   for (const record of records) {
-    indexed.set(getCloudSyncRecordKey(collection, record), record);
+    const key = getCloudSyncRecordKey(collection, record);
+    if (indexed.has(key)) {
+      throw new Error(`同步数据包含重复记录: ${collection} ${key}`);
+    }
+    indexed.set(key, record);
   }
   return indexed;
 }
