@@ -423,6 +423,11 @@ export class DatabaseServiceManager {
       syncTombstones = await this.category.getSyncTombstones();
     } catch (error) {
       console.warn('获取同步删除标记失败:', error);
+      return {
+        success: false,
+        message: '同步数据导出失败',
+        error: `读取同步删除标记失败: ${error instanceof Error ? error.message : String(error)}`
+      };
     }
 
     return {

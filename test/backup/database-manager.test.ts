@@ -297,6 +297,16 @@ describe('DatabaseServiceManager', () => {
       expect(result.success).toBe(true)
       expect(result.data!.syncTombstones).toEqual([mockSyncTombstone])
     })
+
+    it('删除标记读取失败时不生成缺删除标记快照', async () => {
+      mockCategoryService.getSyncTombstones.mockRejectedValue(new Error('tombstone store failed'))
+
+      const result = await manager.exportAllDataForSync()
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('读取同步删除标记失败')
+      expect(result.data).toBeUndefined()
+    })
   })
 
   // ---- importData ----
