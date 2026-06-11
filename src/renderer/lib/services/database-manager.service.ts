@@ -452,6 +452,16 @@ export class DatabaseServiceManager {
    * 与普通备份相比，同步快照额外包含删除标记，避免多端硬删除丢失。
    */
   async exportAllDataForSync(): Promise<DataExportResult> {
+    try {
+      await this.ensureStableSyncUUIDs();
+    } catch (error) {
+      return {
+        success: false,
+        message: '同步数据导出失败',
+        error: `同步记录 UUID 迁移失败: ${error instanceof Error ? error.message : String(error)}`
+      };
+    }
+
     const result = await this.exportAllDataForBackup();
     if (!result.success || !result.data) return result;
 
@@ -474,6 +484,17 @@ export class DatabaseServiceManager {
         syncTombstones
       }
     };
+  }
+
+  private async ensureStableSyncUUIDs(): Promise<void> {
+    const migrationResult = await this.category.migrateAllRecordsToUUID();
+    const failedStores = Object.entries(migrationResult)
+      .filter(([, updatedCount]) => updatedCount < 0)
+      .map(([storeName]) => storeName);
+
+    if (failedStores.length > 0) {
+      throw new Error(failedStores.join(', '));
+    }
   }
 
   /**

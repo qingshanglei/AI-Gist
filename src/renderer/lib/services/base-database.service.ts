@@ -9,6 +9,7 @@ import type { SyncTombstone } from '@shared/types/database';
 import { getCloudSyncRecordKey } from '@shared/cloud-sync-engine';
 
 const SYNC_TOMBSTONE_STORE = 'syncTombstones';
+const DATABASE_DEBUG_STORAGE_KEY = 'ai-gist.debug.database';
 
 const SYNC_COLLECTION_BY_STORE: Record<string, string> = {
   categories: 'categories',
@@ -820,7 +821,7 @@ export class BaseDatabaseService {
   async addUUIDsToExistingRecords(storeName: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
     
-    console.log(`开始为 ${storeName} 添加UUID...`);
+    this.debugLog(`开始为 ${storeName} 添加UUID...`);
     
     const transaction = this.db.transaction([storeName], 'readwrite');
     const store = transaction.objectStore(storeName);
@@ -834,7 +835,7 @@ export class BaseDatabaseService {
         // 检查是否需要UUID索引
         const needsUUIDIndex = !Array.from(store.indexNames).includes('uuid');
         if (needsUUIDIndex) {
-          console.log(`${storeName} 需要创建UUID索引`);
+          this.debugLog(`${storeName} 需要创建UUID索引`);
           // 注意：在活动事务中无法创建索引，这需要在数据库升级时完成
         }
         
@@ -851,12 +852,12 @@ export class BaseDatabaseService {
               });
               updatedCount++;
             } catch (error) {
-              console.error(`Failed to update record with UUID in ${storeName}:`, error);
+              this.debugLog(`Failed to update record with UUID in ${storeName}:`, error);
             }
           }
         }
         
-        console.log(`为 ${storeName} 成功添加了 ${updatedCount} 个UUID`);
+        this.debugLog(`为 ${storeName} 成功添加了 ${updatedCount} 个UUID`);
         resolve(updatedCount);
       };
       
@@ -875,6 +876,7 @@ export class BaseDatabaseService {
       'promptVariables',
       'promptHistories',
       'ai_configs',
+      'quick_optimization_configs',
       'ai_generation_history'
     ];
     
@@ -888,12 +890,28 @@ export class BaseDatabaseService {
           results[storeName] = 0;
         }
       } catch (error) {
-        console.error(`Failed to migrate ${storeName} to UUID:`, error);
+        this.debugLog(`Failed to migrate ${storeName} to UUID:`, error);
         results[storeName] = -1; // 表示失败
       }
     }
     
     return results;
+  }
+
+  private debugLog(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return;
+    }
+    console.debug(...args);
+  }
+
+  private isDebugLoggingEnabled(): boolean {
+    try {
+      return typeof localStorage !== 'undefined' &&
+        localStorage.getItem(DATABASE_DEBUG_STORAGE_KEY) === 'true';
+    } catch {
+      return false;
+    }
   }
 
   /**

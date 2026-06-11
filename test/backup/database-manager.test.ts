@@ -18,6 +18,7 @@ const mockCategoryService = {
   waitForInitialization: vi.fn().mockResolvedValue(undefined),
   getBasicCategories: vi.fn(),
   getSyncTombstones: vi.fn(),
+  migrateAllRecordsToUUID: vi.fn(),
   createCategory: vi.fn(),
   checkObjectStoreExists: vi.fn().mockResolvedValue(true),
   repairDatabase: vi.fn().mockResolvedValue({ success: true }),
@@ -181,6 +182,15 @@ describe('DatabaseServiceManager', () => {
 
     mockCategoryService.getBasicCategories.mockResolvedValue([mockCategory])
     mockCategoryService.getSyncTombstones.mockResolvedValue([mockSyncTombstone])
+    mockCategoryService.migrateAllRecordsToUUID.mockResolvedValue({
+      categories: 0,
+      prompts: 0,
+      promptVariables: 0,
+      promptHistories: 0,
+      ai_configs: 0,
+      quick_optimization_configs: 0,
+      ai_generation_history: 0
+    })
     mockPromptService.getAllPromptsForTags.mockResolvedValue([mockPrompt])
     mockPromptService.getAllPromptVariables.mockResolvedValue([mockPromptVariable])
     mockPromptService.getAllPromptHistories.mockResolvedValue([mockPromptHistory])
@@ -298,7 +308,22 @@ describe('DatabaseServiceManager', () => {
       const result = await manager.exportAllDataForSync()
 
       expect(result.success).toBe(true)
+      expect(mockCategoryService.migrateAllRecordsToUUID).toHaveBeenCalledTimes(1)
       expect(result.data!.syncTombstones).toEqual([mockSyncTombstone])
+    })
+
+    it('UUID 迁移失败时不生成同步快照', async () => {
+      mockCategoryService.migrateAllRecordsToUUID.mockResolvedValue({
+        categories: 0,
+        prompts: -1
+      })
+
+      const result = await manager.exportAllDataForSync()
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('同步记录 UUID 迁移失败')
+      expect(mockCategoryService.getBasicCategories).not.toHaveBeenCalled()
+      expect(result.data).toBeUndefined()
     })
 
     it('删除标记读取失败时不生成缺删除标记快照', async () => {
