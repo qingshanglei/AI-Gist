@@ -238,6 +238,35 @@ describe('cloud sync engine', () => {
     })
   })
 
+  it('rejects snapshots with duplicate record sync keys', () => {
+    expect(() => createCloudSyncSnapshot({
+      prompts: [
+        { uuid: 'prompt-1', title: 'A', updatedAt: '2026-01-01T00:00:00.000Z' },
+        { uuid: 'prompt-1', title: 'B', updatedAt: '2026-01-02T00:00:00.000Z' }
+      ]
+    }, 'device-a', 'rev-1')).toThrow('snapshot data prompts has duplicate record key uuid:prompt-1')
+
+    const snapshot = createCloudSyncSnapshot({
+      prompts: [
+        { uuid: 'prompt-1', title: 'A', updatedAt: '2026-01-01T00:00:00.000Z' },
+        { uuid: 'prompt-2', title: 'B', updatedAt: '2026-01-02T00:00:00.000Z' }
+      ]
+    }, 'device-a', 'rev-1')
+    snapshot.data.prompts![1].uuid = 'prompt-1'
+    snapshot.dataChecksum = createCloudSyncDataChecksum(snapshot.data)
+
+    expect(validateCloudSyncSnapshot(snapshot)).toMatchObject({
+      valid: false,
+      reason: 'snapshot data prompts has duplicate record key uuid:prompt-1'
+    })
+  })
+
+  it('rejects snapshots with non-object records', () => {
+    expect(() => createCloudSyncSnapshot({
+      prompts: ['bad-record'] as any[]
+    }, 'device-a', 'rev-1')).toThrow('snapshot data prompts[0] must be an object')
+  })
+
   it('rejects snapshots with invalid tombstones', () => {
     expect(() => createCloudSyncSnapshot({
       syncTombstones: [

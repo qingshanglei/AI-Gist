@@ -155,6 +155,10 @@ export function normalizeCloudSyncDataSet<TData extends CloudSyncDataSet>(data: 
   }
 
   validateSnapshotTombstonesOrThrow(normalized.syncTombstones || []);
+  const recordValidation = validateSnapshotRecords(normalized);
+  if (!recordValidation.valid) {
+    throw new Error(recordValidation.reason || '同步快照记录格式无效');
+  }
 
   return normalized as TData;
 }
@@ -227,6 +231,11 @@ function validateCloudSyncDataSetShape(data: CloudSyncDataSet): CloudSyncSnapsho
     return tombstoneValidation;
   }
 
+  const recordValidation = validateSnapshotRecords(data);
+  if (!recordValidation.valid) {
+    return recordValidation;
+  }
+
   return { valid: true };
 }
 
@@ -250,6 +259,27 @@ function validateSnapshotTombstones(tombstones: CloudSyncTombstone[]): CloudSync
       Number.isNaN(deletedAtTime)
     ) {
       return { valid: false, reason: `snapshot data syncTombstones[${index}] deletedAt is invalid` };
+    }
+  }
+
+  return { valid: true };
+}
+
+function validateSnapshotRecords(data: CloudSyncDataSet): CloudSyncSnapshotValidationResult {
+  for (const collection of DEFAULT_COLLECTIONS) {
+    const records = data[collection] || [];
+    const seenKeys = new Set<string>();
+
+    for (const [index, record] of records.entries()) {
+      if (!record || typeof record !== 'object' || Array.isArray(record)) {
+        return { valid: false, reason: `snapshot data ${collection}[${index}] must be an object` };
+      }
+
+      const key = getCloudSyncRecordKey(collection, record);
+      if (seenKeys.has(key)) {
+        return { valid: false, reason: `snapshot data ${collection} has duplicate record key ${key}` };
+      }
+      seenKeys.add(key);
     }
   }
 
