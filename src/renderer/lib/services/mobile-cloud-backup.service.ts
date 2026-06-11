@@ -44,6 +44,7 @@ const STORAGE_KEYS = {
 }
 
 const WEBDAV_REQUEST_TIMEOUT_MS = 30_000
+const CLOUD_BACKUP_DEBUG_STORAGE_KEY = 'ai-gist.debug.cloud-backup'
 
 export class MobileCloudBackupService {
   private static instance: MobileCloudBackupService
@@ -612,9 +613,9 @@ export class MobileCloudBackupService {
           directory: Directory.Documents
         })
         dirExists = true
-        console.log('iCloud 目录已存在:', dirPath)
+        this.debugLog('iCloud 目录已存在:', dirPath)
       } catch (error) {
-        console.log('iCloud 目录不存在，需要创建:', dirPath)
+        this.debugLog('iCloud 目录不存在，需要创建:', dirPath)
       }
 
       // 只在目录不存在时创建
@@ -625,7 +626,7 @@ export class MobileCloudBackupService {
             directory: Directory.Documents,
             recursive: true
           })
-          console.log('iCloud 目录创建成功:', dirPath)
+          this.debugLog('iCloud 目录创建成功:', dirPath)
         } catch (error: any) {
           console.error('创建 iCloud 目录失败:', error)
           // 如果创建失败，可能是权限问题或其他错误
@@ -640,7 +641,7 @@ export class MobileCloudBackupService {
           path: dirPath,
           directory: Directory.Documents
         })
-        console.log('读取 iCloud 目录成功，文件数量:', result.files.length)
+        this.debugLog('读取 iCloud 目录成功，文件数量:', result.files.length)
       } catch (error: any) {
         console.error('读取 iCloud 目录失败:', error)
         // 如果目录为空或刚创建，返回空数组
@@ -677,7 +678,7 @@ export class MobileCloudBackupService {
         }
       }
 
-      console.log('iCloud 备份列表加载完成，数量:', backups.length)
+      this.debugLog('iCloud 备份列表加载完成，数量:', backups.length)
 
       return backups.sort((a, b) =>
         new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
@@ -778,8 +779,8 @@ export class MobileCloudBackupService {
         console.warn('解析 baseUrl 失败:', baseUrl)
       }
 
-      console.log('baseUrl:', baseUrl)
-      console.log('baseUrl 路径前缀:', baseUrlPath)
+      this.debugLog('baseUrl:', baseUrl)
+      this.debugLog('baseUrl 路径前缀:', baseUrlPath)
 
       // 简单的 XML 解析
       const parser = new DOMParser()
@@ -794,7 +795,7 @@ export class MobileCloudBackupService {
         responses = doc.getElementsByTagName('response')
       }
 
-      console.log('WebDAV 响应数量:', responses.length)
+      this.debugLog('WebDAV 响应数量:', responses.length)
 
       for (const response of Array.from(responses)) {
         // 获取 href
@@ -805,7 +806,7 @@ export class MobileCloudBackupService {
         if (!hrefElement) continue
 
         const href = hrefElement.textContent || ''
-        console.log('处理文件 href:', href)
+        this.debugLog('处理文件 href:', href)
 
         // 获取 propstat
         const propstat = response.getElementsByTagName('d:propstat')[0] ||
@@ -855,13 +856,13 @@ export class MobileCloudBackupService {
         // URL 解码
         normalizedPath = decodeURIComponent(normalizedPath)
 
-        console.log('解码后的路径:', normalizedPath)
-        console.log('baseUrlPath:', baseUrlPath)
+        this.debugLog('解码后的路径:', normalizedPath)
+        this.debugLog('baseUrlPath:', baseUrlPath)
 
         // 移除 baseUrl 的路径前缀，得到相对路径
         if (baseUrlPath && normalizedPath.startsWith(baseUrlPath)) {
           normalizedPath = normalizedPath.substring(baseUrlPath.length)
-          console.log('移除前缀后的路径:', normalizedPath)
+          this.debugLog('移除前缀后的路径:', normalizedPath)
           // 确保以 / 开头
           if (!normalizedPath.startsWith('/')) {
             normalizedPath = '/' + normalizedPath
@@ -881,7 +882,7 @@ export class MobileCloudBackupService {
         let size = 0
         if (contentlength && contentlength.textContent) {
           size = parseInt(contentlength.textContent, 10)
-          console.log('从 XML 解析文件大小:', name, size)
+          this.debugLog('从 XML 解析文件大小:', name, size)
         }
 
         // 获取修改时间
@@ -892,7 +893,7 @@ export class MobileCloudBackupService {
 
         // 跳过目录本身和空文件名
         if (name && !isDirectory && normalizedPath !== '/' && normalizedPath !== '') {
-          console.log('添加文件:', name, 'path:', normalizedPath, 'size:', size)
+          this.debugLog('添加文件:', name, 'path:', normalizedPath, 'size:', size)
           files.push({
             name,
             path: normalizedPath, // 使用标准化的相对路径
@@ -903,7 +904,7 @@ export class MobileCloudBackupService {
         }
       }
 
-      console.log('解析到的文件数量:', files.length)
+      this.debugLog('解析到的文件数量:', files.length)
     } catch (error) {
       console.error('解析 WebDAV 响应失败:', error)
     }
@@ -979,13 +980,13 @@ export class MobileCloudBackupService {
     backupData: any
   ): Promise<CloudBackupResult> {
     try {
-      console.log('创建 WebDAV 备份，文件名:', fileName)
+      this.debugLog('创建 WebDAV 备份，文件名:', fileName)
 
       await this.ensureWebDAVBackupDirectory(config)
 
       const cloudPath = getCloudBackupFilePath(fileName)
       const fileUrl = this.buildWebDAVUrlFromCloudPath(config, cloudPath)
-      console.log('上传到 URL:', fileUrl)
+      this.debugLog('上传到 URL:', fileUrl)
       const response = await CapacitorHttp.request({
         url: fileUrl,
         method: 'PUT',
@@ -997,7 +998,7 @@ export class MobileCloudBackupService {
         data: jsonString
       })
 
-      console.log('上传响应状态:', response.status)
+      this.debugLog('上传响应状态:', response.status)
       if (response.status >= 200 && response.status < 300) {
         const backupInfo: CloudBackupInfo = {
           id: backupData.id,
@@ -1010,7 +1011,7 @@ export class MobileCloudBackupService {
           checksum: backupData.checksum
         }
 
-        console.log('备份创建成功:', backupInfo)
+        this.debugLog('备份创建成功:', backupInfo)
 
         return {
           success: true,
@@ -1064,9 +1065,9 @@ export class MobileCloudBackupService {
           directory: Directory.Documents
         })
         dirExists = true
-        console.log('iCloud 目录已存在:', dirPath)
+        this.debugLog('iCloud 目录已存在:', dirPath)
       } catch (error) {
-        console.log('iCloud 目录不存在，需要创建:', dirPath)
+        this.debugLog('iCloud 目录不存在，需要创建:', dirPath)
       }
 
       // 只在目录不存在时创建
@@ -1077,7 +1078,7 @@ export class MobileCloudBackupService {
             directory: Directory.Documents,
             recursive: true
           })
-          console.log('iCloud 目录创建成功:', dirPath)
+          this.debugLog('iCloud 目录创建成功:', dirPath)
         } catch (error: any) {
           console.error('创建 iCloud 目录失败:', error)
           return {
@@ -1489,6 +1490,22 @@ export class MobileCloudBackupService {
     return {
       connectTimeout: WEBDAV_REQUEST_TIMEOUT_MS,
       readTimeout: WEBDAV_REQUEST_TIMEOUT_MS
+    }
+  }
+
+  private debugLog(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return
+    }
+    console.debug(...args)
+  }
+
+  private isDebugLoggingEnabled(): boolean {
+    try {
+      return typeof localStorage !== 'undefined' &&
+        localStorage.getItem(CLOUD_BACKUP_DEBUG_STORAGE_KEY) === 'true'
+    } catch {
+      return false
     }
   }
 
