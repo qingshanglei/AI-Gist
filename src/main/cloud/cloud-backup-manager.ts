@@ -29,7 +29,6 @@ import {
 import type { CloudSyncManifest } from '@shared/cloud-sync-manifest';
 import {
   assertValidCloudSyncManifest,
-  normalizeCloudSyncManifest,
   readCloudSyncManifestWithFallback
 } from '@shared/cloud-sync-manifest';
 import { WebDAVProvider } from './webdav-provider';
@@ -775,7 +774,7 @@ export class CloudBackupManager {
     await this.loadConfigs();
     const config = this.getStorageConfig(storageId);
     const provider = this.createProvider(config);
-    const normalizedManifest = normalizeCloudSyncManifest({
+    const normalizedManifest = assertValidCloudSyncManifest({
       ...manifest,
       updatedAt: new Date().toISOString()
     });

@@ -394,6 +394,28 @@ describe('MobileCloudBackupService', () => {
       ])
     })
 
+    it('WebDAV manifest 快照结构无效时不写入云端文件', async () => {
+      await saveConfig(service)
+      const invalidData = { ...mockExportData }
+      delete (invalidData as any).promptHistories
+      const manifest = {
+        ...createEmptyCloudSyncManifest('2026-03-12T00:00:00.000Z'),
+        latestSnapshot: {
+          schemaVersion: 1 as const,
+          deviceId: 'ios-device',
+          revision: 'bad-rev',
+          createdAt: '2026-03-12T00:00:00.000Z',
+          data: invalidData
+        }
+      } as any
+
+      const result = await service.saveCloudSyncManifest('cfg-1', manifest)
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('snapshot data missing collection promptHistories')
+      expect(mockCapacitorHttp.request).not.toHaveBeenCalled()
+    })
+
     it('WebDAV manifest 主文件损坏时读取备份副本', async () => {
       await saveConfig(service)
       const backupManifest = {

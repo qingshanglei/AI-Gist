@@ -32,7 +32,6 @@ import {
 import type { CloudSyncManifest } from '@shared/cloud-sync-manifest'
 import {
   assertValidCloudSyncManifest,
-  normalizeCloudSyncManifest,
   readCloudSyncManifestWithFallback
 } from '@shared/cloud-sync-manifest'
 import {
@@ -367,7 +366,7 @@ export class MobileCloudBackupService {
   }> {
     try {
       const config = await this.getStorageConfigOrThrow(storageId)
-      const normalizedManifest = normalizeCloudSyncManifest({
+      const normalizedManifest = assertValidCloudSyncManifest({
         ...manifest,
         updatedAt: new Date().toISOString()
       })
