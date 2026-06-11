@@ -611,6 +611,69 @@ describe('CloudSyncService', () => {
     service.stopAutoSync()
   })
 
+  it('retries only the storage that failed during automatic sync', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const secondConfig = {
+      ...enabledWebDAVConfig,
+      id: 'cfg-2',
+      name: 'Second WebDAV'
+    }
+    const manifests: Record<string, any> = {
+      'cfg-2': createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    }
+    const manifestReads: string[] = []
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig, secondConfig])
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+    cloudClient.getCloudSyncManifest.mockImplementation(async (storageId: string) => {
+      manifestReads.push(storageId)
+      if (storageId === 'cfg-1') {
+        throw new Error('ECONNRESET')
+      }
+      return manifests[storageId] || createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    })
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (storageId: string, manifest: any) => {
+      manifests[storageId] = manifest
+      return { success: true }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25
+    })
+    dataChangeListener?.({
+      storeName: 'prompts',
+      action: 'update',
+      id: 1,
+      timestamp: Date.now(),
+      sourceId: 'test'
+    })
+
+    await vi.advanceTimersByTimeAsync(25)
+    expect(manifestReads).toContain('cfg-1')
+    expect(manifestReads).toContain('cfg-2')
+    const cfg2ReadsAfterFirstRun = manifestReads.filter(storageId => storageId === 'cfg-2').length
+    expect(service.getStatus()).toMatchObject({
+      status: 'error',
+      pending: true,
+      storageId: 'cfg-1'
+    })
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES * 60 * 1000)
+
+    expect(manifestReads.filter(storageId => storageId === 'cfg-1').length).toBeGreaterThan(1)
+    expect(manifestReads.filter(storageId => storageId === 'cfg-2')).toHaveLength(cfg2ReadsAfterFirstRun)
+
+    service.stopAutoSync()
+  })
+
   it('does not schedule another upload from data changes emitted while applying remote data', async () => {
     vi.useFakeTimers()
     let dataChangeListener: ((change: any) => void) | undefined

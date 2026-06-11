@@ -685,7 +685,7 @@ export class CloudSyncService {
     }
 
     if (isBrowserOffline()) {
-      this.scheduleRetry(reason, '当前网络不可用，等待恢复后重试');
+      this.scheduleRetry(reason, '当前网络不可用，等待恢复后重试', storageId);
       return;
     }
 
@@ -693,7 +693,7 @@ export class CloudSyncService {
     try {
       storageIds = await this.resolveStorageIds(storageId);
     } catch (error) {
-      this.scheduleRetry(reason, error instanceof Error ? error.message : String(error));
+      this.scheduleRetry(reason, error instanceof Error ? error.message : String(error), storageId);
       return;
     }
 
@@ -710,6 +710,7 @@ export class CloudSyncService {
     }
 
     let firstFailure: CloudSyncResult | null = null;
+    let firstFailureStorageId: string | undefined;
     let lastResult: CloudSyncResult | undefined;
 
     for (const targetStorageId of storageIds) {
@@ -720,11 +721,12 @@ export class CloudSyncService {
       lastResult = result;
       if (!result.success && !firstFailure) {
         firstFailure = result;
+        firstFailureStorageId = targetStorageId;
       }
     }
 
     if (firstFailure) {
-      this.scheduleRetry(reason, firstFailure.error || '自动同步失败');
+      this.scheduleRetry(reason, firstFailure.error || '自动同步失败', firstFailureStorageId || storageId);
       return;
     }
 
@@ -762,7 +764,7 @@ export class CloudSyncService {
     }
   }
 
-  private scheduleRetry(reason: CloudSyncRunReason, error: string): void {
+  private scheduleRetry(reason: CloudSyncRunReason, error: string, storageId?: string): void {
     if (!this.autoSyncOptions) {
       return;
     }
@@ -772,6 +774,7 @@ export class CloudSyncService {
       this.updateStatus({
         status: 'error',
         pending: false,
+        storageId,
         reason,
         error,
         nextSyncAt: undefined
@@ -786,6 +789,7 @@ export class CloudSyncService {
     this.updateStatus({
       status: 'error',
       pending: true,
+      storageId,
       reason,
       error,
       failureCount: this.failureCount,
@@ -794,7 +798,7 @@ export class CloudSyncService {
 
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
-      void this.runScheduledSync('retry');
+      void this.runScheduledSync('retry', storageId);
     }, retryMs);
   }
 
