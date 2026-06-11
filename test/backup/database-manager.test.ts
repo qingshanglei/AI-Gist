@@ -397,6 +397,22 @@ describe('DatabaseServiceManager', () => {
       expect(clearedStores).toContain('quick_optimization_configs')
     })
 
+    it('清空数据表会等待事务提交完成后才返回', async () => {
+      vi.useFakeTimers()
+      const clearedStores: string[] = []
+      mockCategoryService.db = createMockDbForClearing(clearedStores, 100, ['categories'])
+
+      const cleanPromise = manager.forceCleanAllTables()
+      await vi.advanceTimersByTimeAsync(50)
+      expect(clearedStores).toEqual([])
+
+      await vi.advanceTimersByTimeAsync(50)
+      await cleanPromise
+      expect(clearedStores).toContain('categories')
+
+      vi.useRealTimers()
+    })
+
     it('先清空再恢复数据', async () => {
       // mock forceCleanAllTables
       const cleanSpy = vi.spyOn(manager, 'forceCleanAllTables').mockResolvedValue()
@@ -405,6 +421,28 @@ describe('DatabaseServiceManager', () => {
 
       expect(cleanSpy).toHaveBeenCalledTimes(1)
       expect(result.success).toBe(true)
+    })
+
+    it('恢复数据格式无效时不会先清空本地数据', async () => {
+      const cleanSpy = vi.spyOn(manager, 'forceCleanAllTables').mockResolvedValue()
+
+      const result = await manager.replaceAllData(null)
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('恢复数据格式无效')
+      expect(cleanSpy).not.toHaveBeenCalled()
+    })
+
+    it('恢复数据表字段不是数组时不会先清空本地数据', async () => {
+      const cleanSpy = vi.spyOn(manager, 'forceCleanAllTables').mockResolvedValue()
+
+      const result = await manager.replaceAllData({
+        prompts: { id: 1, title: 'bad shape' }
+      })
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('prompts 必须是数组')
+      expect(cleanSpy).not.toHaveBeenCalled()
     })
 
     it('恢复同步删除标记，避免删除记录在下次同步复活', async () => {
@@ -550,21 +588,30 @@ function createSuccessfulRequest() {
   return request
 }
 
-function createMockDbForClearing(clearedStores: string[]) {
+function createMockDbForClearing(clearedStores: string[], completeDelay = 0, storesToClear?: string[]) {
   return {
     objectStoreNames: {
-      contains: vi.fn(() => true)
+      contains: vi.fn((storeName: string) => storesToClear ? storesToClear.includes(storeName) : true)
     },
     transaction: vi.fn((stores: string[]) => {
       const [storeName] = stores
-      return {
+      const transaction: any = {
+        oncomplete: null,
+        onerror: null,
+        onabort: null,
+        error: null,
         objectStore: vi.fn(() => ({
           clear: vi.fn(() => {
-            clearedStores.push(storeName)
-            return createSuccessfulRequest()
+            const request = createSuccessfulRequest()
+            setTimeout(() => {
+              clearedStores.push(storeName)
+              transaction.oncomplete?.()
+            }, completeDelay)
+            return request
           })
         }))
       }
+      return transaction
     }),
     version: 1
   }

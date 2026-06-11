@@ -30,6 +30,18 @@ const SYNCABLE_DATA_STORES = [
   'syncTombstones'
 ];
 
+const RESTORABLE_DATA_FIELDS = [
+  'categories',
+  'prompts',
+  'promptVariables',
+  'promptHistories',
+  'aiConfigs',
+  'quickOptimizationConfigs',
+  'aiHistory',
+  'settings',
+  'syncTombstones'
+];
+
 /**
  * 统一的数据库服务管理类
  * 提供对所有数据库服务的统一访问接口和高级管理功能
@@ -944,6 +956,7 @@ export class DatabaseServiceManager {
     try {
       console.log('渲染进程: 开始完全替换数据...');
       const dataToRestore = unwrapBackupData(backupData);
+      this.assertRestorableDataShape(dataToRestore);
       
       // 先清空所有数据
       await this.forceCleanAllTables();
@@ -977,14 +990,24 @@ export class DatabaseServiceManager {
           const transaction = db.transaction([tableName], 'readwrite');
           const store = transaction.objectStore(tableName);
           await new Promise<void>((resolve, reject) => {
+            let clearSucceeded = false;
+
+            transaction.oncomplete = () => {
+              if (clearSucceeded) {
+                console.log(`清空表 ${tableName} 成功`);
+                emitDataChange({
+                  storeName: tableName,
+                  action: 'clear'
+                });
+              }
+              resolve();
+            };
+            transaction.onerror = () => reject(transaction.error || new Error(`清空表 ${tableName} 事务失败`));
+            transaction.onabort = () => reject(transaction.error || new Error(`清空表 ${tableName} 事务中止`));
+
             const clearRequest = store.clear();
             clearRequest.onsuccess = () => {
-              console.log(`清空表 ${tableName} 成功`);
-              emitDataChange({
-                storeName: tableName,
-                action: 'clear'
-              });
-              resolve();
+              clearSucceeded = true;
             };
             clearRequest.onerror = () => reject(clearRequest.error);
           });
@@ -1009,6 +1032,24 @@ export class DatabaseServiceManager {
     } catch (error) {
       console.error('获取数据库连接失败:', error);
       return null;
+    }
+  }
+
+  private assertRestorableDataShape(data: any): void {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new Error('恢复数据格式无效');
+    }
+
+    const presentFields = RESTORABLE_DATA_FIELDS.filter(field => field in data);
+    if (presentFields.length === 0) {
+      throw new Error('恢复数据格式无效：缺少可恢复的数据表');
+    }
+
+    const invalidFields = presentFields.filter(field =>
+      data[field] !== undefined && !Array.isArray(data[field])
+    );
+    if (invalidFields.length > 0) {
+      throw new Error(`恢复数据格式无效：${invalidFields.join(', ')} 必须是数组`);
     }
   }
 
