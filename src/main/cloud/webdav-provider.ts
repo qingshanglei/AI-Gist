@@ -10,6 +10,7 @@ const CONSTANTS = {
     DEFAULT_DIR: '/'
   },
   BACKUP_DIR: 'AI-Gist-Backup',
+  REQUEST_TIMEOUT_MS: 30_000,
   ERROR_MESSAGES: {
     CLIENT_INIT_FAILED: 'WebDAV 客户端初始化失败',
     CONNECTION_TEST_FAILED: 'WebDAV 连接测试失败',
@@ -41,6 +42,7 @@ export class WebDAVProvider implements CloudStorageProvider {
   private client: any;
   private config: WebDAVConfig;
   private clientReady: Promise<void>;
+  private requestTimeoutMs: number;
 
   // ==================== 构造函数和初始化 ====================
 
@@ -50,6 +52,7 @@ export class WebDAVProvider implements CloudStorageProvider {
    */
   constructor(config: WebDAVConfig) {
     this.config = config;
+    this.requestTimeoutMs = this.normalizeRequestTimeout(config.requestTimeoutMs);
     this.clientReady = this.initClient();
   }
 
@@ -59,12 +62,7 @@ export class WebDAVProvider implements CloudStorageProvider {
    */
   private async initClient(): Promise<void> {
     try {
-      let webdavModule: any;
-      try {
-        webdavModule = require('webdav');
-      } catch {
-        webdavModule = await import('webdav');
-      }
+      const webdavModule = await import('webdav');
       
       // webdav 模块直接导出 createClient 方法
       const { createClient } = webdavModule as any;
@@ -146,7 +144,10 @@ export class WebDAVProvider implements CloudStorageProvider {
     try {
       // 如果没有指定路径，使用默认路径 /
       const targetPath = this.normalizeRemotePath(dirPath || CONSTANTS.DEFAULT_PATHS.DEFAULT_DIR, true);
-      const contents = await this.client.getDirectoryContents(targetPath);
+      const contents: any = await this.withRequestTimeout(
+        signal => this.client.getDirectoryContents(targetPath, { signal }),
+        '列出文件'
+      );
       const files = Array.isArray(contents) ? contents : contents.data || [];
       return files.map((item: any) => this.mapFileInfo(item));
     } catch (error) {
@@ -163,7 +164,13 @@ export class WebDAVProvider implements CloudStorageProvider {
   async readFile(filePath: string): Promise<Buffer> {
     await this.ensureClient();
     try {
-      const data = await this.client.getFileContents(this.normalizeRemotePath(filePath), { format: 'binary' });
+      const data = await this.withRequestTimeout(
+        signal => this.client.getFileContents(this.normalizeRemotePath(filePath), {
+          format: 'binary',
+          signal
+        }),
+        '读取文件'
+      );
       if (Buffer.isBuffer(data)) {
         return data;
       }
@@ -194,10 +201,14 @@ export class WebDAVProvider implements CloudStorageProvider {
         await this.createDirectory(dirPath);
       }
 
-      const uploaded = await this.client.putFileContents(targetPath, data, {
-        overwrite: true,
-        contentLength: data.length,
-      });
+      const uploaded = await this.withRequestTimeout(
+        signal => this.client.putFileContents(targetPath, data, {
+          overwrite: true,
+          contentLength: data.length,
+          signal
+        }),
+        '写入文件'
+      );
 
       if (uploaded !== true) {
         throw new Error('WebDAV PUT 未返回成功状态');
@@ -217,7 +228,10 @@ export class WebDAVProvider implements CloudStorageProvider {
   async deleteFile(filePath: string): Promise<void> {
     await this.ensureClient();
     try {
-      await this.client.deleteFile(this.normalizeRemotePath(filePath));
+      await this.withRequestTimeout(
+        signal => this.client.deleteFile(this.normalizeRemotePath(filePath), { signal }),
+        '删除文件'
+      );
     } catch (error) {
       this.logOperationError(CONSTANTS.LOG_MESSAGES.DELETE_FILE_FAILED, error);
       throw new Error(`${CONSTANTS.ERROR_MESSAGES.DELETE_FILE_FAILED}: ${this.getErrorMessage(error)}`);
@@ -259,9 +273,15 @@ export class WebDAVProvider implements CloudStorageProvider {
    */
   private async directoryExists(dirPath: string): Promise<boolean> {
     try {
-      const stat = await this.client.stat(this.normalizeRemotePath(dirPath, true));
+      const stat: any = await this.withRequestTimeout(
+        signal => this.client.stat(this.normalizeRemotePath(dirPath, true), { signal }),
+        '检查目录'
+      );
       return stat?.type === 'directory';
     } catch (error) {
+      if (this.isRequestTimeoutError(error)) {
+        throw error;
+      }
       return false;
     }
   }
@@ -281,7 +301,10 @@ export class WebDAVProvider implements CloudStorageProvider {
       }
 
       try {
-        await this.client.createDirectory(currentPath);
+        await this.withRequestTimeout(
+          signal => this.client.createDirectory(currentPath, { signal }),
+          '创建目录'
+        );
       } catch (error: any) {
         if (await this.directoryExists(currentPath) || this.isDirectoryAlreadyExistsError(error)) {
           continue;
@@ -330,7 +353,10 @@ export class WebDAVProvider implements CloudStorageProvider {
 
   private async verifyRemoteWrite(filePath: string, expectedData: Buffer): Promise<void> {
     try {
-      const stat = await this.client.stat(filePath);
+      const stat: any = await this.withRequestTimeout(
+        signal => this.client.stat(filePath, { signal }),
+        '校验远端文件'
+      );
       if (stat?.type === 'directory') {
         throw new Error('远端路径是目录，不是文件');
       }
@@ -368,6 +394,38 @@ export class WebDAVProvider implements CloudStorageProvider {
     return segments.length > 0 ? `/${segments.join('/')}` : '';
   }
 
+  private normalizeRequestTimeout(timeoutMs: number | undefined): number {
+    return typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0
+      ? Math.floor(timeoutMs)
+      : CONSTANTS.REQUEST_TIMEOUT_MS;
+  }
+
+  private async withRequestTimeout<T>(
+    operation: (signal: AbortSignal) => Promise<T>,
+    operationName: string
+  ): Promise<T> {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs);
+
+    try {
+      return await operation(controller.signal);
+    } catch (error) {
+      if (controller.signal.aborted || this.isAbortError(error)) {
+        throw new Error(`${operationName}超时（${this.formatRequestTimeout()}）`);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  private formatRequestTimeout(): string {
+    if (this.requestTimeoutMs >= 1000) {
+      return `${Math.ceil(this.requestTimeoutMs / 1000)} 秒`;
+    }
+    return `${this.requestTimeoutMs} 毫秒`;
+  }
+
   /**
    * 获取错误信息
    * @param error 错误对象
@@ -383,6 +441,18 @@ export class WebDAVProvider implements CloudStorageProvider {
 
   private isDirectoryAlreadyExistsError(error: unknown): boolean {
     return /already exists|405|409/i.test(this.getErrorMessage(error));
+  }
+
+  private isAbortError(error: unknown): boolean {
+    const name = error instanceof Error ? error.name : '';
+    const message = this.getErrorMessage(error);
+    return name === 'AbortError' ||
+      message.includes('AbortError') ||
+      message.toLowerCase().includes('aborted');
+  }
+
+  private isRequestTimeoutError(error: unknown): boolean {
+    return this.getErrorMessage(error).includes('超时');
   }
 
   private logOperationError(message: string, error: unknown): void {

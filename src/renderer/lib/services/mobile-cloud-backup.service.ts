@@ -43,6 +43,8 @@ const STORAGE_KEYS = {
   CONFIGS: 'cloud_backup_configs'
 }
 
+const WEBDAV_REQUEST_TIMEOUT_MS = 30_000
+
 export class MobileCloudBackupService {
   private static instance: MobileCloudBackupService
 
@@ -266,6 +268,7 @@ export class MobileCloudBackupService {
       const response = await CapacitorHttp.request({
         url: this.normalizeBaseUrl(config.url),
         method: 'OPTIONS',
+        ...this.getWebDAVRequestTimeoutOptions(),
         headers: {
           'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
         }
@@ -438,7 +441,8 @@ export class MobileCloudBackupService {
         url: baseUrl,
         username: config.username,
         password: config.password,
-        depth: 1
+        depth: 1,
+        ...this.getWebDAVRequestTimeoutOptions()
       })
       status = response.status
       xmlData = response.body
@@ -447,6 +451,7 @@ export class MobileCloudBackupService {
       const response = await CapacitorHttp.request({
         url: baseUrl,
         method: 'PROPFIND',
+        ...this.getWebDAVRequestTimeoutOptions(),
         headers: {
           'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`),
           'Depth': '1',
@@ -477,6 +482,7 @@ export class MobileCloudBackupService {
         const fileResponse = await CapacitorHttp.request({
           url: fileUrl,
           method: 'GET',
+          ...this.getWebDAVRequestTimeoutOptions(),
           headers: {
             'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
           }
@@ -538,6 +544,7 @@ export class MobileCloudBackupService {
     const response = await CapacitorHttp.request({
       url: this.buildWebDAVUrlFromCloudPath(config, cloudPath),
       method: 'GET',
+      ...this.getWebDAVRequestTimeoutOptions(),
       headers: {
         'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
       }
@@ -572,6 +579,7 @@ export class MobileCloudBackupService {
     const response = await CapacitorHttp.request({
       url: this.buildWebDAVUrlFromCloudPath(config, cloudPath),
       method: 'PUT',
+      ...this.getWebDAVRequestTimeoutOptions(),
       headers: {
         'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`),
         'Content-Type': 'application/json'
@@ -981,6 +989,7 @@ export class MobileCloudBackupService {
       const response = await CapacitorHttp.request({
         url: fileUrl,
         method: 'PUT',
+        ...this.getWebDAVRequestTimeoutOptions(),
         headers: {
           'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`),
           'Content-Type': 'application/json'
@@ -1173,6 +1182,7 @@ export class MobileCloudBackupService {
       const response = await CapacitorHttp.request({
         url: fileUrl,
         method: 'GET',
+        ...this.getWebDAVRequestTimeoutOptions(),
         headers: {
           'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
         }
@@ -1319,6 +1329,7 @@ export class MobileCloudBackupService {
       const response = await CapacitorHttp.request({
         url: fileUrl,
         method: 'DELETE',
+        ...this.getWebDAVRequestTimeoutOptions(),
         headers: {
           'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
         }
@@ -1457,7 +1468,8 @@ export class MobileCloudBackupService {
         username: config.username,
         password: config.password,
         body: data,
-        contentType
+        contentType,
+        ...this.getWebDAVRequestTimeoutOptions()
       })
       return { status: response.status, data: response.body }
     }
@@ -1465,11 +1477,19 @@ export class MobileCloudBackupService {
     return CapacitorHttp.request({
       url,
       method,
+      ...this.getWebDAVRequestTimeoutOptions(),
       headers: {
         'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
       },
       data
     })
+  }
+
+  private getWebDAVRequestTimeoutOptions(): { connectTimeout: number; readTimeout: number } {
+    return {
+      connectTimeout: WEBDAV_REQUEST_TIMEOUT_MS,
+      readTimeout: WEBDAV_REQUEST_TIMEOUT_MS
+    }
   }
 
   private dedupeBackups(backups: CloudBackupInfo[]): CloudBackupInfo[] {

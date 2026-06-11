@@ -496,6 +496,43 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
 
       await provider.deleteFile('/backup-desktop-subdir.json')
     })
+
+    it('请求长期无响应时会取消底层 WebDAV 请求并返回明确超时错误', async () => {
+      const provider = new WebDAVProvider({
+        id: 'desktop-timeout',
+        name: 'Desktop Timeout WebDAV',
+        type: 'webdav',
+        enabled: true,
+        url: server.baseUrl,
+        username: USERNAME,
+        password: PASSWORD,
+        requestTimeoutMs: 5,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+
+      const abortSpy = vi.fn()
+      const getFileContents = vi.fn((_path: string, options: { signal: AbortSignal }) => (
+        new Promise<Buffer>((_resolve, reject) => {
+          options.signal.addEventListener('abort', () => {
+            abortSpy()
+            const error = new Error('The operation was aborted')
+            error.name = 'AbortError'
+            reject(error)
+          })
+        })
+      ))
+
+      ;(provider as any).client = { getFileContents }
+      ;(provider as any).clientReady = Promise.resolve()
+
+      await expect(provider.readFile('/slow.json')).rejects.toThrow('读取文件超时（5 毫秒）')
+      expect(getFileContents).toHaveBeenCalledWith('/slow.json', expect.objectContaining({
+        format: 'binary',
+        signal: expect.any(AbortSignal),
+      }))
+      expect(abortSpy).toHaveBeenCalledTimes(1)
+    })
   })
 
   // ----------------------------------------------------------------
@@ -510,6 +547,21 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
       const configs = await service.getStorageConfigs()
       const result  = await service.testStorageConnection(configs[0])
       expect(result.success).toBe(true)
+    })
+
+    it('WebDAV 连接请求带连接和读取超时', async () => {
+      const service = MobileCloudBackupService.getInstance()
+      await saveConfig(service)
+
+      const configs = await service.getStorageConfigs()
+      const result = await service.testStorageConnection(configs[0])
+
+      expect(result.success).toBe(true)
+      expect(mockHttp.request.mock.calls[0][0]).toEqual(expect.objectContaining({
+        method: 'OPTIONS',
+        connectTimeout: 30_000,
+        readTimeout: 30_000,
+      }))
     })
 
     it('错误密码连接失败', async () => {

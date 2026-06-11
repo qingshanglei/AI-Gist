@@ -19,6 +19,7 @@ export interface WebDAVConfig extends CloudStorageConfig {
   url: string;
   username: string;
   password: string;
+  requestTimeoutMs?: number;
 }
 
 export interface ICloudConfig extends CloudStorageConfig {
