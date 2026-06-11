@@ -403,6 +403,19 @@ describe('DatabaseServiceManager', () => {
   // ---- replaceAllData ----
 
   describe('replaceAllData', () => {
+    it('restoreData 恢复图片数据格式无效时不会先清空本地数据', async () => {
+      const cleanSpy = vi.spyOn(manager, 'forceCleanAllTables').mockResolvedValue()
+
+      const result = await manager.restoreData({
+        ...makeExportData(),
+        prompts: [{ ...mockPrompt, imageBlobs: ['not-a-data-url'] }]
+      })
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('图片数据格式无效')
+      expect(cleanSpy).not.toHaveBeenCalled()
+    })
+
     it('完全替换前会清空快速优化配置表，避免旧配置残留', async () => {
       const clearedStores: string[] = []
       mockCategoryService.db = createMockDbForClearing(clearedStores)

@@ -716,6 +716,8 @@ export class DatabaseServiceManager {
       if (!backupData || typeof backupData !== 'object') {
         throw new Error('恢复数据格式无效');
       }
+
+      this.assertRestorableDataShape(backupData);
       
       // 确保导入数据具有完整的UUID
       backupData = this.ensureUUIDsInImportData(backupData);
