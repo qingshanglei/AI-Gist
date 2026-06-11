@@ -785,11 +785,11 @@ export class CloudBackupManager {
     }
 
     await provider.writeFile(
-      this.getSyncManifestCloudPath(config),
+      this.getSyncManifestBackupCloudPath(config),
       Buffer.from(JSON.stringify(normalizedManifest, null, 2), 'utf-8')
     );
     await provider.writeFile(
-      this.getSyncManifestBackupCloudPath(config),
+      this.getSyncManifestCloudPath(config),
       Buffer.from(JSON.stringify(normalizedManifest, null, 2), 'utf-8')
     );
   }
