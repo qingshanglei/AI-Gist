@@ -371,6 +371,21 @@ describe('DatabaseServiceManager', () => {
       expect(promptArg.imageBlobs[0]).toBeInstanceOf(Blob)
     })
 
+    it('图片数据格式无效时导入失败，避免静默丢图', async () => {
+      const dataWithInvalidImage = {
+        ...makeExportData(),
+        prompts: [{ ...mockPrompt, imageBlobs: ['not-a-data-url'] }]
+      }
+
+      const result = await manager.importData(dataWithInvalidImage)
+
+      expect(result.success).toBe(false)
+      expect(result.totalErrors).toBe(3)
+      expect(mockPromptService.createPrompt).not.toHaveBeenCalled()
+      expect(mockPromptService.createPromptVariableFromBackup).not.toHaveBeenCalled()
+      expect(mockPromptService.createPromptHistoryFromBackup).not.toHaveBeenCalled()
+    })
+
     it('base64 promptHistories.imageBlobs 被反序列化为 Blob', async () => {
       const dataWithBase64History = {
         ...makeExportData(),

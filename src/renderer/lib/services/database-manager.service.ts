@@ -283,14 +283,21 @@ export class DatabaseServiceManager {
    */
   private async deserializeImageBlobs(recordData: any): Promise<any> {
     if (!recordData.imageBlobs?.length) return recordData
+    if (!Array.isArray(recordData.imageBlobs)) {
+      throw new Error('图片数据格式无效，无法恢复完整数据')
+    }
+
     const blobs = (await Promise.all(
-      recordData.imageBlobs.map(async (item: any) => {
+      recordData.imageBlobs.map(async (item: any, index: number) => {
         if (typeof item === 'string' && item.startsWith('data:')) {
           return this.base64ToBlob(item)
         }
-        return item instanceof Blob ? item : null
+        if (item instanceof Blob) {
+          return item
+        }
+        throw new Error(`图片数据格式无效，无法恢复完整数据（第 ${index + 1} 张）`)
       })
-    )).filter(Boolean)
+    ))
     return { ...recordData, imageBlobs: blobs }
   }
 
