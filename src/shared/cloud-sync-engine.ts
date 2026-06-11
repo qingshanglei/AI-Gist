@@ -154,6 +154,8 @@ export function normalizeCloudSyncDataSet<TData extends CloudSyncDataSet>(data: 
     }
   }
 
+  validateSnapshotTombstonesOrThrow(normalized.syncTombstones || []);
+
   return normalized as TData;
 }
 
@@ -217,6 +219,37 @@ function validateCloudSyncDataSetShape(data: CloudSyncDataSet): CloudSyncSnapsho
 
     if (!Array.isArray(records)) {
       return { valid: false, reason: `snapshot data collection ${collection} must be an array` };
+    }
+  }
+
+  const tombstoneValidation = validateSnapshotTombstones(data.syncTombstones || []);
+  if (!tombstoneValidation.valid) {
+    return tombstoneValidation;
+  }
+
+  return { valid: true };
+}
+
+function validateSnapshotTombstonesOrThrow(tombstones: CloudSyncTombstone[]): void {
+  const validation = validateSnapshotTombstones(tombstones);
+  if (!validation.valid) {
+    throw new Error(validation.reason || '同步删除标记格式无效');
+  }
+}
+
+function validateSnapshotTombstones(tombstones: CloudSyncTombstone[]): CloudSyncSnapshotValidationResult {
+  for (const [index, tombstone] of tombstones.entries()) {
+    if (!isCloudSyncTombstone(tombstone)) {
+      return { valid: false, reason: `snapshot data syncTombstones[${index}] is invalid` };
+    }
+
+    const deletedAt = tombstone.deletedAt;
+    const deletedAtTime = new Date(deletedAt).getTime();
+    if (
+      !(typeof deletedAt === 'string' || deletedAt instanceof Date) ||
+      Number.isNaN(deletedAtTime)
+    ) {
+      return { valid: false, reason: `snapshot data syncTombstones[${index}] deletedAt is invalid` };
     }
   }
 

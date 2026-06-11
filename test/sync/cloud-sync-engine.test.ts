@@ -238,6 +238,35 @@ describe('cloud sync engine', () => {
     })
   })
 
+  it('rejects snapshots with invalid tombstones', () => {
+    expect(() => createCloudSyncSnapshot({
+      syncTombstones: [
+        {
+          collectionName: 'prompts',
+          recordKey: 'uuid:prompt-1',
+          deletedAt: 'not-a-date'
+        }
+      ]
+    }, 'device-a', 'rev-1')).toThrow('syncTombstones[0] deletedAt is invalid')
+
+    const snapshot = createCloudSyncSnapshot({
+      syncTombstones: [
+        {
+          collectionName: 'prompts',
+          recordKey: 'uuid:prompt-1',
+          deletedAt: '2026-01-02T00:00:00.000Z'
+        }
+      ]
+    }, 'device-a', 'rev-1')
+    delete (snapshot.data.syncTombstones as any[])[0].recordKey
+    snapshot.dataChecksum = createCloudSyncDataChecksum(snapshot.data)
+
+    expect(validateCloudSyncSnapshot(snapshot)).toMatchObject({
+      valid: false,
+      reason: 'snapshot data syncTombstones[0] is invalid'
+    })
+  })
+
   it('rejects snapshots when checksum does not match the data', () => {
     const snapshot = createCloudSyncSnapshot({
       prompts: [
