@@ -190,10 +190,13 @@ describe('DatabaseServiceManager', () => {
     mockAppSettingsService.getAllSettings.mockResolvedValue([mockSetting])
 
     mockCategoryService.createCategory.mockResolvedValue({ ...mockCategory, id: 10 })
+    mockCategoryService.upsertCategory.mockResolvedValue(undefined)
     mockPromptService.createPrompt.mockResolvedValue({ ...mockPrompt, id: 20 })
     mockPromptService.createPromptVariableFromBackup.mockResolvedValue({ ...mockPromptVariable, id: 30, promptId: 20 })
     mockPromptService.createPromptHistoryFromBackup.mockResolvedValue({ ...mockPromptHistory, id: 40, promptId: 20 })
+    mockPromptService.upsertPrompt.mockResolvedValue(undefined)
     mockAIConfigService.createAIConfig.mockResolvedValue({ ...mockAIConfig, id: 30 })
+    mockAIConfigService.upsertAIConfig.mockResolvedValue(undefined)
     mockQuickOptService.createQuickOptimizationConfigFromBackup.mockResolvedValue({ ...mockQuickOptimizationConfig, id: 50 })
     mockAIHistoryService.createAIGenerationHistory.mockResolvedValue({})
     mockAppSettingsService.updateSettingByKey.mockResolvedValue({})
@@ -483,6 +486,24 @@ describe('DatabaseServiceManager', () => {
       expect(result.success).toBe(false)
       expect(result.error).toContain('备份数据校验失败')
       expect(cleanSpy).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('syncImportData', () => {
+    it('legacy 同步导入任一 upsert 失败时返回失败', async () => {
+      mockPromptService.upsertPrompt.mockRejectedValueOnce(new Error('prompt upsert failed'))
+
+      const result = await manager.syncImportData({
+        categories: [mockCategory],
+        prompts: [mockPrompt],
+        aiConfigs: [mockAIConfig],
+        settings: [mockSetting]
+      })
+
+      expect(result.success).toBe(false)
+      expect(result.totalErrors).toBe(1)
+      expect(result.error).toContain('同步导入过程中有 1 条记录失败')
+      expect(result.errors?.[0]).toContain('prompt upsert failed')
     })
   })
 })

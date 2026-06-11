@@ -1314,19 +1314,26 @@ export class DatabaseServiceManager {
 
       // 等待所有 upsert 操作完成
       const results = await Promise.allSettled(allPromises);
+      const errors = results
+        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .map(result => result.reason instanceof Error ? result.reason.message : String(result.reason));
 
-      results.forEach(result => {
-        if (result.status === 'rejected') {
-          console.warn('同步导入项目失败:', result.reason);
-        }
-      });
+      errors.forEach(error => console.warn('同步导入项目失败:', error));
       
       console.log('渲染进程: 同步导入完成:', details);
+      const totalImported = Object.values(details).reduce((sum, count) => sum + count, 0);
+      const totalErrors = errors.length;
       
       return {
-        success: true,
-        message: '同步导入操作完成',
+        success: totalErrors === 0,
+        message: totalErrors === 0
+          ? `同步导入成功，共处理 ${totalImported} 条记录`
+          : `同步导入未完全完成，共处理 ${totalImported} 条记录，失败 ${totalErrors} 条`,
+        error: totalErrors > 0 ? `同步导入过程中有 ${totalErrors} 条记录失败` : undefined,
+        totalImported,
+        totalErrors,
         details,
+        errors: errors.length > 0 ? errors : undefined,
       };
       
     } catch (error) {
