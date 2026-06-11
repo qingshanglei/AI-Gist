@@ -105,7 +105,7 @@ export class MobileCloudBackupService {
       if (!value) return []
       return JSON.parse(value)
     } catch (error) {
-      console.error('获取存储配置失败:', error)
+      this.debugLog('获取存储配置失败:', error)
       throw new Error(`获取存储配置失败: ${error instanceof Error ? error.message : '未知错误'}`)
     }
   }
@@ -156,7 +156,7 @@ export class MobileCloudBackupService {
 
       return { success: true, config: newConfig }
     } catch (error) {
-      console.error('添加存储配置失败:', error)
+      this.debugLog('添加存储配置失败:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : '添加失败'
@@ -195,7 +195,7 @@ export class MobileCloudBackupService {
 
       return { success: true, config: updatedConfig }
     } catch (error) {
-      console.error('更新存储配置失败:', error)
+      this.debugLog('更新存储配置失败:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : '更新失败'
@@ -221,7 +221,7 @@ export class MobileCloudBackupService {
 
       return { success: true }
     } catch (error) {
-      console.error('删除存储配置失败:', error)
+      this.debugLog('删除存储配置失败:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : '删除失败'
@@ -245,7 +245,7 @@ export class MobileCloudBackupService {
 
       return { success: false, error: '不支持的存储类型' }
     } catch (error) {
-      console.error('测试连接失败:', error)
+      this.debugLog('测试连接失败:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : '测试失败'
@@ -289,7 +289,7 @@ export class MobileCloudBackupService {
         error: `连接失败: HTTP ${response.status}`
       }
     } catch (error) {
-      console.error('WebDAV 连接测试失败:', error)
+      this.debugLog('WebDAV 连接测试失败:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : '连接失败'
@@ -339,7 +339,7 @@ export class MobileCloudBackupService {
 
       return []
     } catch (error) {
-      console.error('获取备份列表失败:', error)
+      this.debugLog('获取备份列表失败:', error)
       throw error
     }
   }
@@ -414,7 +414,7 @@ export class MobileCloudBackupService {
       return this.dedupeBackups([...standardBackups, ...legacyBackups])
         .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     } catch (error) {
-      console.error('列出 WebDAV 备份失败:', error)
+      this.debugLog('列出 WebDAV 备份失败:', error)
       throw error
     }
   }
@@ -468,7 +468,7 @@ export class MobileCloudBackupService {
     }
 
     if (status !== 207) {
-      console.warn('WebDAV PROPFIND 失败，状态码:', status)
+      this.debugLog('WebDAV PROPFIND 失败，状态码:', status)
       return []
     }
 
@@ -522,10 +522,10 @@ export class MobileCloudBackupService {
             checksum
           })
         } else {
-          console.warn('读取备份文件失败，状态码:', fileResponse.status, file.name)
+          this.debugLog('读取备份文件失败，状态码:', fileResponse.status, file.name)
         }
       } catch (error) {
-        console.warn('解析备份文件失败:', file.name, error)
+        this.debugLog('解析备份文件失败:', file.name, error)
       }
     }
 
@@ -628,7 +628,7 @@ export class MobileCloudBackupService {
           })
           this.debugLog('iCloud 目录创建成功:', dirPath)
         } catch (error: any) {
-          console.error('创建 iCloud 目录失败:', error)
+          this.debugLog('创建 iCloud 目录失败:', error)
           // 如果创建失败，可能是权限问题或其他错误
           throw new Error(`无法创建 iCloud 目录: ${error.message || error}`)
         }
@@ -643,7 +643,7 @@ export class MobileCloudBackupService {
         })
         this.debugLog('读取 iCloud 目录成功，文件数量:', result.files.length)
       } catch (error: any) {
-        console.error('读取 iCloud 目录失败:', error)
+        this.debugLog('读取 iCloud 目录失败:', error)
         // 如果目录为空或刚创建，返回空数组
         return []
       }
@@ -673,7 +673,7 @@ export class MobileCloudBackupService {
               checksum: parsedBackup.checksum
             })
           } catch (error) {
-            console.warn('解析 iCloud 备份文件失败:', file.name, error)
+            this.debugLog('解析 iCloud 备份文件失败:', file.name, error)
           }
         }
       }
@@ -684,7 +684,7 @@ export class MobileCloudBackupService {
         new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
       )
     } catch (error) {
-      console.error('列出 iCloud 备份失败:', error)
+      this.debugLog('列出 iCloud 备份失败:', error)
       throw error
     }
   }
@@ -776,7 +776,7 @@ export class MobileCloudBackupService {
           baseUrlPath = baseUrlPath.slice(0, -1)
         }
       } catch (e) {
-        console.warn('解析 baseUrl 失败:', baseUrl)
+        this.debugLog('解析 baseUrl 失败:', baseUrl)
       }
 
       this.debugLog('baseUrl:', baseUrl)
@@ -844,7 +844,7 @@ export class MobileCloudBackupService {
             const hrefUrl = new URL(href)
             normalizedPath = hrefUrl.pathname
           } catch (e) {
-            console.warn('解析 href URL 失败:', href)
+            this.debugLog('解析 href URL 失败:', href)
           }
         }
 
@@ -906,7 +906,7 @@ export class MobileCloudBackupService {
 
       this.debugLog('解析到的文件数量:', files.length)
     } catch (error) {
-      console.error('解析 WebDAV 响应失败:', error)
+      this.debugLog('解析 WebDAV 响应失败:', error)
     }
 
     return files
@@ -961,7 +961,7 @@ export class MobileCloudBackupService {
         error: '不支持的存储类型'
       }
     } catch (error) {
-      console.error('创建云端备份失败:', error)
+      this.debugLog('创建云端备份失败:', error)
       return {
         success: false,
         message: '创建云端备份失败',
@@ -1031,7 +1031,7 @@ export class MobileCloudBackupService {
         error: uploadErrMsg
       }
     } catch (error) {
-      console.error('创建 WebDAV 备份失败:', error)
+      this.debugLog('创建 WebDAV 备份失败:', error)
       throw error
     }
   }
@@ -1080,7 +1080,7 @@ export class MobileCloudBackupService {
           })
           this.debugLog('iCloud 目录创建成功:', dirPath)
         } catch (error: any) {
-          console.error('创建 iCloud 目录失败:', error)
+          this.debugLog('创建 iCloud 目录失败:', error)
           return {
             success: false,
             message: '无法创建 iCloud 目录',
@@ -1114,7 +1114,7 @@ export class MobileCloudBackupService {
         backupInfo
       }
     } catch (error) {
-      console.error('创建 iCloud 备份失败:', error)
+      this.debugLog('创建 iCloud 备份失败:', error)
       return {
         success: false,
         message: '创建 iCloud 备份失败',
@@ -1151,7 +1151,7 @@ export class MobileCloudBackupService {
         error: '不支持的存储类型'
       }
     } catch (error) {
-      console.error('恢复云端备份失败:', error)
+      this.debugLog('恢复云端备份失败:', error)
       return {
         success: false,
         message: '恢复云端备份失败',
@@ -1223,7 +1223,7 @@ export class MobileCloudBackupService {
         data: backupData.data
       }
     } catch (error) {
-      console.error('恢复 WebDAV 备份失败:', error)
+      this.debugLog('恢复 WebDAV 备份失败:', error)
       throw error
     }
   }
@@ -1270,7 +1270,7 @@ export class MobileCloudBackupService {
         data: backupData.data
       }
     } catch (error) {
-      console.error('恢复 iCloud 备份失败:', error)
+      this.debugLog('恢复 iCloud 备份失败:', error)
       throw error
     }
   }
@@ -1299,7 +1299,7 @@ export class MobileCloudBackupService {
 
       return { success: false, error: '不支持的存储类型' }
     } catch (error) {
-      console.error('删除云端备份失败:', error)
+      this.debugLog('删除云端备份失败:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : '删除失败'
@@ -1353,7 +1353,7 @@ export class MobileCloudBackupService {
         error: deleteErrMsg
       }
     } catch (error) {
-      console.error('删除 WebDAV 备份失败:', error)
+      this.debugLog('删除 WebDAV 备份失败:', error)
       throw error
     }
   }
@@ -1394,7 +1394,7 @@ export class MobileCloudBackupService {
         message: '云端备份删除成功'
       }
     } catch (error) {
-      console.error('删除 iCloud 备份失败:', error)
+      this.debugLog('删除 iCloud 备份失败:', error)
       throw error
     }
   }

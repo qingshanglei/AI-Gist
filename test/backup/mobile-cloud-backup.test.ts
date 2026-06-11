@@ -303,6 +303,21 @@ describe('MobileCloudBackupService', () => {
       expect(result.error).toContain('认证')
     })
 
+    it('上传网络异常时返回错误且不重复写入 console.error', async () => {
+      await saveConfig(service)
+      mockCapacitorHttp.request.mockRejectedValue(new Error('network down'))
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+      try {
+        const result = await service.createCloudBackup('cfg-1', mockExportData)
+        expect(result.success).toBe(false)
+        expect(result.error).toContain('network down')
+        expect(errorSpy).not.toHaveBeenCalled()
+      } finally {
+        errorSpy.mockRestore()
+      }
+    })
+
     it('存储配置不存在时返回错误', async () => {
       const result = await service.createCloudBackup('nonexistent', mockExportData)
       expect(result.success).toBe(false)
