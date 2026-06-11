@@ -319,13 +319,49 @@ describe('MobileCloudBackupService', () => {
       mockCapacitorHttp.request
         .mockResolvedValueOnce({ status: 201, data: '' })
         .mockResolvedValueOnce({ status: 201, data: '' })
+        .mockResolvedValueOnce({ status: 201, data: '' })
 
       const result = await service.saveCloudSyncManifest('cfg-1', manifest)
 
       expect(result.success).toBe(true)
-      const putCall = mockCapacitorHttp.request.mock.calls.find((call: any[]) => call[0].method === 'PUT')![0]
-      expect(putCall.url).toContain('/AI-Gist-Backup/sync-manifest.json')
-      expect(JSON.parse(putCall.data).kind).toBe('ai-gist-cloud-sync-manifest')
+      const putCalls = mockCapacitorHttp.request.mock.calls
+        .map((call: any[]) => call[0])
+        .filter((call: any) => call.method === 'PUT')
+      expect(putCalls.map((call: any) => call.url)).toEqual([
+        'https://dav.example.com/backup/AI-Gist-Backup/sync-manifest.json',
+        'https://dav.example.com/backup/AI-Gist-Backup/sync-manifest.backup.json'
+      ])
+      expect(JSON.parse(putCalls[0].data).kind).toBe('ai-gist-cloud-sync-manifest')
+    })
+
+    it('WebDAV manifest 主文件损坏时读取备份副本', async () => {
+      await saveConfig(service)
+      const backupManifest = {
+        ...createEmptyCloudSyncManifest('2026-03-12T00:00:00.000Z'),
+        latestSnapshot: {
+          schemaVersion: 1 as const,
+          deviceId: 'ios-device',
+          revision: 'backup-rev',
+          createdAt: '2026-03-12T00:00:00.000Z',
+          data: mockExportData
+        }
+      }
+
+      mockCapacitorHttp.request
+        .mockResolvedValueOnce({ status: 200, data: '{"kind":' })
+        .mockResolvedValueOnce({ status: 200, data: JSON.stringify(backupManifest) })
+
+      const manifest = await service.getCloudSyncManifest('cfg-1')
+
+      expect(manifest.latestSnapshot?.revision).toBe('backup-rev')
+      const getUrls = mockCapacitorHttp.request.mock.calls
+        .map((call: any[]) => call[0])
+        .filter((call: any) => call.method === 'GET')
+        .map((call: any) => call.url)
+      expect(getUrls).toEqual([
+        'https://dav.example.com/backup/AI-Gist-Backup/sync-manifest.json',
+        'https://dav.example.com/backup/AI-Gist-Backup/sync-manifest.backup.json'
+      ])
     })
 
     it('iCloud manifest 使用配置目录下的 sync-manifest.json', async () => {
@@ -340,7 +376,10 @@ describe('MobileCloudBackupService', () => {
       const result = await service.saveCloudSyncManifest('cfg-icloud', manifest)
 
       expect(result.success).toBe(true)
-      expect((Filesystem.writeFile as any).mock.calls[0][0].path).toBe('AI-Gist-Backup/sync-manifest.json')
+      expect((Filesystem.writeFile as any).mock.calls.map((call: any[]) => call[0].path)).toEqual([
+        'AI-Gist-Backup/sync-manifest.json',
+        'AI-Gist-Backup/sync-manifest.backup.json'
+      ])
     })
   })
 

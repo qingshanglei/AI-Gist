@@ -14,9 +14,11 @@ import {
   ICloudConfig, 
   CloudBackupInfo, 
   CloudBackupResult, 
-  CloudRestoreResult 
+  CloudRestoreResult,
+  CloudStorageProvider
 } from '@shared/types/cloud-backup';
 import {
+  CLOUD_SYNC_MANIFEST_BACKUP_FILE,
   CLOUD_SYNC_MANIFEST_FILE,
   CLOUD_BACKUP_FILE_EXTENSION,
   CLOUD_BACKUP_FILE_PREFIX,
@@ -26,6 +28,7 @@ import {
 } from '@shared/cloud-backup-paths';
 import type { CloudSyncManifest } from '@shared/cloud-sync-manifest';
 import {
+  assertValidCloudSyncManifest,
   createEmptyCloudSyncManifest,
   normalizeCloudSyncManifest
 } from '@shared/cloud-sync-manifest';
@@ -735,15 +738,37 @@ export class CloudBackupManager {
     await this.loadConfigs();
     const config = this.getStorageConfig(storageId);
     const provider = this.createProvider(config);
+    const manifestPath = this.getSyncManifestCloudPath(config);
+    const backupPath = this.getSyncManifestBackupCloudPath(config);
 
     try {
-      const data = await provider.readFile(this.getSyncManifestCloudPath(config));
-      return normalizeCloudSyncManifest(JSON.parse(data.toString()));
+      return await this.readCloudSyncManifestFile(provider, manifestPath);
     } catch (error) {
       if (this.isNotFoundError(error)) {
         return createEmptyCloudSyncManifest();
       }
-      throw error;
+
+      console.warn('读取云同步 manifest 失败，尝试读取备份副本:', error);
+      try {
+        return await this.readCloudSyncManifestFile(provider, backupPath);
+      } catch (backupError) {
+        throw new Error(
+          `读取云同步 manifest 失败，且备份副本不可用: ${this.formatErrorMessage(error)}；` +
+          `备份副本错误: ${this.formatErrorMessage(backupError)}`
+        );
+      }
+    }
+  }
+
+  private async readCloudSyncManifestFile(
+    provider: CloudStorageProvider,
+    cloudPath: string
+  ): Promise<CloudSyncManifest> {
+    const data = await provider.readFile(cloudPath);
+    try {
+      return assertValidCloudSyncManifest(JSON.parse(Buffer.from(data).toString('utf-8')));
+    } catch (error) {
+      throw new Error(`云同步 manifest 内容无效（${cloudPath}）: ${this.formatErrorMessage(error)}`);
     }
   }
 
@@ -765,6 +790,10 @@ export class CloudBackupManager {
 
     await provider.writeFile(
       this.getSyncManifestCloudPath(config),
+      Buffer.from(JSON.stringify(normalizedManifest, null, 2), 'utf-8')
+    );
+    await provider.writeFile(
+      this.getSyncManifestBackupCloudPath(config),
       Buffer.from(JSON.stringify(normalizedManifest, null, 2), 'utf-8')
     );
   }
@@ -804,15 +833,19 @@ export class CloudBackupManager {
     }
   }
 
-  private getSyncManifestCloudPath(config: CloudStorageConfig): string {
+  private getSyncManifestCloudPath(config: CloudStorageConfig, fileName = CLOUD_SYNC_MANIFEST_FILE): string {
     switch (config.type) {
       case 'webdav':
-        return this.getWebDAVBackupPath(config as WebDAVConfig, CLOUD_SYNC_MANIFEST_FILE);
+        return this.getWebDAVBackupPath(config as WebDAVConfig, fileName);
       case 'icloud':
-        return CLOUD_SYNC_MANIFEST_FILE;
+        return fileName;
       default:
-        return CLOUD_SYNC_MANIFEST_FILE;
+        return fileName;
     }
+  }
+
+  private getSyncManifestBackupCloudPath(config: CloudStorageConfig): string {
+    return this.getSyncManifestCloudPath(config, CLOUD_SYNC_MANIFEST_BACKUP_FILE);
   }
 
   // ==================== 配置文件管理 ====================
@@ -898,5 +931,9 @@ export class CloudBackupManager {
   private isNotFoundError(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error);
     return /404|not\s*found|no such file|does not exist|ENOENT|不存在|未找到/i.test(message);
+  }
+
+  private formatErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
   }
 }

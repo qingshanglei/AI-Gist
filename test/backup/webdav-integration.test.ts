@@ -9,6 +9,8 @@
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest'
 import { JSDOM } from 'jsdom'
+import fsp from 'fs/promises'
+import path from 'path'
 import { TestWebDAVServer } from '../helpers/webdav-server'
 import { asyncTestHelpers, testDataGenerators } from '../helpers/test-utils'
 
@@ -668,6 +670,35 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
       expect(loaded.kind).toBe('ai-gist-cloud-sync-manifest')
       expect(loaded.latestSnapshot?.revision).toBe('rev-1')
       expect(loaded.latestSnapshot?.data.prompts).toHaveLength(1)
+    })
+
+    it('主 manifest 损坏时能从备份副本恢复读取', async () => {
+      const service = MobileCloudBackupService.getInstance()
+      await saveConfig(service)
+
+      const manifest = {
+        ...createEmptyCloudSyncManifest('2026-03-15T00:00:00.000Z'),
+        latestSnapshot: {
+          schemaVersion: 1 as const,
+          deviceId: 'ios-device',
+          revision: 'rev-backup',
+          createdAt: '2026-03-15T00:00:00.000Z',
+          data: mockExportData
+        }
+      }
+
+      const saveResult = await service.saveCloudSyncManifest('cfg-real', manifest)
+      expect(saveResult.success).toBe(true)
+      await fsp.writeFile(
+        path.join(server.rootDir, 'AI-Gist-Backup', 'sync-manifest.json'),
+        '{"kind":',
+        'utf-8'
+      )
+
+      const loaded = await service.getCloudSyncManifest('cfg-real')
+
+      expect(loaded.latestSnapshot?.revision).toBe('rev-backup')
+      expect(loaded.latestSnapshot?.data.promptVariables).toHaveLength(1)
     })
   })
 

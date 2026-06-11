@@ -2,7 +2,8 @@ import { describe, expect, it } from 'vitest'
 import {
   createCloudSyncSnapshot,
   getCloudSyncRecordKey,
-  mergeCloudSyncData
+  mergeCloudSyncData,
+  validateCloudSyncSnapshot
 } from '@shared/cloud-sync-engine'
 
 describe('cloud sync engine', () => {
@@ -190,6 +191,37 @@ describe('cloud sync engine', () => {
       revision: 'rev-1'
     })
     expect(data.aiConfigs[0].name).toBe('OpenAI')
+  })
+
+  it('adds a deterministic checksum to new snapshots', () => {
+    const left = createCloudSyncSnapshot({
+      prompts: [
+        { uuid: 'prompt-1', title: 'Prompt', updatedAt: '2026-01-01T00:00:00.000Z' }
+      ]
+    }, 'device-a', 'rev-1')
+    const right = createCloudSyncSnapshot({
+      prompts: [
+        { updatedAt: '2026-01-01T00:00:00.000Z', title: 'Prompt', uuid: 'prompt-1' }
+      ]
+    }, 'device-a', 'rev-1')
+
+    expect(left.dataChecksum).toMatch(/^fnv1a32:[0-9a-f]{8}$/)
+    expect(left.dataChecksum).toBe(right.dataChecksum)
+    expect(validateCloudSyncSnapshot(left).valid).toBe(true)
+  })
+
+  it('rejects snapshots when checksum does not match the data', () => {
+    const snapshot = createCloudSyncSnapshot({
+      prompts: [
+        { uuid: 'prompt-1', title: 'Before', updatedAt: '2026-01-01T00:00:00.000Z' }
+      ]
+    }, 'device-a', 'rev-1')
+    snapshot.data.prompts![0].title = 'After'
+
+    expect(validateCloudSyncSnapshot(snapshot)).toMatchObject({
+      valid: false,
+      reason: 'snapshot data checksum mismatch'
+    })
   })
 
   it('applies tombstones so deleted records do not come back from older remote data', () => {

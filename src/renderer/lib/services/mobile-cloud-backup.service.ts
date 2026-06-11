@@ -19,9 +19,11 @@ import type {
 } from '@shared/types/cloud-backup'
 import {
   CLOUD_BACKUP_DIR,
+  CLOUD_SYNC_MANIFEST_BACKUP_FILE,
   CLOUD_SYNC_MANIFEST_FILE,
   getCloudBackupDirectoryPath,
   getCloudBackupFilePath,
+  getCloudSyncManifestBackupPath,
   getCloudSyncManifestPath,
   isCloudBackupFileName,
   joinCloudPath,
@@ -29,6 +31,7 @@ import {
 } from '@shared/cloud-backup-paths'
 import type { CloudSyncManifest } from '@shared/cloud-sync-manifest'
 import {
+  assertValidCloudSyncManifest,
   createEmptyCloudSyncManifest,
   normalizeCloudSyncManifest
 } from '@shared/cloud-sync-manifest'
@@ -515,39 +518,61 @@ export class MobileCloudBackupService {
 
   private async getWebDAVSyncManifest(config: any): Promise<CloudSyncManifest> {
     try {
-      const response = await CapacitorHttp.request({
-        url: this.buildWebDAVUrlFromCloudPath(config, getCloudSyncManifestPath()),
-        method: 'GET',
-        headers: {
-          'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
-        }
-      })
-
-      if (response.status === 404) {
-        return createEmptyCloudSyncManifest()
-      }
-
-      if (response.status !== 200) {
-        throw new Error(`读取云同步 manifest 失败（HTTP ${response.status}）`)
-      }
-
-      const data = typeof response.data === 'string'
-        ? JSON.parse(response.data)
-        : response.data
-      return normalizeCloudSyncManifest(data)
+      return await this.readWebDAVSyncManifestFile(config, getCloudSyncManifestPath())
     } catch (error) {
       if (this.isNotFoundError(error)) {
         return createEmptyCloudSyncManifest()
       }
-      throw error
+
+      console.warn('读取云同步 manifest 失败，尝试读取备份副本:', error)
+      try {
+        return await this.readWebDAVSyncManifestFile(config, getCloudSyncManifestBackupPath())
+      } catch (backupError) {
+        throw new Error(
+          `读取云同步 manifest 失败，且备份副本不可用: ${this.formatErrorMessage(error)}；` +
+          `备份副本错误: ${this.formatErrorMessage(backupError)}`
+        )
+      }
     }
+  }
+
+  private async readWebDAVSyncManifestFile(config: any, cloudPath: string): Promise<CloudSyncManifest> {
+    const response = await CapacitorHttp.request({
+      url: this.buildWebDAVUrlFromCloudPath(config, cloudPath),
+      method: 'GET',
+      headers: {
+        'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
+      }
+    })
+
+    if (response.status === 404) {
+      throw new Error(`云同步 manifest 不存在（HTTP ${response.status}）`)
+    }
+
+    if (response.status !== 200) {
+      throw new Error(`读取云同步 manifest 失败（HTTP ${response.status}）`)
+    }
+
+    const data = typeof response.data === 'string'
+      ? JSON.parse(response.data)
+      : response.data
+    return assertValidCloudSyncManifest(data)
   }
 
   private async saveWebDAVSyncManifest(config: any, manifest: CloudSyncManifest): Promise<void> {
     await this.ensureWebDAVBackupDirectory(config)
 
+    await this.writeWebDAVSyncManifestFile(config, getCloudSyncManifestPath(), manifest)
+    await this.writeWebDAVSyncManifestFile(config, getCloudSyncManifestBackupPath(), manifest)
+  }
+
+  private async writeWebDAVSyncManifestFile(
+    config: any,
+    cloudPath: string,
+    manifest: CloudSyncManifest
+  ): Promise<void> {
     const response = await CapacitorHttp.request({
-      url: this.buildWebDAVUrlFromCloudPath(config, getCloudSyncManifestPath()),
+      url: this.buildWebDAVUrlFromCloudPath(config, cloudPath),
       method: 'PUT',
       headers: {
         'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`),
@@ -665,19 +690,32 @@ export class MobileCloudBackupService {
     await this.ensureICloudDirectory(dirPath)
 
     try {
-      const result = await Filesystem.readFile({
-        path: `${dirPath}/${CLOUD_SYNC_MANIFEST_FILE}`,
-        directory: Directory.Documents,
-        encoding: Encoding.UTF8
-      })
-
-      return normalizeCloudSyncManifest(JSON.parse(result.data as string))
+      return await this.readICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_FILE)
     } catch (error) {
       if (this.isNotFoundError(error)) {
         return createEmptyCloudSyncManifest()
       }
-      throw error
+
+      console.warn('读取 iCloud 同步 manifest 失败，尝试读取备份副本:', error)
+      try {
+        return await this.readICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_BACKUP_FILE)
+      } catch (backupError) {
+        throw new Error(
+          `读取 iCloud 同步 manifest 失败，且备份副本不可用: ${this.formatErrorMessage(error)}；` +
+          `备份副本错误: ${this.formatErrorMessage(backupError)}`
+        )
+      }
     }
+  }
+
+  private async readICloudSyncManifestFile(dirPath: string, fileName: string): Promise<CloudSyncManifest> {
+    const result = await Filesystem.readFile({
+      path: `${dirPath}/${fileName}`,
+      directory: Directory.Documents,
+      encoding: Encoding.UTF8
+    })
+
+    return assertValidCloudSyncManifest(JSON.parse(result.data as string))
   }
 
   private async saveICloudSyncManifest(config: any, manifest: CloudSyncManifest): Promise<void> {
@@ -689,8 +727,17 @@ export class MobileCloudBackupService {
     const dirPath = config.path || CLOUD_BACKUP_DIR
     await this.ensureICloudDirectory(dirPath)
 
+    await this.writeICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_FILE, manifest)
+    await this.writeICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_BACKUP_FILE, manifest)
+  }
+
+  private async writeICloudSyncManifestFile(
+    dirPath: string,
+    fileName: string,
+    manifest: CloudSyncManifest
+  ): Promise<void> {
     await Filesystem.writeFile({
-      path: `${dirPath}/${CLOUD_SYNC_MANIFEST_FILE}`,
+      path: `${dirPath}/${fileName}`,
       data: JSON.stringify(manifest, null, 2),
       directory: Directory.Documents,
       encoding: Encoding.UTF8
@@ -1447,6 +1494,10 @@ export class MobileCloudBackupService {
   private isNotFoundError(error: unknown): boolean {
     const message = error instanceof Error ? error.message : String(error)
     return /404|not\s*found|no such file|does not exist|不存在|未找到/i.test(message)
+  }
+
+  private formatErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
   }
 
   /**
