@@ -478,6 +478,9 @@ export class WebDAVProvider implements CloudStorageProvider {
     ].some(token => code.includes(token) || message.includes(token)) ||
       message.includes('TLS connection') ||
       message.includes('socket disconnected') ||
-      message.includes('socket hang up');
+      message.includes('socket hang up') ||
+      message.includes('超时') ||
+      message.toLowerCase().includes('timeout') ||
+      message.toLowerCase().includes('timed out');
   }
 }

@@ -526,12 +526,15 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
       ;(provider as any).client = { getFileContents }
       ;(provider as any).clientReady = Promise.resolve()
 
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
       await expect(provider.readFile('/slow.json')).rejects.toThrow('读取文件超时（5 毫秒）')
       expect(getFileContents).toHaveBeenCalledWith('/slow.json', expect.objectContaining({
         format: 'binary',
         signal: expect.any(AbortSignal),
       }))
       expect(abortSpy).toHaveBeenCalledTimes(1)
+      expect(errorSpy).not.toHaveBeenCalled()
+      errorSpy.mockRestore()
     })
   })
 
