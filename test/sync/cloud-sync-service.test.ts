@@ -371,6 +371,47 @@ describe('CloudSyncService', () => {
     }
   })
 
+  it('ignores local sync state when its revision does not match the base snapshot', async () => {
+    const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
+    const localData = {
+      ...baseData,
+      prompts: []
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(baseData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot: remoteSnapshot
+    }
+    const { service, cloudClient, database, storage } = createService(localData, manifest)
+    storage.setItem('ai_gist_cloud_sync_state:cfg-1', JSON.stringify({
+      storageId: 'cfg-1',
+      deviceId: 'device-a',
+      lastSyncAt: '2026-01-01T00:00:00.000Z',
+      lastKnownRevision: 'different-rev',
+      baseSnapshot
+    }))
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    try {
+      const result = await service.syncNow('cfg-1')
+
+      expect(result.success).toBe(true)
+      expect(result.action).toBe('downloaded')
+      expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
+      expect(database.replaceAllData).toHaveBeenCalledWith(expect.objectContaining({
+        prompts: [expect.objectContaining({ uuid: 'prompt-1' })]
+      }))
+      expect(warnSpy).toHaveBeenCalledWith(
+        '本地同步状态 revision 不一致，忽略本地 baseSnapshot:',
+        'different-rev',
+        'rev-base'
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
   it('persists an audit log when conflicts are automatically resolved', async () => {
     const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
     const localData = {

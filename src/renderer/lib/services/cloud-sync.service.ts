@@ -950,6 +950,18 @@ export class CloudSyncService {
         console.warn('本地同步状态已损坏，忽略本地 baseSnapshot:', validation.reason);
         return null;
       }
+
+      if (
+        typeof state.lastKnownRevision === 'string' &&
+        state.lastKnownRevision !== state.baseSnapshot.revision
+      ) {
+        console.warn(
+          '本地同步状态 revision 不一致，忽略本地 baseSnapshot:',
+          state.lastKnownRevision,
+          state.baseSnapshot.revision
+        );
+        return null;
+      }
     }
 
     return {
