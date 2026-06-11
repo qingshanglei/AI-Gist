@@ -188,6 +188,31 @@ describe('CloudSyncService', () => {
     expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain(result.remoteRevision)
   })
 
+  it('saves lightweight local sync state when base snapshot exceeds storage quota', async () => {
+    const storage = new MemoryStorage()
+    vi.spyOn(storage, 'setItem')
+      .mockImplementation((key: string, value: string) => {
+        if (key.startsWith('ai_gist_cloud_sync_state:') && value.includes('"baseSnapshot"')) {
+          throw new Error('QuotaExceededError')
+        }
+        MemoryStorage.prototype.setItem.call(storage, key, value)
+      })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { service } = createService(baseData, createEmptyCloudSyncManifest(), { storage })
+
+    try {
+      const result = await service.syncNow('cfg-1')
+
+      expect(result.success).toBe(true)
+      const savedState = JSON.parse(storage.getItem('ai_gist_cloud_sync_state:cfg-1')!)
+      expect(savedState.lastKnownRevision).toBe(result.remoteRevision)
+      expect(savedState.baseSnapshot).toBeUndefined()
+      expect(warnSpy).not.toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
   it('fails sync when a saved manifest cannot be read back with the same revision', async () => {
     const emptyManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
     const { service, cloudClient, storage } = createService(baseData, emptyManifest)

@@ -1037,19 +1037,40 @@ export class CloudSyncService {
       baseSnapshot: snapshot
     };
     const serializedState = JSON.stringify(state);
+    const firstError = this.trySaveLocalState(storageId, serializedState);
+    if (!firstError) {
+      return;
+    }
+
+    let lastError = firstError;
+    if (this.clearNoncriticalSyncStorageForRetry()) {
+      const retryError = this.trySaveLocalState(storageId, serializedState);
+      if (!retryError) {
+        return;
+      }
+      lastError = retryError;
+    }
+
+    const lightweightState: CloudSyncLocalState = {
+      storageId,
+      deviceId,
+      lastSyncAt,
+      lastKnownRevision: snapshot.revision
+    };
+    const lightweightError = this.trySaveLocalState(storageId, JSON.stringify(lightweightState));
+    if (!lightweightError) {
+      return;
+    }
+
+    console.warn('保存本地同步状态失败:', lightweightError || lastError);
+  }
+
+  private trySaveLocalState(storageId: string, serializedState: string): unknown | null {
     try {
       this.storage?.setItem(this.getLocalStateStorageKey(storageId), serializedState);
+      return null;
     } catch (error) {
-      if (this.clearNoncriticalSyncStorageForRetry()) {
-        try {
-          this.storage?.setItem(this.getLocalStateStorageKey(storageId), serializedState);
-          return;
-        } catch (retryError) {
-          console.warn('保存本地同步状态失败:', retryError);
-          return;
-        }
-      }
-      console.warn('保存本地同步状态失败:', error);
+      return error;
     }
   }
 
