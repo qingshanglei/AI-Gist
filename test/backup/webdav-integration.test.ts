@@ -423,7 +423,10 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
         updatedAt: new Date().toISOString(),
       })
 
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
       await expect(provider.testConnection()).resolves.toBe(false)
+      expect(errorSpy).not.toHaveBeenCalled()
+      errorSpy.mockRestore()
     })
 
     it('按 WebDAV 协议创建目录、上传、列出、读取和删除备份文件', async () => {

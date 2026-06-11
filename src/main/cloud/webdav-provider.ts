@@ -127,7 +127,7 @@ export class WebDAVProvider implements CloudStorageProvider {
 
       return Buffer.compare(remoteData, probeData) === 0;
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.CONNECTION_TEST_FAILED, error);
+      this.logOperationError(CONSTANTS.LOG_MESSAGES.CONNECTION_TEST_FAILED, error);
       return false;
     }
   }
@@ -468,31 +468,9 @@ export class WebDAVProvider implements CloudStorageProvider {
   }
 
   private logOperationError(message: string, error: unknown): void {
-    if (this.isTransientNetworkError(error)) {
+    if (!this.isDebugLoggingEnabled()) {
       return;
     }
-    console.error(message, error);
-  }
-
-  private isTransientNetworkError(error: unknown): boolean {
-    const code = typeof error === 'object' && error !== null && 'code' in error
-      ? String((error as { code?: string }).code || '')
-      : '';
-    const message = this.getErrorMessage(error);
-    return [
-      'ECONNRESET',
-      'ECONNREFUSED',
-      'ENOTFOUND',
-      'EAI_AGAIN',
-      'ETIMEDOUT',
-      'ENETUNREACH',
-      'EHOSTUNREACH'
-    ].some(token => code.includes(token) || message.includes(token)) ||
-      message.includes('TLS connection') ||
-      message.includes('socket disconnected') ||
-      message.includes('socket hang up') ||
-      message.includes('超时') ||
-      message.toLowerCase().includes('timeout') ||
-      message.toLowerCase().includes('timed out');
+    console.debug(message, error);
   }
 }
