@@ -121,6 +121,40 @@ describe('CloudSyncService', () => {
     expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain(savedManifest.latestSnapshot.revision)
   })
 
+  it('continues sync when noncritical local sync metadata cannot be stored', async () => {
+    const storage = new MemoryStorage()
+    const storageSetSpy = vi.spyOn(storage, 'setItem')
+      .mockImplementation((key: string, value: string) => {
+        if (
+          key === 'ai_gist_cloud_sync_last_auto_attempt_at' ||
+          key === 'ai_gist_cloud_sync_device_id'
+        ) {
+          throw new Error('QuotaExceededError')
+        }
+        MemoryStorage.prototype.setItem.call(storage, key, value)
+      })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), { storage })
+
+    try {
+      const result = await service.syncNow('cfg-1')
+
+      expect(result.success).toBe(true)
+      expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+      expect(storageSetSpy).toHaveBeenCalled()
+      expect(warnSpy).toHaveBeenCalledWith(
+        '保存云同步自动尝试时间失败:',
+        expect.any(Error)
+      )
+      expect(warnSpy).toHaveBeenCalledWith(
+        '保存云同步设备 ID 失败:',
+        expect.any(Error)
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
   it('fails sync when a saved manifest cannot be read back with the same revision', async () => {
     const emptyManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
     const { service, cloudClient, storage } = createService(baseData, emptyManifest)

@@ -880,8 +880,14 @@ export class CloudSyncService {
   }
 
   private getLastAutoAttemptTime(): number | null {
-    const rawValue = this.storage?.getItem(LAST_AUTO_ATTEMPT_STORAGE_KEY);
-    if (!rawValue) {
+    let rawValue: string | null | undefined;
+    try {
+      rawValue = this.storage?.getItem(LAST_AUTO_ATTEMPT_STORAGE_KEY);
+      if (!rawValue) {
+        return null;
+      }
+    } catch (error) {
+      console.warn('读取云同步自动尝试时间失败:', error);
       return null;
     }
 
@@ -890,7 +896,11 @@ export class CloudSyncService {
   }
 
   private saveLastAutoAttemptAt(isoTime: string): void {
-    this.storage?.setItem(LAST_AUTO_ATTEMPT_STORAGE_KEY, isoTime);
+    try {
+      this.storage?.setItem(LAST_AUTO_ATTEMPT_STORAGE_KEY, isoTime);
+    } catch (error) {
+      console.warn('保存云同步自动尝试时间失败:', error);
+    }
   }
 
   private updateStatus(update: Partial<CloudSyncStatus>): void {
@@ -911,13 +921,21 @@ export class CloudSyncService {
   }
 
   private getOrCreateDeviceId(): string {
-    const stored = this.storage?.getItem(DEVICE_ID_STORAGE_KEY);
-    if (stored) {
-      return stored;
+    try {
+      const stored = this.storage?.getItem(DEVICE_ID_STORAGE_KEY);
+      if (stored) {
+        return stored;
+      }
+    } catch (error) {
+      console.warn('读取云同步设备 ID 失败:', error);
     }
 
     const deviceId = this.createDeviceId();
-    this.storage?.setItem(DEVICE_ID_STORAGE_KEY, deviceId);
+    try {
+      this.storage?.setItem(DEVICE_ID_STORAGE_KEY, deviceId);
+    } catch (error) {
+      console.warn('保存云同步设备 ID 失败:', error);
+    }
     return deviceId;
   }
 
