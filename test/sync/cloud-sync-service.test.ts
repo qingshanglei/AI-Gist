@@ -54,9 +54,13 @@ function createService(
   extraDeps: CloudSyncServiceDeps = {}
 ) {
   const storage = new MemoryStorage()
+  let cloudManifest = manifest
   const cloudClient = {
-    getCloudSyncManifest: vi.fn().mockResolvedValue(manifest),
-    saveCloudSyncManifest: vi.fn().mockResolvedValue({ success: true })
+    getCloudSyncManifest: vi.fn().mockImplementation(async () => cloudManifest),
+    saveCloudSyncManifest: vi.fn().mockImplementation(async (_storageId: string, nextManifest: any) => {
+      cloudManifest = nextManifest
+      return { success: true }
+    })
   }
   const database = {
     exportAllDataForSync: vi.fn().mockResolvedValue({
@@ -112,6 +116,23 @@ describe('CloudSyncService', () => {
       platform: 'ios'
     })
     expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain(savedManifest.latestSnapshot.revision)
+  })
+
+  it('fails sync when a saved manifest cannot be read back with the same revision', async () => {
+    const emptyManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    const { service, cloudClient, storage } = createService(baseData, emptyManifest)
+    cloudClient.getCloudSyncManifest
+      .mockReset()
+      .mockResolvedValueOnce(emptyManifest)
+      .mockResolvedValueOnce(emptyManifest)
+      .mockResolvedValueOnce(emptyManifest)
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('云同步 manifest 保存后校验失败')
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toBeNull()
   })
 
   it('downloads and applies remote changes when local data matches the previous base', async () => {
@@ -247,6 +268,7 @@ describe('CloudSyncService', () => {
       .mockResolvedValueOnce(changedManifest)
       .mockResolvedValueOnce(changedManifest)
       .mockResolvedValueOnce(changedManifest)
+      .mockImplementation(async () => cloudClient.saveCloudSyncManifest.mock.calls[0]?.[1] || changedManifest)
 
     const result = await service.syncNow('cfg-1')
 
@@ -406,7 +428,7 @@ describe('CloudSyncService', () => {
   it('throttles automatic local-change syncs until the configured interval has elapsed', async () => {
     vi.useFakeTimers()
     let dataChangeListener: ((change: any) => void) | undefined
-    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+    const { service, cloudClient, database } = createService(baseData, createEmptyCloudSyncManifest(), {
       configClient: {
         getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
       },
@@ -423,6 +445,14 @@ describe('CloudSyncService', () => {
     })
     await service.syncNow('cfg-1')
     cloudClient.saveCloudSyncManifest.mockClear()
+    database.exportAllDataForSync.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      data: {
+        ...baseData,
+        prompts: [{ id: 1, uuid: 'prompt-1', title: 'Local throttled edit', updatedAt: '2026-01-03T00:00:00.000Z' }]
+      }
+    })
 
     dataChangeListener?.({
       storeName: 'prompts',

@@ -515,9 +515,23 @@ export class CloudSyncService {
   }
 
   private async saveManifest(storageId: string, manifest: CloudSyncManifest): Promise<void> {
-    const result = await this.getCloudClient().saveCloudSyncManifest(storageId, manifest);
+    const cloudClient = this.getCloudClient();
+    const result = await cloudClient.saveCloudSyncManifest(storageId, manifest);
     if (!result.success) {
       throw new Error(result.error || '保存云同步 manifest 失败');
+    }
+
+    const expectedRevision = manifest.latestSnapshot?.revision;
+    if (!expectedRevision) {
+      return;
+    }
+
+    const savedManifest = await cloudClient.getCloudSyncManifest(storageId);
+    const savedRevision = savedManifest.latestSnapshot?.revision;
+    if (savedRevision !== expectedRevision) {
+      throw new Error(
+        `云同步 manifest 保存后校验失败：期望 revision ${expectedRevision}，实际 ${savedRevision || '空'}`
+      );
     }
   }
 
