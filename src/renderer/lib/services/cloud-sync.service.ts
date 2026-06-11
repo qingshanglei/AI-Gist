@@ -1018,9 +1018,19 @@ export class CloudSyncService {
       lastKnownRevision: snapshot.revision,
       baseSnapshot: snapshot
     };
+    const serializedState = JSON.stringify(state);
     try {
-      this.storage?.setItem(this.getLocalStateStorageKey(storageId), JSON.stringify(state));
+      this.storage?.setItem(this.getLocalStateStorageKey(storageId), serializedState);
     } catch (error) {
+      if (this.clearNoncriticalSyncStorageForRetry()) {
+        try {
+          this.storage?.setItem(this.getLocalStateStorageKey(storageId), serializedState);
+          return;
+        } catch (retryError) {
+          console.warn('保存本地同步状态失败:', retryError);
+          return;
+        }
+      }
       console.warn('保存本地同步状态失败:', error);
     }
   }
@@ -1066,6 +1076,21 @@ export class CloudSyncService {
 
   private getLocalStateStorageKey(storageId: string): string {
     return `${LOCAL_STATE_STORAGE_PREFIX}:${storageId}`;
+  }
+
+  private clearNoncriticalSyncStorageForRetry(): boolean {
+    if (!this.storage) {
+      return false;
+    }
+
+    try {
+      this.storage.removeItem(CONFLICT_LOG_STORAGE_KEY);
+      this.updateStatus({ conflictLogCount: 0 });
+      return true;
+    } catch (error) {
+      console.warn('清理非关键同步缓存失败:', error);
+      return false;
+    }
   }
 }
 

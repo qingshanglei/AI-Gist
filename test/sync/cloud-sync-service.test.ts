@@ -160,6 +160,34 @@ describe('CloudSyncService', () => {
     }
   })
 
+  it('retries local sync state save after clearing noncritical sync cache', async () => {
+    const storage = new MemoryStorage()
+    storage.setItem('ai_gist_cloud_sync_conflict_log', JSON.stringify([{
+      id: 'entry-1',
+      storageId: 'cfg-1',
+      detectedAt: '2026-01-01T00:00:00.000Z',
+      conflicts: []
+    }]))
+    let stateSaveAttempts = 0
+    vi.spyOn(storage, 'setItem')
+      .mockImplementation((key: string, value: string) => {
+        if (key.startsWith('ai_gist_cloud_sync_state:') && stateSaveAttempts === 0) {
+          stateSaveAttempts += 1
+          throw new Error('QuotaExceededError')
+        }
+        MemoryStorage.prototype.setItem.call(storage, key, value)
+      })
+    const removeSpy = vi.spyOn(storage, 'removeItem')
+    const { service } = createService(baseData, createEmptyCloudSyncManifest(), { storage })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(removeSpy).toHaveBeenCalledWith('ai_gist_cloud_sync_conflict_log')
+    expect(storage.getItem('ai_gist_cloud_sync_conflict_log')).toBeNull()
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain(result.remoteRevision)
+  })
+
   it('fails sync when a saved manifest cannot be read back with the same revision', async () => {
     const emptyManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
     const { service, cloudClient, storage } = createService(baseData, emptyManifest)
