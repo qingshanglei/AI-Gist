@@ -172,6 +172,7 @@ export class CloudSyncService {
   private unsubscribeDataChanges: (() => void) | null = null;
   private scheduledTimer: ReturnType<typeof setTimeout> | null = null;
   private retryTimer: ReturnType<typeof setTimeout> | null = null;
+  private retryStorageId: string | undefined;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
   private browserTriggerCleanups: (() => void)[] = [];
   private applyingRemoteDataDepth = 0;
@@ -233,6 +234,7 @@ export class CloudSyncService {
         });
         if (result.success) {
           this.failureCount = 0;
+          this.clearRetryTimerForStorage(storageId);
         }
         return result;
       })
@@ -814,6 +816,7 @@ export class CloudSyncService {
     this.clearScheduledTimer();
     this.clearRetryTimer();
     this.failureCount += 1;
+    this.retryStorageId = storageId;
     this.updateStatus({
       status: 'error',
       pending: true,
@@ -826,6 +829,7 @@ export class CloudSyncService {
 
     this.retryTimer = setTimeout(() => {
       this.retryTimer = null;
+      this.retryStorageId = undefined;
       void this.runScheduledSync('retry', storageId);
     }, retryMs);
   }
@@ -862,6 +866,17 @@ export class CloudSyncService {
     if (this.retryTimer) {
       clearTimeout(this.retryTimer);
       this.retryTimer = null;
+    }
+    this.retryStorageId = undefined;
+  }
+
+  private clearRetryTimerForStorage(storageId: string): void {
+    if (!this.retryTimer) {
+      return;
+    }
+
+    if (!this.retryStorageId || this.retryStorageId === storageId) {
+      this.clearRetryTimer();
     }
   }
 
