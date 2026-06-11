@@ -78,9 +78,13 @@ const webdavConfig = {
 const mockExportData = {
   categories: [testDataGenerators.createMockCategory({ id: 1 })],
   prompts: [testDataGenerators.createMockPrompt({ id: 1, categoryId: 1 })],
+  promptVariables: [],
+  promptHistories: [],
   aiConfigs: [testDataGenerators.createMockAIConfig({ id: 1 })],
+  quickOptimizationConfigs: [],
   aiHistory: [],
   settings: [{ key: 'theme', value: 'dark', type: 'string', description: '' }],
+  syncTombstones: [],
 }
 
 // 桌面端备份文件格式（包含 .data 包装）

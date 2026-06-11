@@ -114,6 +114,7 @@ const mockExportData = {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   }],
+  promptHistories: [],
   aiConfigs:  [testDataGenerators.createMockAIConfig({ id: 1 })],
   quickOptimizationConfigs: [{
     id: 1,
@@ -128,6 +129,7 @@ const mockExportData = {
   }],
   aiHistory:  [],
   settings:   [{ key: 'theme', value: 'dark', type: 'string', description: '' }],
+  syncTombstones: [],
 }
 
 function makeBackupPayload(id = 'test-id-001') {

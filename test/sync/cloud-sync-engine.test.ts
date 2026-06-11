@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
+  createCloudSyncDataChecksum,
   createCloudSyncSnapshot,
   getCloudSyncRecordKey,
   mergeCloudSyncData,
@@ -199,6 +200,9 @@ describe('cloud sync engine', () => {
       deviceId: 'device-a',
       revision: 'rev-1'
     })
+    expect(snapshot.data.prompts).toEqual([])
+    expect(snapshot.data.promptHistories).toEqual([])
+    expect(snapshot.data.syncTombstones).toEqual([])
     expect(data.aiConfigs[0].name).toBe('OpenAI')
   })
 
@@ -217,6 +221,21 @@ describe('cloud sync engine', () => {
     expect(left.dataChecksum).toMatch(/^fnv1a32:[0-9a-f]{8}$/)
     expect(left.dataChecksum).toBe(right.dataChecksum)
     expect(validateCloudSyncSnapshot(left).valid).toBe(true)
+  })
+
+  it('rejects snapshots that are missing required sync collections', () => {
+    const snapshot = createCloudSyncSnapshot({
+      prompts: [
+        { uuid: 'prompt-1', title: 'Prompt', updatedAt: '2026-01-01T00:00:00.000Z' }
+      ]
+    }, 'device-a', 'rev-1')
+    delete snapshot.data.promptHistories
+    snapshot.dataChecksum = createCloudSyncDataChecksum(snapshot.data)
+
+    expect(validateCloudSyncSnapshot(snapshot)).toMatchObject({
+      valid: false,
+      reason: 'snapshot data missing collection promptHistories'
+    })
   })
 
   it('rejects snapshots when checksum does not match the data', () => {

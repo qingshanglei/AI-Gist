@@ -107,6 +107,11 @@ const DEFAULT_COLLECTIONS: CloudSyncCollectionName[] = [
   'settings'
 ];
 
+const REQUIRED_SNAPSHOT_COLLECTIONS = [
+  ...DEFAULT_COLLECTIONS,
+  'syncTombstones'
+];
+
 const IDENTITY_FIELDS: Record<string, string[]> = {
   categories: ['uuid', 'id'],
   prompts: ['uuid', 'id'],
@@ -124,7 +129,7 @@ export function createCloudSyncSnapshot(
   deviceId: string,
   revision = createRevision()
 ): CloudSyncSnapshot {
-  const snapshotData = cloneValue(data);
+  const snapshotData = normalizeCloudSyncDataSet(data);
   return {
     schemaVersion: 1,
     deviceId,
@@ -133,6 +138,23 @@ export function createCloudSyncSnapshot(
     data: snapshotData,
     dataChecksum: createCloudSyncDataChecksum(snapshotData)
   };
+}
+
+export function normalizeCloudSyncDataSet<TData extends CloudSyncDataSet>(data: TData): TData {
+  const normalized = cloneValue(data) as CloudSyncDataSet;
+
+  for (const collection of REQUIRED_SNAPSHOT_COLLECTIONS) {
+    const records = normalized[collection];
+    if (records !== undefined && !Array.isArray(records)) {
+      throw new Error(`同步快照数据表格式无效: ${collection}`);
+    }
+
+    if (records === undefined) {
+      normalized[collection] = [];
+    }
+  }
+
+  return normalized as TData;
 }
 
 export function createCloudSyncDataChecksum(data: CloudSyncDataSet): string {
@@ -165,6 +187,11 @@ export function validateCloudSyncSnapshot(value: unknown): CloudSyncSnapshotVali
     return { valid: false, reason: 'snapshot data must be an object' };
   }
 
+  const dataShapeValidation = validateCloudSyncDataSetShape(snapshot.data);
+  if (!dataShapeValidation.valid) {
+    return dataShapeValidation;
+  }
+
   if (snapshot.dataChecksum === undefined) {
     return { valid: true };
   }
@@ -176,6 +203,21 @@ export function validateCloudSyncSnapshot(value: unknown): CloudSyncSnapshotVali
   const actualChecksum = createCloudSyncDataChecksum(snapshot.data);
   if (snapshot.dataChecksum !== actualChecksum) {
     return { valid: false, reason: 'snapshot data checksum mismatch' };
+  }
+
+  return { valid: true };
+}
+
+function validateCloudSyncDataSetShape(data: CloudSyncDataSet): CloudSyncSnapshotValidationResult {
+  for (const collection of REQUIRED_SNAPSHOT_COLLECTIONS) {
+    const records = data[collection];
+    if (records === undefined) {
+      return { valid: false, reason: `snapshot data missing collection ${collection}` };
+    }
+
+    if (!Array.isArray(records)) {
+      return { valid: false, reason: `snapshot data collection ${collection} must be an array` };
+    }
   }
 
   return { valid: true };
