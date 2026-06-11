@@ -39,6 +39,7 @@ const CONSTANTS = {
     LIST_FILES_FAILED: 'iCloud Drive 列出文件失败',
     READ_FILE_FAILED: 'iCloud Drive 读取文件失败',
     WRITE_FILE_FAILED: 'iCloud Drive 写入文件失败',
+    WRITE_VERIFY_FAILED: 'iCloud Drive 写入后校验失败',
     DELETE_FILE_FAILED: 'iCloud Drive 删除文件失败',
     CREATE_DIRECTORY_FAILED: 'iCloud Drive 创建目录失败'
   },
@@ -386,13 +387,11 @@ export class ICloudProvider implements CloudStorageProvider {
       const fullPath = this.buildFullPath(basePath, filePath);
       const dirPath = path.dirname(fullPath);
       
-      // 确保目录存在（如果文件名包含路径）
-      if (dirPath !== this.buildFullPath(basePath)) {
-        await fs.mkdir(dirPath, { recursive: true });
-      }
+      await fs.mkdir(dirPath, { recursive: true });
       
       // 写入文件
       await fs.writeFile(fullPath, data);
+      await this.verifyLocalWrite(fullPath, data);
     } catch (error) {
       console.error(CONSTANTS.LOG_MESSAGES.WRITE_FILE_FAILED.replace('{error}', String(error)));
       throw new Error(this.handleFileOperationError('写入文件', error));
@@ -438,6 +437,26 @@ export class ICloudProvider implements CloudStorageProvider {
     } catch (error) {
       console.error(CONSTANTS.LOG_MESSAGES.CREATE_DIRECTORY_FAILED.replace('{error}', String(error)));
       throw new Error(this.handleFileOperationError('创建目录', error));
+    }
+  }
+
+  private async verifyLocalWrite(filePath: string, expectedData: Buffer): Promise<void> {
+    try {
+      const stats = await fs.stat(filePath);
+      if (!stats.isFile()) {
+        throw new Error('目标路径不是文件');
+      }
+
+      if (stats.size !== expectedData.length) {
+        throw new Error(`文件大小不一致，期望 ${expectedData.length}，实际 ${stats.size}`);
+      }
+
+      const writtenData = await fs.readFile(filePath);
+      if (Buffer.compare(writtenData, expectedData) !== 0) {
+        throw new Error('文件内容与写入数据不一致');
+      }
+    } catch (error) {
+      throw new Error(`${CONSTANTS.ERROR_MESSAGES.WRITE_VERIFY_FAILED}: ${this.handleFileOperationError('校验文件', error)}`);
     }
   }
 } 
