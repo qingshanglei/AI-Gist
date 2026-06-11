@@ -265,6 +265,26 @@ describe('CloudSyncService', () => {
     expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toBeNull()
   })
 
+  it('fails sync before merging when the remote snapshot checksum is invalid', async () => {
+    const remoteSnapshot = createCloudSyncSnapshot(baseData, 'device-b', 'rev-remote')
+    remoteSnapshot.data.prompts![0].title = 'Tampered remote data'
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot: remoteSnapshot
+    }
+    const { service, cloudClient, database, storage } = createService(baseData, manifest)
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('云端同步快照无效')
+    expect(result.error).toContain('snapshot data checksum mismatch')
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+    expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toBeNull()
+  })
+
   it('downloads and applies remote changes when local data matches the previous base', async () => {
     const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
     const remoteData = {

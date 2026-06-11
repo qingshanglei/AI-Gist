@@ -447,6 +447,9 @@ export class CloudSyncService {
       const manifest = await this.getCloudClient().getCloudSyncManifest(storageId);
       const localState = this.getLocalState(storageId);
       const remoteSnapshot = manifest.latestSnapshot;
+      if (remoteSnapshot) {
+        this.assertValidRemoteSnapshot(remoteSnapshot);
+      }
 
       if (!remoteSnapshot) {
         const latestManifest = await this.getCloudClient().getCloudSyncManifest(storageId);
@@ -624,9 +627,17 @@ export class CloudSyncService {
 
     const savedManifest = await cloudClient.getCloudSyncManifest(storageId);
     const savedSnapshot = savedManifest.latestSnapshot;
-    if (savedSnapshot?.revision !== expectedSnapshot.revision) {
+    if (!savedSnapshot) {
       throw new Error(
-        `云同步 manifest 保存后校验失败：期望 revision ${expectedSnapshot.revision}，实际 ${savedSnapshot?.revision || '空'}`
+        `云同步 manifest 保存后校验失败：期望 revision ${expectedSnapshot.revision}，实际 空`
+      );
+    }
+
+    this.assertValidSavedSnapshot(savedSnapshot);
+
+    if (savedSnapshot.revision !== expectedSnapshot.revision) {
+      throw new Error(
+        `云同步 manifest 保存后校验失败：期望 revision ${expectedSnapshot.revision}，实际 ${savedSnapshot.revision}`
       );
     }
 
@@ -651,6 +662,20 @@ export class CloudSyncService {
     }
 
     return {};
+  }
+
+  private assertValidRemoteSnapshot(snapshot: CloudSyncSnapshot): void {
+    const validation = validateCloudSyncSnapshot(snapshot);
+    if (!validation.valid) {
+      throw new Error(`云端同步快照无效: ${validation.reason || '未知原因'}`);
+    }
+  }
+
+  private assertValidSavedSnapshot(snapshot: CloudSyncSnapshot): void {
+    const validation = validateCloudSyncSnapshot(snapshot);
+    if (!validation.valid) {
+      throw new Error(`云同步 manifest 保存后数据校验失败：云端快照无效: ${validation.reason || '未知原因'}`);
+    }
   }
 
   private getCloudClient(): CloudSyncCloudClient {
