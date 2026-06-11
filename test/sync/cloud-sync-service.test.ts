@@ -463,6 +463,55 @@ describe('CloudSyncService', () => {
     expect(service.getStatus().conflictLogCount).toBe(0)
   })
 
+  it('does not fail sync when conflict audit log storage is unavailable', async () => {
+    const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
+    const localData = {
+      ...baseData,
+      prompts: [{ id: 1, uuid: 'prompt-1', title: 'Local edit', updatedAt: '2026-01-03T00:00:00.000Z' }]
+    }
+    const remoteData = {
+      ...baseData,
+      prompts: [{ id: 9, uuid: 'prompt-1', title: 'Remote edit', updatedAt: '2026-01-02T00:00:00.000Z' }]
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(remoteData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot
+    }
+    const storage = new MemoryStorage()
+    const storageSetSpy = vi.spyOn(storage, 'setItem')
+      .mockImplementation((key: string, value: string) => {
+        if (key === 'ai_gist_cloud_sync_conflict_log') {
+          throw new Error('QuotaExceededError')
+        }
+        MemoryStorage.prototype.setItem.call(storage, key, value)
+      })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { service } = createService(localData, manifest, { storage })
+    storage.setItem('ai_gist_cloud_sync_state:cfg-1', JSON.stringify({
+      storageId: 'cfg-1',
+      deviceId: 'device-a',
+      lastSyncAt: '2026-01-01T00:00:00.000Z',
+      lastKnownRevision: 'rev-base',
+      baseSnapshot
+    }))
+
+    try {
+      const result = await service.syncNow('cfg-1')
+
+      expect(result.success).toBe(true)
+      expect(result.conflicts).toHaveLength(1)
+      expect(warnSpy).toHaveBeenCalledWith(
+        '同步冲突审计记录保存失败:',
+        expect.any(Error)
+      )
+      expect(storageSetSpy).toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
   it('automatically syncs enabled storage after local data changes', async () => {
     vi.useFakeTimers()
     let dataChangeListener: ((change: any) => void) | undefined

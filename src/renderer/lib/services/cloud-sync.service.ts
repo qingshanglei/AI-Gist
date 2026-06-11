@@ -1020,8 +1020,12 @@ export class CloudSyncService {
 
     const entries = [entry, ...this.getConflictLog()]
       .slice(0, MAX_CONFLICT_LOG_ENTRIES);
-    this.storage.setItem(CONFLICT_LOG_STORAGE_KEY, JSON.stringify(entries));
-    this.updateStatus({ conflictLogCount: entries.length });
+    try {
+      this.storage.setItem(CONFLICT_LOG_STORAGE_KEY, JSON.stringify(entries));
+      this.updateStatus({ conflictLogCount: entries.length });
+    } catch (error) {
+      console.warn('同步冲突审计记录保存失败:', error);
+    }
   }
 
   private getLocalStateStorageKey(storageId: string): string {
