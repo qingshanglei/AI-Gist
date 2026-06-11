@@ -30,6 +30,8 @@ import { onDataChange } from './data-change-events';
 const DEVICE_ID_STORAGE_KEY = 'ai_gist_cloud_sync_device_id';
 const LOCAL_STATE_STORAGE_PREFIX = 'ai_gist_cloud_sync_state';
 const LAST_AUTO_ATTEMPT_STORAGE_KEY = 'ai_gist_cloud_sync_last_auto_attempt_at';
+const CONFLICT_LOG_STORAGE_KEY = 'ai_gist_cloud_sync_conflict_log';
+const MAX_CONFLICT_LOG_ENTRIES = 50;
 export const CLOUD_SYNC_INTERVAL_SETTING_KEY = 'cloud.sync.intervalMinutes';
 export const DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES = 15;
 export const MIN_CLOUD_SYNC_INTERVAL_MINUTES = 5;
@@ -109,6 +111,7 @@ export interface CloudSyncStatus {
   lastSyncAt?: string;
   lastAttemptAt?: string;
   failureCount?: number;
+  conflictLogCount?: number;
   lastResult?: CloudSyncResult;
   error?: string;
 }
@@ -129,6 +132,16 @@ export interface CloudSyncLocalState {
   lastSyncAt: string;
   lastKnownRevision?: string;
   baseSnapshot?: CloudSyncSnapshot;
+}
+
+export interface CloudSyncConflictLogEntry {
+  id: string;
+  storageId: string;
+  detectedAt: string;
+  localRevision?: string;
+  remoteRevision?: string;
+  resolvedRevision?: string;
+  conflicts: CloudSyncConflict[];
 }
 
 export interface CloudSyncServiceDeps {
@@ -176,6 +189,7 @@ export class CloudSyncService {
     this.storage = deps.storage || getBrowserStorage();
     this.createDeviceId = deps.createDeviceId || generateUUID;
     this.subscribeToDataChanges = deps.subscribeToDataChanges || (listener => onDataChange(SYNC_STORE_NAMES, listener));
+    this.status.conflictLogCount = this.getConflictLog().length;
   }
 
   static getInstance(): CloudSyncService {
@@ -356,6 +370,57 @@ export class CloudSyncService {
     };
   }
 
+  getConflictLog(storageId?: string): CloudSyncConflictLogEntry[] {
+    if (!this.storage) {
+      return [];
+    }
+
+    try {
+      const raw = this.storage.getItem(CONFLICT_LOG_STORAGE_KEY);
+      if (!raw) {
+        return [];
+      }
+
+      const entries = JSON.parse(raw);
+      if (!Array.isArray(entries)) {
+        return [];
+      }
+
+      const normalized = entries
+        .map(entry => normalizeConflictLogEntry(entry))
+        .filter((entry): entry is CloudSyncConflictLogEntry => !!entry);
+      return storageId
+        ? normalized.filter(entry => entry.storageId === storageId)
+        : normalized;
+    } catch {
+      return [];
+    }
+  }
+
+  clearConflictLog(storageId?: string): void {
+    if (!this.storage) {
+      return;
+    }
+
+    if (!storageId) {
+      this.storage.removeItem(CONFLICT_LOG_STORAGE_KEY);
+      this.updateStatus({ conflictLogCount: 0 });
+      return;
+    }
+
+    const remainingEntries = this.getConflictLog()
+      .filter(entry => entry.storageId !== storageId)
+      .slice(0, MAX_CONFLICT_LOG_ENTRIES);
+
+    if (remainingEntries.length === 0) {
+      this.storage.removeItem(CONFLICT_LOG_STORAGE_KEY);
+    } else {
+      this.storage.setItem(CONFLICT_LOG_STORAGE_KEY, JSON.stringify(remainingEntries));
+    }
+
+    this.updateStatus({ conflictLogCount: remainingEntries.length });
+  }
+
   private async performSync(
     storageId: string,
     options: CloudSyncOptions,
@@ -401,6 +466,12 @@ export class CloudSyncService {
       const mergedEqualsRemote = dataSetsEqual(remoteData, mergedData);
 
       if (mergedEqualsLocal && mergedEqualsRemote) {
+        this.recordConflictLog(storageId, mergeResult.conflicts, {
+          detectedAt: now,
+          localRevision: localState?.lastKnownRevision,
+          remoteRevision: remoteSnapshot.revision,
+          resolvedRevision: remoteSnapshot.revision
+        });
         this.saveLocalState(storageId, deviceId, remoteSnapshot, now);
         return {
           success: true,
@@ -444,6 +515,12 @@ export class CloudSyncService {
         appliedLocal = true;
       }
 
+      this.recordConflictLog(storageId, mergeResult.conflicts, {
+        detectedAt: now,
+        localRevision: localState?.lastKnownRevision,
+        remoteRevision: remoteSnapshot.revision,
+        resolvedRevision: finalSnapshot.revision
+      });
       this.saveLocalState(storageId, deviceId, finalSnapshot, now);
 
       return {
@@ -876,9 +953,74 @@ export class CloudSyncService {
     this.storage?.setItem(this.getLocalStateStorageKey(storageId), JSON.stringify(state));
   }
 
+  private recordConflictLog(
+    storageId: string,
+    conflicts: CloudSyncConflict[],
+    metadata: {
+      detectedAt: string;
+      localRevision?: string;
+      remoteRevision?: string;
+      resolvedRevision?: string;
+    }
+  ): void {
+    if (!this.storage || conflicts.length === 0) {
+      return;
+    }
+
+    const entry: CloudSyncConflictLogEntry = {
+      id: [
+        metadata.detectedAt,
+        storageId,
+        metadata.resolvedRevision || metadata.remoteRevision || 'unknown',
+        String(conflicts.length)
+      ].join(':'),
+      storageId,
+      detectedAt: metadata.detectedAt,
+      localRevision: metadata.localRevision,
+      remoteRevision: metadata.remoteRevision,
+      resolvedRevision: metadata.resolvedRevision,
+      conflicts: cloneConflictsForLog(conflicts)
+    };
+
+    const entries = [entry, ...this.getConflictLog()]
+      .slice(0, MAX_CONFLICT_LOG_ENTRIES);
+    this.storage.setItem(CONFLICT_LOG_STORAGE_KEY, JSON.stringify(entries));
+    this.updateStatus({ conflictLogCount: entries.length });
+  }
+
   private getLocalStateStorageKey(storageId: string): string {
     return `${LOCAL_STATE_STORAGE_PREFIX}:${storageId}`;
   }
+}
+
+function normalizeConflictLogEntry(value: unknown): CloudSyncConflictLogEntry | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const entry = value as Partial<CloudSyncConflictLogEntry>;
+  if (
+    typeof entry.id !== 'string' ||
+    typeof entry.storageId !== 'string' ||
+    typeof entry.detectedAt !== 'string' ||
+    !Array.isArray(entry.conflicts)
+  ) {
+    return null;
+  }
+
+  return {
+    id: entry.id,
+    storageId: entry.storageId,
+    detectedAt: entry.detectedAt,
+    localRevision: typeof entry.localRevision === 'string' ? entry.localRevision : undefined,
+    remoteRevision: typeof entry.remoteRevision === 'string' ? entry.remoteRevision : undefined,
+    resolvedRevision: typeof entry.resolvedRevision === 'string' ? entry.resolvedRevision : undefined,
+    conflicts: cloneConflictsForLog(entry.conflicts)
+  };
+}
+
+function cloneConflictsForLog(conflicts: CloudSyncConflict[]): CloudSyncConflict[] {
+  return JSON.parse(JSON.stringify(conflicts)) as CloudSyncConflict[];
 }
 
 function getBrowserStorage(): Pick<Storage, 'getItem' | 'setItem' | 'removeItem'> | undefined {

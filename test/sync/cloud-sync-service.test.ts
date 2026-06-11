@@ -333,6 +333,57 @@ describe('CloudSyncService', () => {
     }
   })
 
+  it('persists an audit log when conflicts are automatically resolved', async () => {
+    const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
+    const localData = {
+      ...baseData,
+      prompts: [{ id: 1, uuid: 'prompt-1', title: 'Local edit', updatedAt: '2026-01-03T00:00:00.000Z' }]
+    }
+    const remoteData = {
+      ...baseData,
+      prompts: [{ id: 9, uuid: 'prompt-1', title: 'Remote edit', updatedAt: '2026-01-02T00:00:00.000Z' }]
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(remoteData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot
+    }
+    const { service, storage } = createService(localData, manifest)
+    storage.setItem('ai_gist_cloud_sync_state:cfg-1', JSON.stringify({
+      storageId: 'cfg-1',
+      deviceId: 'device-a',
+      lastSyncAt: '2026-01-01T00:00:00.000Z',
+      lastKnownRevision: 'rev-base',
+      baseSnapshot
+    }))
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.conflicts).toHaveLength(1)
+
+    const conflictLog = service.getConflictLog('cfg-1')
+    expect(conflictLog).toHaveLength(1)
+    expect(conflictLog[0]).toMatchObject({
+      storageId: 'cfg-1',
+      localRevision: 'rev-base',
+      remoteRevision: 'rev-remote'
+    })
+    expect(conflictLog[0].resolvedRevision).toBe(result.remoteRevision)
+    expect(conflictLog[0].conflicts[0]).toMatchObject({
+      collection: 'prompts',
+      key: 'uuid:prompt-1',
+      reason: 'both_modified',
+      resolution: 'take-newer'
+    })
+    expect(service.getStatus().conflictLogCount).toBe(1)
+
+    service.clearConflictLog('cfg-1')
+    expect(service.getConflictLog('cfg-1')).toEqual([])
+    expect(service.getStatus().conflictLogCount).toBe(0)
+  })
+
   it('automatically syncs enabled storage after local data changes', async () => {
     vi.useFakeTimers()
     let dataChangeListener: ((change: any) => void) | undefined
