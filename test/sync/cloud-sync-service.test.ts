@@ -265,6 +265,52 @@ describe('CloudSyncService', () => {
     )
   })
 
+  it('ignores corrupted local base snapshots before merging', async () => {
+    const localData = {
+      ...baseData,
+      prompts: [{ id: 1, uuid: 'prompt-1', title: 'Local edit', updatedAt: '2026-01-03T00:00:00.000Z' }]
+    }
+    const remoteData = {
+      ...baseData,
+      prompts: [{ id: 9, uuid: 'prompt-1', title: 'Remote edit', updatedAt: '2026-01-02T00:00:00.000Z' }]
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(remoteData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot: remoteSnapshot
+    }
+    const { service, cloudClient, database, storage } = createService(localData, manifest)
+    const corruptBaseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
+    corruptBaseSnapshot.data = localData
+    storage.setItem('ai_gist_cloud_sync_state:cfg-1', JSON.stringify({
+      storageId: 'cfg-1',
+      deviceId: 'device-a',
+      lastSyncAt: '2026-01-01T00:00:00.000Z',
+      lastKnownRevision: 'rev-base',
+      baseSnapshot: corruptBaseSnapshot
+    }))
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    try {
+      const result = await service.syncNow('cfg-1')
+
+      expect(result.success).toBe(true)
+      expect(result.action).toBe('uploaded')
+      expect(database.replaceAllData).not.toHaveBeenCalled()
+      const savedManifest = cloudClient.saveCloudSyncManifest.mock.calls[0][1]
+      expect(savedManifest.latestSnapshot.data.prompts).toEqual([
+        expect.objectContaining({ title: 'Local edit' })
+      ])
+      expect(warnSpy).toHaveBeenCalledWith(
+        '本地同步状态已损坏，忽略本地 baseSnapshot:',
+        'snapshot data checksum mismatch'
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
   it('automatically syncs enabled storage after local data changes', async () => {
     vi.useFakeTimers()
     let dataChangeListener: ((change: any) => void) | undefined

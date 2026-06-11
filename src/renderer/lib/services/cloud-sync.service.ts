@@ -11,7 +11,8 @@ import type {
 import {
   applyCloudSyncTombstones,
   createCloudSyncSnapshot,
-  mergeCloudSyncData
+  mergeCloudSyncData,
+  validateCloudSyncSnapshot
 } from '@shared/cloud-sync-engine';
 import type { CloudSyncManifest } from '@shared/cloud-sync-manifest';
 import {
@@ -808,10 +809,41 @@ export class CloudSyncService {
   private getLocalState(storageId: string): CloudSyncLocalState | null {
     try {
       const raw = this.storage?.getItem(this.getLocalStateStorageKey(storageId));
-      return raw ? JSON.parse(raw) : null;
+      return raw ? this.normalizeLocalState(JSON.parse(raw), storageId) : null;
     } catch {
       return null;
     }
+  }
+
+  private normalizeLocalState(value: unknown, storageId: string): CloudSyncLocalState | null {
+    if (!value || typeof value !== 'object') {
+      return null;
+    }
+
+    const state = value as Partial<CloudSyncLocalState>;
+    if (
+      state.storageId !== storageId ||
+      typeof state.deviceId !== 'string' ||
+      typeof state.lastSyncAt !== 'string'
+    ) {
+      return null;
+    }
+
+    if (state.baseSnapshot !== undefined) {
+      const validation = validateCloudSyncSnapshot(state.baseSnapshot);
+      if (!validation.valid) {
+        console.warn('本地同步状态已损坏，忽略本地 baseSnapshot:', validation.reason);
+        return null;
+      }
+    }
+
+    return {
+      storageId: state.storageId,
+      deviceId: state.deviceId,
+      lastSyncAt: state.lastSyncAt,
+      lastKnownRevision: typeof state.lastKnownRevision === 'string' ? state.lastKnownRevision : undefined,
+      baseSnapshot: state.baseSnapshot
+    };
   }
 
   private saveLocalState(
