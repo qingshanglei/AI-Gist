@@ -648,10 +648,15 @@ export class DatabaseServiceManager {
       
       console.log('渲染进程: 数据导入完成', details);
       console.log('ID映射表:', idMapping);
+
+      const hasErrors = totalErrors > 0;
       
       return {
-        success: true,
-        message: `数据导入成功，共导入 ${totalImported} 条记录${totalErrors > 0 ? `，失败 ${totalErrors} 条` : ''}`,
+        success: !hasErrors,
+        message: hasErrors
+          ? `数据导入未完全完成，共处理 ${totalImported} 条记录，失败 ${totalErrors} 条`
+          : `数据导入成功，共导入 ${totalImported} 条记录`,
+        error: hasErrors ? `导入过程中有 ${totalErrors} 条记录失败` : undefined,
         totalImported,
         totalErrors,
         details,

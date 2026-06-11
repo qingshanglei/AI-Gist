@@ -343,6 +343,17 @@ describe('DatabaseServiceManager', () => {
       expect(result.success).toBe(false)
     })
 
+    it('任一记录导入失败时返回失败', async () => {
+      mockAppSettingsService.updateSettingByKey.mockRejectedValueOnce(new Error('settings import failed'))
+
+      const result = await manager.importData(makeExportData())
+
+      expect(result.success).toBe(false)
+      expect(result.totalErrors).toBe(1)
+      expect(result.error).toContain('导入过程中有 1 条记录失败')
+      expect(result.message).toContain('未完全完成')
+    })
+
     it('base64 imageBlobs 被反序列化为 Blob', async () => {
       const dataWithBase64 = {
         ...makeExportData(),
