@@ -94,7 +94,7 @@ export class ICloudProvider implements CloudStorageProvider {
     const platform = os.platform();
     const homedir = os.homedir();
     
-    console.log(CONSTANTS.LOG_MESSAGES.DETECTING_ICLOUD
+    this.debugLog(CONSTANTS.LOG_MESSAGES.DETECTING_ICLOUD
       .replace('{platform}', platform)
       .replace('{homedir}', homedir));
     
@@ -139,19 +139,19 @@ export class ICloudProvider implements CloudStorageProvider {
       const fsSync = await import('fs');
       
       for (const basePath of possiblePaths) {
-        console.log(CONSTANTS.LOG_MESSAGES.CHECKING_PATH.replace('{path}', basePath));
+        this.debugLog(CONSTANTS.LOG_MESSAGES.CHECKING_PATH.replace('{path}', basePath));
         
         if (fsSync.default.existsSync(basePath)) {
-          console.log(CONSTANTS.LOG_MESSAGES.PATH_EXISTS
+          this.debugLog(CONSTANTS.LOG_MESSAGES.PATH_EXISTS
             .replace('{platform}', 'macOS')
             .replace('{path}', basePath));
           return { available: true };
         } else {
-          console.log(CONSTANTS.LOG_MESSAGES.PATH_NOT_EXISTS.replace('{path}', basePath));
+          this.debugLog(CONSTANTS.LOG_MESSAGES.PATH_NOT_EXISTS.replace('{path}', basePath));
         }
       }
       
-      console.log(CONSTANTS.LOG_MESSAGES.MACOS_NOT_FOUND);
+      this.debugLog(CONSTANTS.LOG_MESSAGES.MACOS_NOT_FOUND);
       return { available: false, reason: CONSTANTS.ERROR_MESSAGES.MACOS_NOT_FOUND };
     } catch (error) {
       console.error(CONSTANTS.LOG_MESSAGES.DETECTION_FAILED
@@ -169,13 +169,13 @@ export class ICloudProvider implements CloudStorageProvider {
   private static async checkWindowsAvailability(homedir: string): Promise<{ available: boolean; reason?: string }> {
     const possiblePaths = CONSTANTS.ICLOUD_PATHS.WINDOWS.map(p => path.join(homedir, p));
     
-    console.log(CONSTANTS.LOG_MESSAGES.WINDOWS_PATHS.replace('{paths}', JSON.stringify(possiblePaths)));
+    this.debugLog(CONSTANTS.LOG_MESSAGES.WINDOWS_PATHS.replace('{paths}', JSON.stringify(possiblePaths)));
     
     for (const basePath of possiblePaths) {
       try {
         const fsSync = await import('fs');
         if (fsSync.default.existsSync(basePath)) {
-          console.log(CONSTANTS.LOG_MESSAGES.PATH_EXISTS
+          this.debugLog(CONSTANTS.LOG_MESSAGES.PATH_EXISTS
             .replace('{platform}', 'Windows')
             .replace('{path}', basePath));
           return { available: true };
@@ -188,7 +188,7 @@ export class ICloudProvider implements CloudStorageProvider {
       }
     }
     
-    console.log(CONSTANTS.LOG_MESSAGES.WINDOWS_NOT_FOUND);
+    this.debugLog(CONSTANTS.LOG_MESSAGES.WINDOWS_NOT_FOUND);
     return { available: false, reason: CONSTANTS.ERROR_MESSAGES.WINDOWS_NOT_FOUND };
   }
 
@@ -279,6 +279,22 @@ export class ICloudProvider implements CloudStorageProvider {
     return `${operation}失败: ${errorMessage}`;
   }
 
+  private static debugLog(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return;
+    }
+    console.debug(...args);
+  }
+
+  private static isDebugLoggingEnabled(): boolean {
+    return process.env.AI_GIST_DEBUG_CLOUD === '1' ||
+      (process.env.DEBUG || '').split(',').some(scope => scope.trim() === 'ai-gist:cloud');
+  }
+
+  private debugLog(...args: unknown[]): void {
+    ICloudProvider.debugLog(...args);
+  }
+
   // ==================== 公共方法 ====================
 
   /**
@@ -292,7 +308,7 @@ export class ICloudProvider implements CloudStorageProvider {
       
       // 确保目录存在
       await fs.mkdir(fullPath, { recursive: true });
-      console.log('iCloud Drive 目录初始化成功');
+      this.debugLog('iCloud Drive 目录初始化成功');
     } catch (error) {
       console.warn('iCloud Drive 目录初始化失败，可能目录已存在:', error);
       // 不抛出错误，因为目录可能已经存在
