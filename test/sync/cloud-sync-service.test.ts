@@ -5,7 +5,10 @@ import {
   type CloudSyncServiceDeps
 } from '~/lib/services/cloud-sync.service'
 import { emitDataChange } from '~/lib/services/data-change-events'
-import { createCloudSyncSnapshot } from '@shared/cloud-sync-engine'
+import {
+  createCloudSyncDataChecksum,
+  createCloudSyncSnapshot
+} from '@shared/cloud-sync-engine'
 import { createEmptyCloudSyncManifest } from '@shared/cloud-sync-manifest'
 
 class MemoryStorage {
@@ -132,6 +135,41 @@ describe('CloudSyncService', () => {
     expect(result.success).toBe(false)
     expect(result.error).toContain('云同步 manifest 保存后校验失败')
     expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toBeNull()
+  })
+
+  it('fails sync when a saved manifest reads back the same revision with different data', async () => {
+    const emptyManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    const { service, cloudClient, storage } = createService(baseData, emptyManifest)
+    let corruptedSavedManifest: any = emptyManifest
+
+    cloudClient.getCloudSyncManifest
+      .mockReset()
+      .mockResolvedValueOnce(emptyManifest)
+      .mockResolvedValueOnce(emptyManifest)
+      .mockImplementation(async () => corruptedSavedManifest)
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (_storageId: string, manifest: any) => {
+      const corruptedData = {
+        ...manifest.latestSnapshot.data,
+        prompts: [
+          { ...manifest.latestSnapshot.data.prompts[0], title: 'Corrupted cloud copy' }
+        ]
+      }
+      corruptedSavedManifest = {
+        ...manifest,
+        latestSnapshot: {
+          ...manifest.latestSnapshot,
+          data: corruptedData,
+          dataChecksum: createCloudSyncDataChecksum(corruptedData)
+        }
+      }
+      return { success: true }
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('云同步 manifest 保存后数据校验失败')
     expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toBeNull()
   })
 

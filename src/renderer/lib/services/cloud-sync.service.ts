@@ -598,17 +598,31 @@ export class CloudSyncService {
       throw new Error(result.error || '保存云同步 manifest 失败');
     }
 
-    const expectedRevision = manifest.latestSnapshot?.revision;
-    if (!expectedRevision) {
+    const expectedSnapshot = manifest.latestSnapshot;
+    if (!expectedSnapshot) {
       return;
     }
 
     const savedManifest = await cloudClient.getCloudSyncManifest(storageId);
-    const savedRevision = savedManifest.latestSnapshot?.revision;
-    if (savedRevision !== expectedRevision) {
+    const savedSnapshot = savedManifest.latestSnapshot;
+    if (savedSnapshot?.revision !== expectedSnapshot.revision) {
       throw new Error(
-        `云同步 manifest 保存后校验失败：期望 revision ${expectedRevision}，实际 ${savedRevision || '空'}`
+        `云同步 manifest 保存后校验失败：期望 revision ${expectedSnapshot.revision}，实际 ${savedSnapshot?.revision || '空'}`
       );
+    }
+
+    if (
+      expectedSnapshot.dataChecksum &&
+      savedSnapshot.dataChecksum !== expectedSnapshot.dataChecksum
+    ) {
+      throw new Error(
+        `云同步 manifest 保存后数据校验失败：期望 checksum ${expectedSnapshot.dataChecksum}，` +
+        `实际 ${savedSnapshot.dataChecksum || '空'}`
+      );
+    }
+
+    if (!dataSetsEqual(savedSnapshot.data, expectedSnapshot.data)) {
+      throw new Error('云同步 manifest 保存后数据校验失败：云端快照内容与本地提交不一致');
     }
   }
 
