@@ -18,6 +18,18 @@ import { generateUUID } from '../utils/uuid';
 import { emitDataChange } from './data-change-events';
 import { unwrapBackupData } from '@shared/backup-integrity';
 
+const SYNCABLE_DATA_STORES = [
+  'categories',
+  'prompts',
+  'promptVariables',
+  'promptHistories',
+  'ai_configs',
+  'quick_optimization_configs',
+  'ai_generation_history',
+  'settings',
+  'syncTombstones'
+];
+
 /**
  * 统一的数据库服务管理类
  * 提供对所有数据库服务的统一访问接口和高级管理功能
@@ -100,21 +112,9 @@ export class DatabaseServiceManager {
    * @returns Promise<{ healthy: boolean; missingStores: string[] }> 健康状态信息
    */
   async getHealthStatus(): Promise<{ healthy: boolean; missingStores: string[] }> {
-    const requiredStores = [
-      'categories',
-      'prompts',
-      'promptVariables',
-      'promptHistories',
-      'ai_configs',
-      'ai_generation_history',
-      'settings',
-      'quick_optimization_configs',
-      'syncTombstones'
-    ];
-
     const missingStores: string[] = [];
 
-    for (const storeName of requiredStores) {
+    for (const storeName of SYNCABLE_DATA_STORES) {
       const exists = await this.category.checkObjectStoreExists(storeName);
       if (!exists) {
         missingStores.push(storeName);
@@ -972,9 +972,7 @@ export class DatabaseServiceManager {
         throw new Error('无法获取数据库连接');
       }
       
-      const tableNames = ['categories', 'prompts', 'promptVariables', 'promptHistories', 'ai_configs', 'ai_generation_history', 'settings', 'syncTombstones'];
-      
-      for (const tableName of tableNames) {
+      for (const tableName of SYNCABLE_DATA_STORES) {
         if (db.objectStoreNames.contains(tableName)) {
           const transaction = db.transaction([tableName], 'readwrite');
           const store = transaction.objectStore(tableName);

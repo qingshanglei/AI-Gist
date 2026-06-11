@@ -385,6 +385,15 @@ describe('DatabaseServiceManager', () => {
   // ---- replaceAllData ----
 
   describe('replaceAllData', () => {
+    it('完全替换前会清空快速优化配置表，避免旧配置残留', async () => {
+      const clearedStores: string[] = []
+      mockCategoryService.db = createMockDbForClearing(clearedStores)
+
+      await manager.forceCleanAllTables()
+
+      expect(clearedStores).toContain('quick_optimization_configs')
+    })
+
     it('先清空再恢复数据', async () => {
       // mock forceCleanAllTables
       const cleanSpy = vi.spyOn(manager, 'forceCleanAllTables').mockResolvedValue()
@@ -482,4 +491,24 @@ function createSuccessfulRequest() {
   const request: any = {}
   setTimeout(() => request.onsuccess?.(), 0)
   return request
+}
+
+function createMockDbForClearing(clearedStores: string[]) {
+  return {
+    objectStoreNames: {
+      contains: vi.fn(() => true)
+    },
+    transaction: vi.fn((stores: string[]) => {
+      const [storeName] = stores
+      return {
+        objectStore: vi.fn(() => ({
+          clear: vi.fn(() => {
+            clearedStores.push(storeName)
+            return createSuccessfulRequest()
+          })
+        }))
+      }
+    }),
+    version: 1
+  }
 }
