@@ -14,6 +14,7 @@ import {
   createCloudSyncSnapshot,
   mergeCloudSyncData,
   normalizeCloudSyncDataSet,
+  validateCloudSyncDataSetShape,
   validateCloudSyncSnapshot
 } from '@shared/cloud-sync-engine';
 import type {
@@ -668,6 +669,12 @@ export class CloudSyncService {
     if (!exportResult.success || !exportResult.data) {
       throw new Error(exportResult.error || exportResult.message || '导出同步数据失败');
     }
+
+    const validation = validateCloudSyncDataSetShape(exportResult.data);
+    if (!validation.valid) {
+      throw new Error(`本机同步数据导出不完整，已取消本次云同步: ${validation.reason || '未知原因'}`);
+    }
+
     return normalizeCloudSyncDataSet(applyCloudSyncTombstones(exportResult.data));
   }
 

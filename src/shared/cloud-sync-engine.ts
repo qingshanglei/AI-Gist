@@ -237,7 +237,7 @@ export function validateCloudSyncSnapshot(value: unknown): CloudSyncSnapshotVali
   return { valid: true };
 }
 
-function validateCloudSyncDataSetShape(data: CloudSyncDataSet): CloudSyncSnapshotValidationResult {
+export function validateCloudSyncDataSetShape(data: CloudSyncDataSet): CloudSyncSnapshotValidationResult {
   for (const collection of REQUIRED_SNAPSHOT_COLLECTIONS) {
     const records = data[collection];
     if (records === undefined) {

@@ -576,6 +576,54 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     ]))
   })
 
+  it('本机导出缺少历史表时不会上传部分数据覆盖云端', async () => {
+    const storageId = 'robust-local-partial-export-rejected'
+    const client = createWebDAVSyncClient(storageId)
+    const completeData = createRealisticDataSet()
+    const deviceADatabase = new MutableSyncDatabase(completeData)
+    const deviceA = createSyncService(client, deviceADatabase, new MemoryStorage(), 'device-a')
+
+    const firstUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(firstUpload).toMatchObject({ success: true, action: 'uploaded' })
+    const manifestBeforePartialExport = await client.getCloudSyncManifest(storageId)
+    const snapshotsBeforePartialExport = await client.listCloudSyncSnapshots(storageId)
+    expect(manifestBeforePartialExport.latestSnapshot?.data.promptHistories)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ uuid: 'real-history-initial' })
+      ]))
+
+    const partialData = cloneData(completeData) as any
+    delete partialData.promptHistories
+    const brokenDeviceDatabase = new MutableSyncDatabase(emptyDataSet())
+    brokenDeviceDatabase.data = partialData
+    const brokenDevice = createSyncService(client, brokenDeviceDatabase, new MemoryStorage(), 'device-broken')
+
+    const result = await brokenDevice.syncNow(storageId, {
+      deviceName: 'Broken Export Device',
+      platform: 'web',
+      reason: 'manual'
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('本机同步数据导出不完整')
+    expect(result.error).toContain('snapshot data missing collection promptHistories')
+    expect(brokenDeviceDatabase.replaceAllData).not.toHaveBeenCalled()
+
+    const manifestAfterPartialExport = await client.getCloudSyncManifest(storageId)
+    const snapshotsAfterPartialExport = await client.listCloudSyncSnapshots(storageId)
+    expect(manifestAfterPartialExport.latestSnapshot?.revision)
+      .toBe(manifestBeforePartialExport.latestSnapshot?.revision)
+    expect(snapshotsAfterPartialExport).toHaveLength(snapshotsBeforePartialExport.length)
+    expect(manifestAfterPartialExport.latestSnapshot?.data.promptHistories)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ uuid: 'real-history-initial' })
+      ]))
+  })
+
   it('保存 manifest 前另一端抢先更新时会自动重读并合并后成功', async () => {
     const storageId = 'robust-remote-changes-during-save'
     const baseClient = createWebDAVSyncClient(storageId)

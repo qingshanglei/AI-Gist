@@ -130,6 +130,20 @@ describe('CloudSyncService', () => {
     expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain(savedManifest.latestSnapshot.revision)
   })
 
+  it('fails before upload when the local sync export is missing a required collection', async () => {
+    const incompleteLocalData = { ...baseData }
+    delete (incompleteLocalData as any).promptHistories
+    const { service, cloudClient, database } = createService(incompleteLocalData)
+
+    const result = await service.syncNow('cfg-1', { reason: 'manual' })
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('本机同步数据导出不完整')
+    expect(result.error).toContain('snapshot data missing collection promptHistories')
+    expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+  })
+
   it('does not create new revisions on repeated manual sync when local data only differs by JSON shape', async () => {
     const localDataWithJsonDrift = {
       ...baseData,
