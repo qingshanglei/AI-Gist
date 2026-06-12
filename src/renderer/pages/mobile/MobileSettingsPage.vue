@@ -114,6 +114,7 @@ import { Filesystem, Directory, Encoding } from '@capacitor/filesystem'
 import { Share } from '@capacitor/share'
 import { databaseService } from '~/lib/db'
 import { presentMobileToast } from '~/lib/utils/mobile-toast'
+import { createBackupPayload } from '@shared/backup-integrity'
 
 const router = useRouter()
 const { t, currentLocale, switchLocale } = useI18n()
@@ -122,6 +123,14 @@ const { themeSource } = useTheme()
 const currentLanguage = ref(currentLocale.value)
 const currentTheme = ref(themeSource.value || 'system')
 const appVersion = ref(typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '')
+
+const createBackupId = () => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
 
 // 语言切换
 const handleLanguageChange = (event: any) => {
@@ -198,16 +207,24 @@ const performExport = async () => {
   try {
     await loading.present()
 
-    // 从数据库导出所有数据
-    const result = await databaseService.exportAllData()
+    // 从数据库导出完整备份数据，确保图片等二进制元数据被序列化
+    const result = await databaseService.exportAllDataForBackup()
 
-    if (!result || !result.success) {
-      throw new Error('导出数据失败')
+    if (!result || !result.success || !result.data) {
+      throw new Error(result?.error || result?.message || '导出数据失败')
     }
 
-    // 直接导出数据，与桌面端格式保持一致
-    const jsonString = JSON.stringify(result.data, null, 2)
-    const fileName = `ai-gist-backup-${new Date().toISOString().split('T')[0]}.json`
+    const createdAt = new Date().toISOString()
+    const backupId = createBackupId()
+    const backupPayload = createBackupPayload({
+      id: backupId,
+      name: `ai-gist-backup-${createdAt.split('T')[0]}-${backupId.slice(0, 8)}`,
+      description: t('dataManagement.exportFullBackup'),
+      createdAt,
+      data: result.data
+    })
+    const jsonString = JSON.stringify(backupPayload, null, 2)
+    const fileName = `${backupPayload.name}.json`
 
     // 保存到文件系统
     const savedFile = await Filesystem.writeFile({

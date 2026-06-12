@@ -68,6 +68,7 @@ vi.mock('@capacitor/core', () => ({
 
 import { MobileCloudBackupService } from '~/lib/services/mobile-cloud-backup.service'
 import { WebCloudBackupService } from '~/lib/services/web-cloud-backup.service'
+import { DatabaseServiceManager } from '~/lib/services/database-manager.service'
 import { WebDAVProvider } from '../../src/main/cloud/webdav-provider'
 import { CloudSyncService } from '~/lib/services/cloud-sync.service'
 import { CapacitorHttp } from '@capacitor/core'
@@ -92,6 +93,7 @@ import {
   assertValidCloudSyncSnapshotFile,
   createCloudSyncSnapshotFile
 } from '@shared/cloud-sync-snapshots'
+import { parseBackupPayload } from '@shared/backup-integrity'
 
 const mockHttp = CapacitorHttp as unknown as { request: ReturnType<typeof vi.fn> }
 
@@ -395,6 +397,115 @@ const mockExportData = {
   aiHistory:  [],
   settings:   [{ key: 'theme', value: 'dark', type: 'string', description: '' }],
   syncTombstones: [],
+}
+
+function createRealisticBackupData(version: 'initial' | 'updated') {
+  const initialImage = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lZ2nNwAAAABJRU5ErkJggg=='
+  const updatedImage = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADUlEQVR42mP8z8BQDwAFgwJ/lZ2nNwAAAABJRU5ErkJggg=='
+  const updated = version === 'updated'
+  const baseTime = updated ? '2026-06-13T10:20:00.000Z' : '2026-06-13T10:00:00.000Z'
+  const category = {
+    ...testDataGenerators.createMockCategory({
+      id: 11,
+      uuid: 'real-category-product',
+      name: updated ? '真实项目资料-更新' : '真实项目资料'
+    }),
+    updatedAt: baseTime
+  }
+  const variable = {
+    id: 21,
+    uuid: 'real-variable-tone',
+    promptId: 31,
+    name: 'tone',
+    type: 'select',
+    defaultValue: updated ? 'precise' : 'friendly',
+    options: ['friendly', 'precise'],
+    required: true,
+    createdAt: '2026-06-13T09:00:00.000Z',
+    updatedAt: baseTime
+  }
+  const prompt = {
+    ...testDataGenerators.createMockPrompt({
+      id: 31,
+      uuid: 'real-prompt-launch',
+      categoryId: 11,
+      title: updated ? '发布计划提示词 - 更新版' : '发布计划提示词'
+    }),
+    content: updated ? '请用 {{tone}} 语气生成更新版发布计划' : '请用 {{tone}} 语气生成发布计划',
+    category,
+    variables: [variable],
+    tags: ['release', 'webdav', updated ? 'updated' : 'initial'],
+    imageBlobs: updated ? [initialImage, updatedImage] : [initialImage],
+    createdAt: '2026-06-13T09:00:00.000Z',
+    updatedAt: baseTime
+  }
+  const histories = [
+    {
+      id: 41,
+      uuid: 'real-history-initial',
+      promptId: 31,
+      promptUuid: 'real-prompt-launch',
+      content: '第一次生成发布计划',
+      result: 'Initial launch plan',
+      imageBlobs: [initialImage],
+      createdAt: '2026-06-13T10:01:00.000Z',
+      updatedAt: '2026-06-13T10:01:00.000Z'
+    }
+  ]
+
+  if (updated) {
+    histories.push({
+      id: 42,
+      uuid: 'real-history-updated',
+      promptId: 31,
+      promptUuid: 'real-prompt-launch',
+      content: '更新后再次生成发布计划',
+      result: 'Updated launch plan',
+      imageBlobs: [updatedImage],
+      createdAt: '2026-06-13T10:21:00.000Z',
+      updatedAt: '2026-06-13T10:21:00.000Z'
+    })
+  }
+
+  return {
+    categories: [category],
+    prompts: [prompt],
+    promptVariables: [variable],
+    promptHistories: histories,
+    aiConfigs: [
+      {
+        ...testDataGenerators.createMockAIConfig({ id: 51 }),
+        uuid: 'real-ai-config',
+        name: updated ? 'Claude Sonnet 更新' : 'Claude Sonnet',
+        updatedAt: baseTime
+      }
+    ],
+    quickOptimizationConfigs: [{
+      id: 61,
+      uuid: 'real-quick-optimization',
+      name: '压缩摘要',
+      description: '保留关键信息',
+      prompt: updated ? '请压缩并保留风险：{{content}}' : '请压缩：{{content}}',
+      enabled: true,
+      sortOrder: 1,
+      createdAt: '2026-06-13T09:00:00.000Z',
+      updatedAt: baseTime
+    }],
+    aiHistory: [{
+      id: 71,
+      uuid: 'real-ai-history',
+      promptUuid: 'real-prompt-launch',
+      input: updated ? '更新版输入' : '初始输入',
+      output: updated ? '更新版输出' : '初始输出',
+      createdAt: baseTime,
+      updatedAt: baseTime
+    }],
+    settings: [
+      { key: 'theme', value: updated ? 'light' : 'dark', type: 'string', description: 'theme setting' },
+      { key: 'cloud.sync.intervalMinutes', value: updated ? 5 : 15, type: 'number', description: 'sync interval' }
+    ],
+    syncTombstones: []
+  }
 }
 
 function makeBackupPayload(id = 'test-id-001') {
@@ -1339,6 +1450,7 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
         updatedAt: new Date().toISOString(),
       }
       const imageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lZ2nNwAAAABJRU5ErkJggg=='
+      const updatedImageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADUlEQVR42mP8z8BQDwAFgwJ/lZ2nNwAAAABJRU5ErkJggg=='
       const mobileData = {
         ...mockExportData,
         prompts: [
@@ -1498,6 +1610,7 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
           uploadedRemote: false
         })
 
+        const webPrompt = webLocalData.prompts.find((prompt: any) => prompt.uuid === 'cross-platform-prompt')
         webLocalData = {
           ...webLocalData,
           prompts: webLocalData.prompts.map((prompt: any) =>
@@ -1505,15 +1618,53 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
               ? {
                   ...prompt,
                   title: 'Web edited prompt',
+                  imageBlobs: [imageDataUrl, updatedImageDataUrl],
                   updatedAt: '2026-06-12T00:10:00.000Z'
                 }
               : prompt
-          )
+          ),
+          promptHistories: [
+            ...webLocalData.promptHistories,
+            {
+              id: 1802,
+              uuid: 'cross-platform-history-web-edit',
+              promptId: webPrompt?.id,
+              promptUuid: 'cross-platform-prompt',
+              content: 'Web edited history with image',
+              result: 'Web edited result',
+              imageBlobs: [updatedImageDataUrl],
+              createdAt: '2026-06-12T00:10:00.000Z',
+              updatedAt: '2026-06-12T00:10:00.000Z'
+            }
+          ],
+          aiHistory: [
+            ...webLocalData.aiHistory,
+            {
+              id: 1901,
+              uuid: 'cross-platform-ai-history-web-edit',
+              promptUuid: 'cross-platform-prompt',
+              input: 'Web edited input',
+              output: 'Web edited output',
+              createdAt: '2026-06-12T00:10:00.000Z',
+              updatedAt: '2026-06-12T00:10:00.000Z'
+            }
+          ],
+          settings: [
+            { key: 'theme', value: 'light', type: 'string', description: 'theme setting updated on web' },
+            { key: 'cloud.sync.intervalMinutes', value: 5, type: 'number', description: 'sync interval' }
+          ]
         }
         expect(webLocalData.prompts).toEqual(expect.arrayContaining([
           expect.objectContaining({
             uuid: 'cross-platform-prompt',
-            title: 'Web edited prompt'
+            title: 'Web edited prompt',
+            imageBlobs: [imageDataUrl, updatedImageDataUrl]
+          })
+        ]))
+        expect(webLocalData.promptHistories).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            uuid: 'cross-platform-history-web-edit',
+            imageBlobs: [updatedImageDataUrl]
           })
         ]))
         const manifestBeforeWebUpload = await webRuntime.client.getCloudSyncManifest(storageId)
@@ -1527,6 +1678,22 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
         })
         expect(webUpload).toMatchObject({ success: true, action: 'uploaded' })
 
+        const webNoopAfterUpdate = await webDevice.syncNow(storageId, {
+          deviceName: 'Web Device',
+          platform: 'web',
+          reason: 'manual'
+        })
+        const webThirdClickAfterUpdate = await webDevice.syncNow(storageId, {
+          deviceName: 'Web Device',
+          platform: 'web',
+          reason: 'manual'
+        })
+        expect(webNoopAfterUpdate).toMatchObject({ success: true, action: 'noop' })
+        expect(webThirdClickAfterUpdate).toMatchObject({ success: true, action: 'noop' })
+
+        const remoteSnapshots = await webRuntime.client.listCloudSyncSnapshots(storageId)
+        expect(remoteSnapshots).toHaveLength(2)
+
         const desktopDownload = await desktopDevice.syncNow(storageId, {
           deviceName: 'Desktop Device',
           platform: 'electron',
@@ -1537,18 +1704,42 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
           expect.objectContaining({
             uuid: 'cross-platform-prompt',
             title: 'Web edited prompt',
-            imageBlobs: [imageDataUrl]
+            imageBlobs: [imageDataUrl, updatedImageDataUrl]
           })
         ]))
         expect(desktopLocalData.promptHistories).toEqual(expect.arrayContaining([
           expect.objectContaining({
             uuid: 'cross-platform-history',
             imageBlobs: [imageDataUrl]
+          }),
+          expect.objectContaining({
+            uuid: 'cross-platform-history-web-edit',
+            imageBlobs: [updatedImageDataUrl]
+          })
+        ]))
+        expect(desktopLocalData.aiHistory).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            uuid: 'cross-platform-ai-history-web-edit',
+            output: 'Web edited output'
           })
         ]))
         expect(desktopLocalData.settings).toEqual(expect.arrayContaining([
-          expect.objectContaining({ key: 'theme', value: 'dark' })
+          expect.objectContaining({ key: 'theme', value: 'light' }),
+          expect.objectContaining({ key: 'cloud.sync.intervalMinutes', value: 5 })
         ]))
+
+        const desktopNoopAfterImport = await desktopDevice.syncNow(storageId, {
+          deviceName: 'Desktop Device',
+          platform: 'electron',
+          reason: 'manual'
+        })
+        const desktopThirdClickAfterImport = await desktopDevice.syncNow(storageId, {
+          deviceName: 'Desktop Device',
+          platform: 'electron',
+          reason: 'manual'
+        })
+        expect(desktopNoopAfterImport).toMatchObject({ success: true, action: 'noop' })
+        expect(desktopThirdClickAfterImport).toMatchObject({ success: true, action: 'noop' })
 
         const manifest = await mobileService.getCloudSyncManifest(storageId)
         expect(manifest.latestSnapshot?.deviceId).toBe('web-device')
@@ -1910,6 +2101,201 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
 
       const result = await service.restoreCloudBackup('cfg-real', 'nonexistent-id-xyz')
       expect(result.success).toBe(false)
+    })
+  })
+
+  // ----------------------------------------------------------------
+  // 8. Web 后端代理云备份（WebCloudBackupService → web-server → WebDAV）
+  // ----------------------------------------------------------------
+
+  describe('Web 后端代理云备份', () => {
+    it('Web 端真实数据先备份再更新，两份云端备份可分别恢复且互不污染', async () => {
+      const subDir = `web-backup-update-${Date.now()}`
+      const config = {
+        id: 'cfg-web-backup-update',
+        name: 'Web Backup Update WebDAV',
+        type: 'webdav',
+        enabled: true,
+        url: `${server.baseUrl}/${subDir}`,
+        username: USERNAME,
+        password: PASSWORD,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+      const runtime = await createWebBackendCloudSyncClient(config)
+      let currentData = createRealisticBackupData('initial')
+      const restoredData: any[] = []
+      const exportSpy = vi.spyOn(DatabaseServiceManager.prototype, 'exportAllDataForBackup').mockImplementation(async () => ({
+        success: true,
+        message: 'ok',
+        data: currentData
+      }) as any)
+      const replaceSpy = vi.spyOn(DatabaseServiceManager.prototype, 'replaceAllData').mockImplementation(async (data: any) => {
+        restoredData.push(data)
+        return { success: true, message: 'restored' } as any
+      })
+
+      try {
+        const firstCreate = await runtime.client.createCloudBackup(config.id, '第一次真实数据备份')
+        expect(firstCreate.success).toBe(true)
+        expect(firstCreate.backupInfo?.checksum).toMatch(/^fnv1a32:/)
+
+        const firstBackupPath = path.join(
+          server.rootDir,
+          subDir,
+          'AI-Gist-Backup',
+          path.basename(firstCreate.backupInfo!.cloudPath!)
+        )
+        const firstPayload = parseBackupPayload(JSON.parse(await fsp.readFile(firstBackupPath, 'utf-8')))
+        expect(firstPayload.data.prompts).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            uuid: 'real-prompt-launch',
+            title: '发布计划提示词',
+            imageBlobs: expect.arrayContaining([expect.stringContaining('data:image/png;base64')])
+          })
+        ]))
+        expect(firstPayload.data.promptHistories).toHaveLength(1)
+
+        currentData = createRealisticBackupData('updated')
+        const secondCreate = await runtime.client.createCloudBackup(config.id, '更新后真实数据备份')
+        expect(secondCreate.success).toBe(true)
+        expect(secondCreate.backupInfo?.id).not.toBe(firstCreate.backupInfo?.id)
+        expect(secondCreate.backupInfo?.checksum).not.toBe(firstCreate.backupInfo?.checksum)
+
+        const backups = await runtime.client.getCloudBackupList(config.id)
+        expect(backups.map(backup => backup.id)).toEqual(expect.arrayContaining([
+          firstCreate.backupInfo!.id,
+          secondCreate.backupInfo!.id
+        ]))
+
+        const secondBackupPath = path.join(
+          server.rootDir,
+          subDir,
+          'AI-Gist-Backup',
+          path.basename(secondCreate.backupInfo!.cloudPath!)
+        )
+        const secondPayload = parseBackupPayload(JSON.parse(await fsp.readFile(secondBackupPath, 'utf-8')))
+        expect(secondPayload.data.prompts).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            uuid: 'real-prompt-launch',
+            title: '发布计划提示词 - 更新版',
+            imageBlobs: expect.arrayContaining([expect.stringContaining('data:image/png;base64')])
+          })
+        ]))
+        expect(secondPayload.data.promptHistories).toEqual(expect.arrayContaining([
+          expect.objectContaining({ uuid: 'real-history-initial' }),
+          expect.objectContaining({ uuid: 'real-history-updated' })
+        ]))
+        expect(secondPayload.data.settings).toEqual(expect.arrayContaining([
+          expect.objectContaining({ key: 'theme', value: 'light' }),
+          expect.objectContaining({ key: 'cloud.sync.intervalMinutes', value: 5 })
+        ]))
+        expect(firstPayload.data.prompts[0].title).toBe('发布计划提示词')
+        expect(firstPayload.data.promptHistories).toHaveLength(1)
+
+        const restoreFirst = await runtime.client.restoreCloudBackup(config.id, firstCreate.backupInfo!.id)
+        const restoreSecond = await runtime.client.restoreCloudBackup(config.id, secondCreate.backupInfo!.id)
+        expect(restoreFirst.success).toBe(true)
+        expect(restoreSecond.success).toBe(true)
+        expect(restoredData[0].prompts[0].title).toBe('发布计划提示词')
+        expect(restoredData[0].promptHistories).toHaveLength(1)
+        expect(restoredData[1].prompts[0].title).toBe('发布计划提示词 - 更新版')
+        expect(restoredData[1].promptHistories).toEqual(expect.arrayContaining([
+          expect.objectContaining({ uuid: 'real-history-updated' })
+        ]))
+        expect(restoredData[1].settings).toEqual(expect.arrayContaining([
+          expect.objectContaining({ key: 'theme', value: 'light' })
+        ]))
+
+        expect(exportSpy).toHaveBeenCalledTimes(2)
+        expect(replaceSpy).toHaveBeenCalledTimes(2)
+      } finally {
+        exportSpy.mockRestore()
+        replaceSpy.mockRestore()
+        await runtime.close()
+      }
+    })
+
+    it('Web 端创建、列出和恢复的备份使用同一 checksum payload，损坏后不会恢复', async () => {
+      const subDir = `web-backup-${Date.now()}`
+      const config = {
+        id: 'cfg-web-backup',
+        name: 'Web Backup WebDAV',
+        type: 'webdav',
+        enabled: true,
+        url: `${server.baseUrl}/${subDir}`,
+        username: USERNAME,
+        password: PASSWORD,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      }
+      const runtime = await createWebBackendCloudSyncClient(config)
+      const exportSpy = vi.spyOn(DatabaseServiceManager.prototype, 'exportAllDataForBackup').mockResolvedValue({
+        success: true,
+        message: 'ok',
+        data: mockExportData
+      } as any)
+      const replaceSpy = vi.spyOn(DatabaseServiceManager.prototype, 'replaceAllData').mockResolvedValue({
+        success: true,
+        message: 'restored'
+      } as any)
+
+      try {
+        const createResult = await runtime.client.createCloudBackup(config.id, 'Web 后端集成备份')
+        expect(createResult.success).toBe(true)
+        expect(exportSpy).toHaveBeenCalledTimes(1)
+        expect(createResult.backupInfo?.checksum).toMatch(/^fnv1a32:/)
+        expect(createResult.backupInfo?.name).not.toMatch(/\.json$/)
+
+        const backupPath = path.join(
+          server.rootDir,
+          subDir,
+          'AI-Gist-Backup',
+          path.basename(createResult.backupInfo!.cloudPath!)
+        )
+        const rawPayload = JSON.parse(await fsp.readFile(backupPath, 'utf-8'))
+        const parsedPayload = parseBackupPayload(rawPayload)
+        expect(parsedPayload.legacy).toBe(false)
+        expect(parsedPayload.data).toEqual(mockExportData)
+        expect(rawPayload.schemaVersion).toBe(1)
+
+        const backups = await runtime.client.getCloudBackupList(config.id)
+        expect(backups).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            id: createResult.backupInfo!.id,
+            checksum: rawPayload.checksum
+          })
+        ]))
+
+        const restoreResult = await runtime.client.restoreCloudBackup(config.id, createResult.backupInfo!.id)
+        expect(restoreResult.success).toBe(true)
+        expect(replaceSpy).toHaveBeenCalledWith(mockExportData)
+
+        replaceSpy.mockClear()
+        rawPayload.data.prompts.push({
+          ...mockExportData.prompts[0],
+          id: 999,
+          uuid: 'corrupted-web-backup'
+        })
+        await fsp.writeFile(backupPath, JSON.stringify(rawPayload, null, 2), 'utf-8')
+
+        const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+        try {
+          const backupsAfterCorruption = await runtime.client.getCloudBackupList(config.id)
+          expect(backupsAfterCorruption.some(backup => backup.id === createResult.backupInfo!.id)).toBe(false)
+
+          const restoreCorrupted = await runtime.client.restoreCloudBackup(config.id, createResult.backupInfo!.id)
+          expect(restoreCorrupted.success).toBe(false)
+          expect(replaceSpy).not.toHaveBeenCalled()
+          expect(warnSpy).toHaveBeenCalled()
+        } finally {
+          warnSpy.mockRestore()
+        }
+      } finally {
+        exportSpy.mockRestore()
+        replaceSpy.mockRestore()
+        await runtime.close()
+      }
     })
   })
 

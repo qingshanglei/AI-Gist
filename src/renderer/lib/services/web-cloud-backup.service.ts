@@ -8,6 +8,10 @@ import {
   CLOUD_BACKUP_FILE_PREFIX,
   getCloudBackupFilePath
 } from '@shared/cloud-backup-paths';
+import {
+  createBackupPayload,
+  parseBackupPayload
+} from '@shared/backup-integrity';
 import type {
   CloudSyncManifest,
   CloudSyncManifestSaveOptions,
@@ -43,6 +47,14 @@ export class WebCloudBackupService {
     return WebCloudBackupService.instance;
   }
 
+  private createId(): string {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
   async isICloudAvailable(): Promise<{ available: boolean; reason?: string }> {
     return {
       available: false,
@@ -72,7 +84,7 @@ export class WebCloudBackupService {
     const now = new Date().toISOString();
     const newConfig = {
       ...config,
-      id: crypto.randomUUID(),
+      id: this.createId(),
       createdAt: now,
       updatedAt: now
     } as CloudStorageConfig;
@@ -149,20 +161,20 @@ export class WebCloudBackupService {
       }
 
       const createdAt = new Date().toISOString();
-      const id = crypto.randomUUID();
-      const name = `${CLOUD_BACKUP_FILE_PREFIX}${createdAt.split('T')[0]}-${id.slice(0, 8)}${CLOUD_BACKUP_FILE_EXTENSION}`;
-      const backupData = {
+      const id = this.createId();
+      const name = `${CLOUD_BACKUP_FILE_PREFIX}${createdAt.split('T')[0]}-${id.slice(0, 8)}`;
+      const fileName = `${CLOUD_BACKUP_FILE_PREFIX}${id}${CLOUD_BACKUP_FILE_EXTENSION}`;
+      const backupData = createBackupPayload({
         id,
         name,
         description: description || 'Web 端云端备份',
         createdAt,
-        version: '1.0',
         data: exportResult.data
-      };
+      });
 
       const backupInfo = await this.request<CloudBackupInfo>('/api/cloud/webdav/write-backup', {
         config,
-        fileName: name,
+        fileName,
         backupData
       });
 
@@ -198,7 +210,8 @@ export class WebCloudBackupService {
         throw new Error('备份数据无效');
       }
 
-      const importResult = await databaseService.replaceAllData(backupData.data);
+      const parsedBackup = parseBackupPayload(backupData);
+      const importResult = await databaseService.replaceAllData(parsedBackup.data);
       if (!importResult.success) {
         throw new Error(importResult.error || importResult.message || '写入本地数据失败');
       }

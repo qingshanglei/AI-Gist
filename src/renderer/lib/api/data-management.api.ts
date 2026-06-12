@@ -48,7 +48,7 @@ export class DataManagementAPI {
           return;
         }
 
-        const token = `web-import:${crypto.randomUUID()}`;
+        const token = `web-import:${this.createBackupId()}`;
         this.webImportFiles.set(token, file);
         resolve(token);
       };
@@ -393,32 +393,16 @@ export class DataManagementAPI {
         const exportForBackup = (window as any).databaseAPI.exportAllDataForBackup ||
           (window as any).databaseAPI.exportAllData;
         const result = await exportForBackup();
-        return result.data || {
-          categories: [],
-          prompts: [],
-          aiConfigs: [],
-          aiHistory: [],
-          settings: []
-        };
+        if (!result?.success || !result.data) {
+          throw new Error(result?.error || result?.message || '导出数据库数据失败');
+        }
+        return result.data;
       }
       
-      // 如果无法访问数据库服务，返回空数据
-      return {
-        categories: [],
-        prompts: [],
-        aiConfigs: [],
-        aiHistory: [],
-        settings: []
-      };
+      throw new Error('数据库服务未初始化');
     } catch (error) {
       console.error('获取数据库数据失败:', error);
-      return {
-        categories: [],
-        prompts: [],
-        aiConfigs: [],
-        aiHistory: [],
-        settings: []
-      };
+      throw error;
     }
   }
 
@@ -445,7 +429,7 @@ export class DataManagementAPI {
       return data;
     } catch (error) {
       console.error('获取选定数据失败:', error);
-      return {};
+      throw error;
     }
   }
 

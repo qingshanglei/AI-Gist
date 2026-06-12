@@ -8,6 +8,10 @@ import { DataManagementAPI } from '@renderer/lib/api/data-management.api';
 import { useDatabase } from './useDatabase';
 import { databaseService } from '@renderer/lib/db';
 import { PlatformDetector } from '@shared/platform';
+import {
+  createBackupPayload,
+  parseBackupPayload
+} from '@shared/backup-integrity';
 
 const WEB_BACKUPS_KEY = 'ai-gist:web:local-backups';
 
@@ -67,6 +71,14 @@ export function useDataManagement() {
     return new Blob([JSON.stringify(data)]).size;
   };
 
+  const createBackupId = (): string => {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  };
+
   // 获取备份列表 - 从文件系统读取
   const getBackupList = async (): Promise<BackupInfo[]> => {
     try {
@@ -107,17 +119,19 @@ export function useDataManagement() {
           
           const content = await window.electronAPI.fs.readFile(filePath);
           const backupData = JSON.parse(content);
+          const parsedBackup = parseBackupPayload(backupData);
+          const backupPayload = parsedBackup.payload;
           
           // 获取文件状态
           const fileStats = await window.electronAPI.fs.stat(filePath);
           
           const backupInfo: BackupInfo = {
-            id: backupData.id,
-            name: backupData.name,
-            description: backupData.description || '自动备份',
-            createdAt: backupData.createdAt,
+            id: backupPayload.id,
+            name: backupPayload.name,
+            description: backupPayload.description || '自动备份',
+            createdAt: backupPayload.createdAt,
             size: fileStats.size,
-            data: backupData.data
+            data: backupPayload
           };
           
           console.log('成功读取备份:', backupInfo);
@@ -153,24 +167,23 @@ export function useDataManagement() {
       
       // 1. 导出所有备份数据
       const result = await safeDbOperation(() => databaseService.exportAllDataForBackup());
-      if (!result || !result.success) {
-        throw new Error('导出数据失败');
+      if (!result || !result.success || !result.data) {
+        throw new Error(result?.error || result?.message || '导出数据失败');
       }
       
       console.log('数据导出成功，开始创建备份文件...');
       
       // 2. 创建备份信息
-      const backupId = crypto.randomUUID();
+      const backupId = createBackupId();
       const timestamp = new Date().toISOString();
       const backupName = `backup-${timestamp.split('T')[0]}-${backupId.substring(0, 8)}`;
-      const backupData = {
+      const backupData = createBackupPayload({
         id: backupId,
         name: backupName,
         description: description || '自动备份',
         createdAt: timestamp,
-        version: '1.0',
         data: result.data
-      };
+      });
 
       if (!capabilities.localBackupDirectory) {
         const backupInfo: BackupInfo = {
@@ -179,7 +192,7 @@ export function useDataManagement() {
           description: description || '浏览器内备份',
           createdAt: timestamp,
           size: getJsonSize(backupData),
-          data: result.data,
+          data: backupData,
         };
         const nextBackups = [backupInfo, ...getWebBackups()];
         saveWebBackups(nextBackups);
@@ -222,7 +235,7 @@ export function useDataManagement() {
         description: description || '自动备份',
         createdAt: timestamp,
         size: fileStats.size,
-        data: result.data,
+        data: backupData,
       };
 
       // 7. 刷新备份列表
@@ -275,13 +288,10 @@ export function useDataManagement() {
       
       const backupContent = await window.electronAPI.fs.readFile(backupFilePath);
       const backupData = JSON.parse(backupContent);
-      
-      if (!backupData.data) {
-        throw new Error('备份数据无效');
-      }
+      const parsedBackup = parseBackupPayload(backupData);
 
       // 3. 恢复到数据库
-      const result = await safeDbOperation(() => databaseService.replaceAllData(backupData.data));
+      const result = await safeDbOperation(() => databaseService.replaceAllData(parsedBackup.payload));
       if (result && result.success) {
         success.value = '备份恢复成功';
         return true;
@@ -369,33 +379,15 @@ export function useDataManagement() {
     try {
       setLoading('export', true);
       clearMessages();
-      
-      // 1. 从数据库获取所有备份数据
-      const result = await safeDbOperation(() => databaseService.exportAllDataForBackup());
-      if (!result || !result.success) {
-        throw new Error('导出数据失败');
-      }
-      
-      // 2. 选择导出路径
-      const timestamp = new Date().toISOString().split('T')[0];
-      const defaultName = `ai-gist-full-backup-${timestamp}.json`;
-      const filePath = await DataManagementAPI.selectExportPath(defaultName);
-      
-      if (!filePath) {
-        error.value = '未选择导出路径';
-        return false;
-      }
-      
-      // 3. 导出数据
-      const exportSuccess = await DataManagementAPI.exportDataToFile(result.data, filePath, 'json');
-      
-      if (exportSuccess) {
+
+      const result = await DataManagementAPI.exportFullBackup();
+      if (result.success) {
         success.value = '完整备份导出成功';
         return true;
-      } else {
-        error.value = '完整备份导出失败';
-        return false;
       }
+
+      error.value = result.message || '完整备份导出失败';
+      return false;
     } catch (err) {
       error.value = err instanceof Error ? err.message : '完整备份导出失败';
       return false;
@@ -409,31 +401,15 @@ export function useDataManagement() {
     try {
       setLoading('import', true);
       clearMessages();
-      
-      // 1. 选择导入文件
-      const filePath = await DataManagementAPI.selectImportFile('json');
-      if (!filePath) {
-        error.value = '未选择导入文件';
-        return false;
-      }
-      
-      // 2. 读取文件数据
-      const data = await DataManagementAPI.importDataFromFile(filePath, 'json');
-      if (!data) {
-        error.value = '文件读取失败';
-        return false;
-      }
-      
-      // 3. 导入到数据库
-      const result = await safeDbOperation(() => databaseService.replaceAllData(data));
-      
-      if (result && result.success) {
+
+      const result = await DataManagementAPI.importFullBackup();
+      if (result.success) {
         success.value = '完整备份导入成功';
         return true;
-      } else {
-        error.value = result?.message || '完整备份导入失败';
-        return false;
       }
+
+      error.value = result.message || '完整备份导入失败';
+      return false;
     } catch (err) {
       error.value = err instanceof Error ? err.message : '完整备份导入失败';
       return false;

@@ -36,6 +36,7 @@ function setupWindowMocks(overrides: Record<string, any> = {}) {
 
   ;(window as any).databaseAPI = {
     exportAllData: vi.fn().mockResolvedValue({ success: true, data: mockExportData }),
+    exportAllDataForBackup: vi.fn().mockResolvedValue({ success: true, data: mockExportData }),
     replaceAllData: vi.fn().mockResolvedValue({ success: true, imported: { categories: 1, prompts: 1 } }),
     importData: vi.fn().mockResolvedValue({ success: true }),
     ...overrides.databaseAPI,
@@ -170,6 +171,56 @@ describe('DataManagementAPI - 本地备份/恢复', () => {
       expect(result.success).toBe(false)
       expect(result.message).toContain('未选择')
     })
+
+    it('数据库导出失败时不会生成空备份文件', async () => {
+      ;(window as any).databaseAPI.exportAllDataForBackup.mockResolvedValueOnce({
+        success: false,
+        error: 'database unavailable'
+      })
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+      try {
+        const result = await DataManagementAPI.exportFullBackup()
+
+        expect(result.success).toBe(false)
+        expect(result.message).toContain('database unavailable')
+        expect((window as any).electronAPI.invoke).not.toHaveBeenCalledWith(
+          'data:write-file',
+          expect.anything()
+        )
+      } finally {
+        errorSpy.mockRestore()
+      }
+    })
+  })
+
+  describe('exportSelectedData', () => {
+    it('数据库导出失败时不会导出空选择数据文件', async () => {
+      ;(window as any).databaseAPI.exportAllDataForBackup = undefined
+      ;(window as any).databaseAPI.exportAllData.mockResolvedValueOnce({
+        success: false,
+        error: 'database unavailable'
+      })
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+      try {
+        const result = await DataManagementAPI.exportSelectedData({
+          includeCategories: true,
+          includePrompts: true,
+          includeAIConfigs: true,
+          format: 'json'
+        })
+
+        expect(result.success).toBe(false)
+        expect(result.message).toContain('database unavailable')
+        expect((window as any).electronAPI.invoke).not.toHaveBeenCalledWith(
+          'data:write-file',
+          expect.anything()
+        )
+      } finally {
+        errorSpy.mockRestore()
+      }
+    })
   })
 
   describe('importFullBackup', () => {
@@ -236,9 +287,14 @@ describe('DataManagementAPI - 本地备份/恢复', () => {
         if (channel === 'data:read-file') return { success: true, content: 'not valid json{{{' }
         return { success: true }
       })
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
 
-      const result = await DataManagementAPI.importFullBackup()
-      expect(result.success).toBe(false)
+      try {
+        const result = await DataManagementAPI.importFullBackup()
+        expect(result.success).toBe(false)
+      } finally {
+        errorSpy.mockRestore()
+      }
     })
   })
 

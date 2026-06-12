@@ -17,6 +17,7 @@ const CLOUD_SYNC_SNAPSHOT_FILE_EXTENSION = '.json';
 const CLOUD_SYNC_SNAPSHOT_FILE_KIND = 'ai-gist-cloud-sync-snapshot';
 const CLOUD_BACKUP_FILE_PREFIX = 'backup-';
 const CLOUD_BACKUP_FILE_EXTENSION = '.json';
+const BACKUP_PAYLOAD_SCHEMA_VERSION = 1;
 const REQUIRED_SYNC_COLLECTIONS = [
   'categories',
   'prompts',
@@ -413,6 +414,54 @@ function createCloudSyncDataChecksum(data) {
   return `fnv1a32:${fnv1a32(stableSerialize(normalizeForChecksum(data)))}`;
 }
 
+function createBackupDataChecksum(data) {
+  return createCloudSyncDataChecksum(data);
+}
+
+function parseBackupPayload(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error('备份文件格式无效');
+  }
+
+  if (!('data' in value) || value.data === undefined || value.data === null) {
+    throw new Error('备份文件缺少 data 字段');
+  }
+
+  if (typeof value.id !== 'string' || !value.id) {
+    throw new Error('备份文件缺少 id 字段');
+  }
+
+  if (typeof value.name !== 'string' || !value.name) {
+    throw new Error('备份文件缺少 name 字段');
+  }
+
+  if (typeof value.createdAt !== 'string' || !value.createdAt) {
+    throw new Error('备份文件缺少 createdAt 字段');
+  }
+
+  if (value.schemaVersion !== undefined && value.schemaVersion !== BACKUP_PAYLOAD_SCHEMA_VERSION) {
+    throw new Error(`不支持的备份格式版本: ${value.schemaVersion}`);
+  }
+
+  if (value.checksum !== undefined) {
+    if (typeof value.checksum !== 'string' || !value.checksum) {
+      throw new Error('备份文件校验码无效');
+    }
+
+    const actualChecksum = createBackupDataChecksum(value.data);
+    if (value.checksum !== actualChecksum) {
+      throw new Error('备份数据校验失败，文件可能已损坏或未完整同步');
+    }
+  }
+
+  return {
+    payload: value,
+    data: value.data,
+    checksum: value.checksum,
+    legacy: value.checksum === undefined
+  };
+}
+
 function stableSerialize(value) {
   if (value === null || value === undefined) {
     return JSON.stringify(value);
@@ -488,7 +537,8 @@ async function listWebDAVBackups({ config }) {
 
     const cloudPath = normalizeRemotePath(CLOUD_BACKUP_DIR, name);
     try {
-      const backupData = JSON.parse(await readWebDAVText(client, cloudPath));
+      const parsedBackup = parseBackupPayload(JSON.parse(await readWebDAVText(client, cloudPath)));
+      const backupData = parsedBackup.payload;
       backups.push({
         id: backupData.id,
         name: backupData.name || name,
@@ -497,7 +547,8 @@ async function listWebDAVBackups({ config }) {
         size: Number(entry.size) || Buffer.byteLength(JSON.stringify(backupData)),
         cloudPath,
         storageId: config.id,
-        version: backupData.version
+        version: backupData.version,
+        checksum: parsedBackup.checksum
       });
     } catch (error) {
       console.warn(`[web] 跳过无法解析的备份文件 ${cloudPath}:`, error);
@@ -510,25 +561,28 @@ async function listWebDAVBackups({ config }) {
 async function writeWebDAVBackup({ config, fileName, backupData }) {
   const client = await createWebDAVClient(config);
   await ensureWebDAVDirectory(client);
-  const safeName = Path.basename(fileName || backupData?.name || `${CLOUD_BACKUP_FILE_PREFIX}${Date.now()}${CLOUD_BACKUP_FILE_EXTENSION}`);
+  const parsedBackup = parseBackupPayload(backupData);
+  const backupPayload = parsedBackup.payload;
+  const safeName = Path.basename(fileName || backupPayload?.name || `${CLOUD_BACKUP_FILE_PREFIX}${Date.now()}${CLOUD_BACKUP_FILE_EXTENSION}`);
   const cloudPath = normalizeRemotePath(CLOUD_BACKUP_DIR, safeName);
-  const content = JSON.stringify(backupData, null, 2);
+  const content = JSON.stringify(backupPayload, null, 2);
   await client.putFileContents(cloudPath, content, { overwrite: true });
   return {
-    id: backupData.id,
-    name: backupData.name || safeName,
-    description: backupData.description,
-    createdAt: backupData.createdAt,
+    id: backupPayload.id,
+    name: backupPayload.name || safeName,
+    description: backupPayload.description,
+    createdAt: backupPayload.createdAt,
     size: Buffer.byteLength(content),
     cloudPath,
     storageId: config.id,
-    version: backupData.version
+    version: backupPayload.version,
+    checksum: parsedBackup.checksum
   };
 }
 
 async function readWebDAVBackup({ config, cloudPath }) {
   const client = await createWebDAVClient(config);
-  return JSON.parse(await readWebDAVText(client, cloudPath));
+  return parseBackupPayload(JSON.parse(await readWebDAVText(client, cloudPath))).payload;
 }
 
 async function deleteWebDAVBackup({ config, cloudPath }) {
