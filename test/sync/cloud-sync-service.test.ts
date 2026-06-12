@@ -15,6 +15,10 @@ import {
   assertValidCloudSyncManifest,
   createEmptyCloudSyncManifest
 } from '@shared/cloud-sync-manifest'
+import {
+  assertValidCloudSyncSnapshotFile,
+  createCloudSyncSnapshotFile
+} from '@shared/cloud-sync-snapshots'
 
 class MemoryStorage {
   private values = new Map<string, string>()
@@ -176,6 +180,75 @@ describe('CloudSyncService', () => {
     expect(callOrder).toEqual(['snapshot', 'manifest'])
     expect(savedSnapshots.has(cloudManifest.latestSnapshot!.revision)).toBe(true)
     expect(cloudClient.getCloudSyncManifest).toHaveBeenCalledTimes(2)
+  })
+
+  it('keeps checksums stable across real JSON snapshot and manifest round trips', async () => {
+    const storage = new MemoryStorage()
+    const localData = {
+      ...baseData,
+      prompts: [
+        {
+          ...baseData.prompts[0],
+          optional: undefined,
+          nested: {
+            keep: 'value',
+            drop: undefined
+          },
+          values: [undefined, 'kept']
+        }
+      ]
+    }
+    let cloudManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    const savedSnapshotFiles = new Map<string, any>()
+    const cloudClient = {
+      getCloudSyncManifest: vi.fn().mockImplementation(async () =>
+        assertValidCloudSyncManifest(JSON.parse(JSON.stringify(cloudManifest)))
+      ),
+      saveCloudSyncSnapshot: vi.fn().mockImplementation(async (_storageId: string, snapshot: any) => {
+        savedSnapshotFiles.set(snapshot.revision, JSON.parse(JSON.stringify(createCloudSyncSnapshotFile(snapshot))))
+        return { success: true }
+      }),
+      readCloudSyncSnapshot: vi.fn().mockImplementation(async (_storageId: string, revision: string) => {
+        const snapshotFile = savedSnapshotFiles.get(revision)
+        if (!snapshotFile) {
+          throw new Error('snapshot not found')
+        }
+        return assertValidCloudSyncSnapshotFile(JSON.parse(JSON.stringify(snapshotFile)))
+      }),
+      listCloudSyncSnapshots: vi.fn().mockResolvedValue([]),
+      saveCloudSyncManifest: vi.fn().mockImplementation(async (_storageId: string, manifest: any) => {
+        cloudManifest = assertValidCloudSyncManifest(JSON.parse(JSON.stringify(manifest)))
+        return { success: true }
+      })
+    }
+    const database = {
+      exportAllDataForSync: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok',
+        data: localData
+      }),
+      replaceAllData: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok'
+      })
+    }
+    const service = new CloudSyncService({
+      cloudClient,
+      database,
+      storage,
+      createDeviceId: () => 'device-a'
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.error).toBeUndefined()
+    expect(cloudManifest.latestSnapshot?.data.prompts?.[0]).not.toHaveProperty('optional')
+    expect(cloudManifest.latestSnapshot?.data.prompts?.[0].nested).not.toHaveProperty('drop')
+    expect(cloudManifest.latestSnapshot?.data.prompts?.[0].values).toEqual([null, 'kept'])
+    expect(cloudManifest.latestSnapshot?.dataChecksum).toBe(
+      createCloudSyncDataChecksum(cloudManifest.latestSnapshot!.data)
+    )
   })
 
   it('recovers a corrupt manifest from the newest remote snapshot file', async () => {

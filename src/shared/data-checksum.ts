@@ -32,7 +32,7 @@ export function normalizeForChecksum(value: any): any {
   }
 
   if (Array.isArray(value)) {
-    return value.map(item => normalizeForChecksum(item));
+    return value.map(item => item === undefined ? null : normalizeForChecksum(item));
   }
 
   if (typeof value !== 'object') {
@@ -41,7 +41,10 @@ export function normalizeForChecksum(value: any): any {
 
   const normalized: Record<string, any> = {};
   for (const [key, fieldValue] of Object.entries(value as Record<string, any>)) {
-    normalized[key] = normalizeForChecksum(fieldValue);
+    const normalizedValue = normalizeForChecksum(fieldValue);
+    if (normalizedValue !== undefined) {
+      normalized[key] = normalizedValue;
+    }
   }
   return normalized;
 }

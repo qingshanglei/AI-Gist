@@ -6,6 +6,10 @@ import {
   mergeCloudSyncData,
   validateCloudSyncSnapshot
 } from '@shared/cloud-sync-engine'
+import {
+  assertValidCloudSyncSnapshotFile,
+  createCloudSyncSnapshotFile
+} from '@shared/cloud-sync-snapshots'
 
 describe('cloud sync engine', () => {
   it('merges new local and remote records when there is no base snapshot', () => {
@@ -299,6 +303,50 @@ describe('cloud sync engine', () => {
     expect(left.dataChecksum).toMatch(/^fnv1a32:[0-9a-f]{8}$/)
     expect(left.dataChecksum).toBe(right.dataChecksum)
     expect(validateCloudSyncSnapshot(left).valid).toBe(true)
+  })
+
+  it('creates JSON-stable checksums when records contain undefined fields', () => {
+    const snapshot = createCloudSyncSnapshot({
+      prompts: [
+        {
+          uuid: 'prompt-undefined',
+          title: 'Prompt',
+          optional: undefined,
+          nested: {
+            keep: 'value',
+            drop: undefined
+          },
+          values: [undefined, 'kept']
+        }
+      ]
+    }, 'device-a', 'rev-json-stable')
+
+    const jsonRoundTripFile = JSON.parse(JSON.stringify(createCloudSyncSnapshotFile(snapshot)))
+    const restoredSnapshot = assertValidCloudSyncSnapshotFile(jsonRoundTripFile)
+
+    expect(snapshot.data.prompts![0]).not.toHaveProperty('optional')
+    expect(snapshot.data.prompts![0].nested).not.toHaveProperty('drop')
+    expect(snapshot.data.prompts![0].values).toEqual([null, 'kept'])
+    expect(restoredSnapshot.dataChecksum).toBe(snapshot.dataChecksum)
+    expect(restoredSnapshot.dataChecksum).toBe(createCloudSyncDataChecksum(restoredSnapshot.data))
+  })
+
+  it('repairs readable snapshot files with checksum metadata drift', () => {
+    const snapshot = createCloudSyncSnapshot({
+      prompts: [
+        { uuid: 'prompt-1', title: 'Prompt', updatedAt: '2026-01-01T00:00:00.000Z' }
+      ]
+    }, 'device-a', 'rev-drift')
+    const brokenFile = createCloudSyncSnapshotFile({
+      ...snapshot,
+      dataChecksum: 'fnv1a32:00000000'
+    })
+
+    const repairedSnapshot = assertValidCloudSyncSnapshotFile(brokenFile)
+
+    expect(repairedSnapshot.revision).toBe('rev-drift')
+    expect(repairedSnapshot.dataChecksum).toBe(createCloudSyncDataChecksum(repairedSnapshot.data))
+    expect(validateCloudSyncSnapshot(repairedSnapshot).valid).toBe(true)
   })
 
   it('rejects snapshots that are missing required sync collections', () => {

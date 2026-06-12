@@ -141,7 +141,7 @@ export function createCloudSyncSnapshot(
 }
 
 export function normalizeCloudSyncDataSet<TData extends CloudSyncDataSet>(data: TData): TData {
-  const normalized = cloneValue(data) as CloudSyncDataSet;
+  const normalized = normalizeSnapshotJsonValue(cloneValue(data)) as CloudSyncDataSet;
 
   for (const collection of REQUIRED_SNAPSHOT_COLLECTIONS) {
     const records = normalized[collection];
@@ -996,6 +996,41 @@ function cloneValue<T>(value: T): T {
       cloned[key] = cloneValue(fieldValue);
     }
     return cloned as T;
+  }
+
+  return value;
+}
+
+function normalizeSnapshotJsonValue(value: any): any {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  if (value === null) {
+    return null;
+  }
+
+  if (value instanceof Date) {
+    return value.toISOString();
+  }
+
+  if (isBlob(value)) {
+    return value;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(item => item === undefined ? null : normalizeSnapshotJsonValue(item));
+  }
+
+  if (typeof value === 'object') {
+    const normalized: Record<string, any> = {};
+    for (const [key, fieldValue] of Object.entries(value as Record<string, any>)) {
+      const normalizedValue = normalizeSnapshotJsonValue(fieldValue);
+      if (normalizedValue !== undefined) {
+        normalized[key] = normalizedValue;
+      }
+    }
+    return normalized;
   }
 
   return value;

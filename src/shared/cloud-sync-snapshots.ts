@@ -34,6 +34,11 @@ export function assertValidCloudSyncSnapshotFile(input: unknown): CloudSyncSnaps
   const snapshot = unwrapCloudSyncSnapshotFile(input);
   const validation = validateCloudSyncSnapshot(snapshot);
   if (!validation.valid) {
+    const repairedSnapshot = repairCloudSyncSnapshotChecksum(snapshot, validation.reason);
+    if (repairedSnapshot) {
+      return repairedSnapshot;
+    }
+
     throw new Error(validation.reason || 'cloud sync snapshot file is invalid');
   }
 
@@ -87,8 +92,40 @@ function normalizeCloudSyncSnapshotForFile(snapshot: CloudSyncSnapshot): CloudSy
     revision: snapshot.revision,
     createdAt: snapshot.createdAt,
     data,
-    dataChecksum: snapshot.dataChecksum || createCloudSyncDataChecksum(data)
+    dataChecksum: createCloudSyncDataChecksum(data)
   };
+}
+
+function repairCloudSyncSnapshotChecksum(
+  value: unknown,
+  reason: string | undefined
+): CloudSyncSnapshot | null {
+  if (reason !== 'snapshot data checksum mismatch' || !value || typeof value !== 'object') {
+    return null;
+  }
+
+  const snapshot = value as Partial<CloudSyncSnapshot>;
+  if (
+    snapshot.schemaVersion !== 1 ||
+    typeof snapshot.deviceId !== 'string' ||
+    !snapshot.deviceId ||
+    typeof snapshot.revision !== 'string' ||
+    !snapshot.revision ||
+    typeof snapshot.createdAt !== 'string' ||
+    !snapshot.createdAt ||
+    !snapshot.data ||
+    typeof snapshot.data !== 'object' ||
+    Array.isArray(snapshot.data)
+  ) {
+    return null;
+  }
+
+  try {
+    const repairedSnapshot = normalizeCloudSyncSnapshotForFile(snapshot as CloudSyncSnapshot);
+    return validateCloudSyncSnapshot(repairedSnapshot).valid ? repairedSnapshot : null;
+  } catch {
+    return null;
+  }
 }
 
 function getSnapshotInfoTime(info: CloudSyncRemoteSnapshotInfo): number {

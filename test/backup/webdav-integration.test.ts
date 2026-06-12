@@ -890,6 +890,87 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
   // ----------------------------------------------------------------
 
   describe('cloud sync coordinator', () => {
+    it('连续手动同步 JSON 化数据时不会出现 checksum mismatch', async () => {
+      const storageId = 'cfg-json-stable'
+      const service = MobileCloudBackupService.getInstance()
+      await Preferences.set({
+        key: 'cloud_backup_configs',
+        value: JSON.stringify([{
+          id: storageId,
+          name: 'JSON Stable Sync WebDAV',
+          type: 'webdav',
+          enabled: true,
+          url: `${server.baseUrl}/json-stable-${Date.now()}`,
+          username: USERNAME,
+          password: PASSWORD,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }]),
+      })
+
+      const syncData = {
+        ...mockExportData,
+        prompts: [
+          {
+            ...mockExportData.prompts[0],
+            optional: undefined,
+            nested: {
+              keep: 'value',
+              drop: undefined
+            },
+            values: [undefined, 'kept']
+          }
+        ],
+        promptHistories: [],
+        syncTombstones: []
+      }
+      const database = {
+        exportAllDataForSync: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'ok',
+          data: syncData
+        }),
+        replaceAllData: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'ok'
+        })
+      }
+      const device = new CloudSyncService({
+        cloudClient: service,
+        database,
+        storage: new MemoryStorage(),
+        createDeviceId: () => 'json-stable-device'
+      })
+
+      const firstSync = await device.syncNow(storageId, {
+        deviceName: 'JSON Stable Device',
+        platform: 'ios',
+        reason: 'manual'
+      })
+      const secondSync = await device.syncNow(storageId, {
+        deviceName: 'JSON Stable Device',
+        platform: 'ios',
+        reason: 'manual'
+      })
+
+      expect(firstSync.success).toBe(true)
+      expect(firstSync.error).toBeUndefined()
+      expect(secondSync.success).toBe(true)
+      expect(secondSync.error).toBeUndefined()
+
+      const manifest = await service.getCloudSyncManifest(storageId)
+      expect(manifest.latestSnapshot?.data.prompts?.[0]).not.toHaveProperty('optional')
+      expect(manifest.latestSnapshot?.data.prompts?.[0].nested).not.toHaveProperty('drop')
+      expect(manifest.latestSnapshot?.data.prompts?.[0].values).toEqual([null, 'kept'])
+      expect(manifest.latestSnapshot?.dataChecksum).toBe(
+        createCloudSyncDataChecksum(manifest.latestSnapshot!.data)
+      )
+
+      const snapshot = await service.readCloudSyncSnapshot(storageId, manifest.latestSnapshot!.revision)
+      expect(snapshot.dataChecksum).toBe(createCloudSyncDataChecksum(snapshot.data))
+      expect(snapshot.data).toEqual(manifest.latestSnapshot!.data)
+    })
+
     it('设备 A 上传后，设备 B 作为新设备能从同一 WebDAV manifest 拉取完整数据', async () => {
       const storageId = 'cfg-sync'
       const service = MobileCloudBackupService.getInstance()
