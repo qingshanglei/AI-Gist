@@ -302,7 +302,7 @@ import {
   MAX_CLOUD_SYNC_INTERVAL_MINUTES,
   MIN_CLOUD_SYNC_INTERVAL_MINUTES,
   getCloudSyncResultMessage,
-  getFriendlyCloudSyncError
+  getCloudSyncErrorDiagnosis
 } from '~/lib/services/cloud-sync.service'
 import { databaseService } from '~/lib/db'
 import { presentMobileToast } from '~/lib/utils/mobile-toast'
@@ -648,27 +648,96 @@ const syncCloudData = async () => {
   })
 
   loading.value.syncNow = true
+  let syncError: string | undefined
 
   try {
     await loadingEl.present()
 
     const result = await cloudSyncService.syncNow(selectedConfig.value.id, {
       platform,
-      deviceName: getDeviceLabel()
+      deviceName: getDeviceLabel(),
+      reason: 'manual'
     })
 
     if (result.success) {
       showToast(getCloudSyncResultMessage(result.action, result.conflicts.length))
     } else {
-      showToast(getFriendlyCloudSyncError(result.error), 'danger')
+      syncError = result.error
     }
   } catch (error) {
     console.error('云同步失败:', error)
-    showToast(getFriendlyCloudSyncError(error instanceof Error ? error.message : String(error)), 'danger')
+    syncError = error instanceof Error ? error.message : String(error)
   } finally {
     await loadingEl.dismiss()
     loading.value.syncNow = false
   }
+
+  if (syncError) {
+    await presentSyncErrorDetails(syncError)
+  }
+}
+
+const presentSyncErrorDetails = async (error?: string) => {
+  const storageId = selectedConfig.value?.id
+  const diagnosis = getCloudSyncErrorDiagnosis(error, {
+    storageId,
+    reason: 'manual',
+    status: 'error',
+    timestamp: new Date().toISOString()
+  })
+
+  await showToast(diagnosis.message, 'danger')
+
+  const alert = await alertController.create({
+    header: diagnosis.title,
+    message: [
+      `<p>${escapeHtml(diagnosis.message)}</p>`,
+      '<p><strong>建议操作</strong></p>',
+      '<ul>',
+      ...diagnosis.suggestedActions.map(action => `<li>${escapeHtml(action)}</li>`),
+      '</ul>',
+      '<p><strong>完整错误详情</strong></p>',
+      `<pre class="cloud-sync-error-report">${escapeHtml(diagnosis.copyText)}</pre>`
+    ].join(''),
+    buttons: [
+      {
+        text: '复制详情',
+        handler: () => {
+          void copySyncErrorDetails(diagnosis.copyText)
+        }
+      },
+      {
+        text: '重新同步',
+        handler: () => {
+          void syncCloudData()
+        }
+      },
+      {
+        text: t('common.close'),
+        role: 'cancel'
+      }
+    ]
+  })
+
+  await alert.present()
+}
+
+const copySyncErrorDetails = async (copyText: string) => {
+  try {
+    await navigator.clipboard.writeText(copyText)
+    await showToast('错误详情已复制')
+  } catch {
+    await showToast('复制错误详情失败', 'danger')
+  }
+}
+
+const escapeHtml = (value: string) => {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
 }
 
 // 恢复备份
@@ -902,5 +971,18 @@ onMounted(() => {
 .connection-test-button {
   width: 100%;
   margin: 8px 0;
+}
+
+:global(.cloud-sync-error-report) {
+  max-height: 220px;
+  padding: 10px;
+  overflow: auto;
+  color: var(--ion-color-dark);
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--ion-color-light);
+  border-radius: 8px;
 }
 </style>

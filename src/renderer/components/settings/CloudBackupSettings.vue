@@ -328,6 +328,53 @@
                 </NFlex>
             </NFlex>
         </NModal>
+
+        <NModal v-model:show="syncErrorDialogVisible" preset="card" style="width: min(680px, calc(100vw - 32px));"
+            title="云同步错误详情">
+            <NFlex v-if="syncErrorDiagnosis" vertical :size="16">
+                <NAlert type="error" :title="syncErrorDiagnosis.title">
+                    <template #icon>
+                        <NIcon>
+                            <AlertTriangle />
+                        </NIcon>
+                    </template>
+                    {{ syncErrorDiagnosis.message }}
+                </NAlert>
+
+                <NFlex vertical :size="8">
+                    <NText depth="2">建议操作</NText>
+                    <ul class="sync-error-action-list">
+                        <li v-for="action in syncErrorDiagnosis.suggestedActions" :key="action">{{ action }}</li>
+                    </ul>
+                </NFlex>
+
+                <NFlex vertical :size="8">
+                    <NText depth="2">完整错误详情</NText>
+                    <NInput :value="syncErrorDiagnosis.copyText" type="textarea" readonly :autosize="{ minRows: 8, maxRows: 14 }" />
+                </NFlex>
+
+                <NFlex justify="end" :size="12">
+                    <NButton @click="syncErrorDialogVisible = false">关闭</NButton>
+                    <NButton secondary @click="copySyncErrorDetails">
+                        <template #icon>
+                            <NIcon>
+                                <Copy />
+                            </NIcon>
+                        </template>
+                        复制详情
+                    </NButton>
+                    <NButton type="primary" @click="retrySyncFromDialog" :loading="loading.syncNow"
+                        :disabled="!syncErrorStorageId">
+                        <template #icon>
+                            <NIcon>
+                                <Refresh />
+                            </NIcon>
+                        </template>
+                        重新同步
+                    </NButton>
+                </NFlex>
+            </NFlex>
+        </NModal>
     </NCard>
 </template>
 
@@ -365,6 +412,8 @@ import {
     Refresh,
     Recharging,
     Wifi,
+    Copy,
+    AlertTriangle,
 } from "@vicons/tabler";
 import { ref, computed, onMounted, watch } from "vue";
 import { useI18n } from 'vue-i18n';
@@ -376,7 +425,7 @@ import {
     MAX_CLOUD_SYNC_INTERVAL_MINUTES,
     MIN_CLOUD_SYNC_INTERVAL_MINUTES,
     getCloudSyncResultMessage,
-    getFriendlyCloudSyncError,
+    getCloudSyncErrorDiagnosis,
 } from "@/lib/services/cloud-sync.service";
 import type { CloudStorageConfig, CloudBackupInfo } from "@shared/types/cloud-backup";
 
@@ -390,6 +439,9 @@ const cloudBackups = ref<CloudBackupInfo[]>([]);
 const syncIntervalMinutes = ref(DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES);
 const activeTabKey = ref<string>('');
 const showConfigModal = ref(false);
+const syncErrorDialogVisible = ref(false);
+const syncErrorStorageId = ref('');
+const syncErrorDiagnosis = ref<ReturnType<typeof getCloudSyncErrorDiagnosis> | null>(null);
 const iCloudAvailability = ref<{ available: boolean; reason?: string } | null>(null);
 const loading = ref({
     saveConfig: false,
@@ -785,20 +837,55 @@ const syncCloudData = async (storageId?: string) => {
     loading.value.syncNow = true;
     try {
         const result = await cloudSyncService.syncNow(targetStorageId, {
-            platform: PlatformDetector.getPlatform()
+            platform: PlatformDetector.getPlatform(),
+            reason: 'manual'
         });
 
         if (result.success) {
             message.success(getCloudSyncResultMessage(result.action, result.conflicts.length));
         } else {
-            message.error(getFriendlyCloudSyncError(result.error));
+            const diagnosis = showSyncErrorDetails(result.error, targetStorageId);
+            message.error(diagnosis.message);
         }
     } catch (error) {
         console.error('云同步失败:', error);
-        message.error(getFriendlyCloudSyncError(error instanceof Error ? error.message : String(error)));
+        const diagnosis = showSyncErrorDetails(error instanceof Error ? error.message : String(error), targetStorageId);
+        message.error(diagnosis.message);
     } finally {
         loading.value.syncNow = false;
     }
+};
+
+const showSyncErrorDetails = (error: string | undefined, storageId: string) => {
+    const diagnosis = getCloudSyncErrorDiagnosis(error, {
+        storageId,
+        reason: 'manual',
+        status: 'error',
+        timestamp: new Date().toISOString()
+    });
+    syncErrorStorageId.value = storageId;
+    syncErrorDiagnosis.value = diagnosis;
+    syncErrorDialogVisible.value = true;
+    return diagnosis;
+};
+
+const copySyncErrorDetails = async () => {
+    if (!syncErrorDiagnosis.value) return;
+
+    try {
+        await navigator.clipboard.writeText(syncErrorDiagnosis.value.copyText);
+        message.success('错误详情已复制');
+    } catch {
+        message.error('复制错误详情失败');
+    }
+};
+
+const retrySyncFromDialog = async () => {
+    const storageId = syncErrorStorageId.value;
+    if (!storageId) return;
+
+    syncErrorDialogVisible.value = false;
+    await syncCloudData(storageId);
 };
 
 const restoreCloudBackup = async (storageId: string, backupId: string) => {
@@ -943,6 +1030,14 @@ onMounted(async () => {
     margin-top: 16px;
     padding-top: 12px;
     border-top: 1px solid var(--border-color);
+}
+
+.sync-error-action-list {
+    margin: 0;
+    padding-left: 20px;
+    color: var(--text-color-2);
+    font-size: 13px;
+    line-height: 1.6;
 }
 
 </style>

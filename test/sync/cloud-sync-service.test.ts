@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import {
   CloudSyncService,
   DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES,
+  getCloudSyncErrorDiagnosis,
   getFriendlyCloudSyncError,
   type CloudSyncServiceDeps
 } from '~/lib/services/cloud-sync.service'
@@ -430,8 +431,39 @@ describe('CloudSyncService', () => {
       '云同步 manifest 保存后校验失败：期望 revision rev-new，实际 rev-old'
     )
 
-    expect(message).toBe('云端同步状态暂时不稳定，应用会自动重试')
+    expect(message).toContain('自动重试')
     expect(message).not.toContain('其他设备')
+  })
+
+  it('keeps raw unstable sync errors in a copyable diagnosis report', () => {
+    const rawError = '云同步 manifest 保存后数据校验失败：期望 checksum abc，实际 def'
+    const diagnosis = getCloudSyncErrorDiagnosis(rawError, {
+      storageId: 'cfg-1',
+      reason: 'manual',
+      status: 'error',
+      failureCount: 2,
+      timestamp: '2026-06-12T08:00:00.000Z'
+    })
+
+    expect(diagnosis.title).toBe('云端同步状态暂时不一致')
+    expect(diagnosis.canAutoRetry).toBe(true)
+    expect(diagnosis.canUserFix).toBe(false)
+    expect(diagnosis.copyText).toContain(rawError)
+    expect(diagnosis.copyText).toContain('存储配置 ID: cfg-1')
+    expect(diagnosis.copyText).toContain('连续失败次数: 2')
+  })
+
+  it('classifies WebDAV authentication errors as user-fixable diagnostics', () => {
+    const diagnosis = getCloudSyncErrorDiagnosis('401 Unauthorized', {
+      storageId: 'webdav-1',
+      reason: 'manual'
+    })
+
+    expect(diagnosis.title).toBe('云存储认证失败')
+    expect(diagnosis.canUserFix).toBe(true)
+    expect(diagnosis.canAutoRetry).toBe(false)
+    expect(diagnosis.message).toContain('用户名')
+    expect(diagnosis.copyText).toContain('401 Unauthorized')
   })
 
   it('fails sync when a saved manifest reads back the same revision with different data', async () => {

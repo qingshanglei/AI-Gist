@@ -138,6 +138,24 @@ export interface CloudSyncStatus {
   error?: string;
 }
 
+export interface CloudSyncErrorDiagnosisContext {
+  storageId?: string;
+  reason?: CloudSyncRunReason;
+  status?: CloudSyncLifecycleStatus;
+  failureCount?: number;
+  timestamp?: string;
+}
+
+export interface CloudSyncErrorDiagnosis {
+  title: string;
+  message: string;
+  rawError: string;
+  canAutoRetry: boolean;
+  canUserFix: boolean;
+  suggestedActions: string[];
+  copyText: string;
+}
+
 export interface CloudSyncAutoOptions extends CloudSyncOptions {
   enabled?: boolean;
   storageIds?: string[];
@@ -1596,19 +1614,115 @@ export function getCloudSyncResultMessage(action?: string, _conflictCount = 0): 
   return '同步完成，数据已是最新';
 }
 
+export function getCloudSyncErrorDiagnosis(
+  error?: string,
+  context: CloudSyncErrorDiagnosisContext = {}
+): CloudSyncErrorDiagnosis {
+  const rawError = normalizeCloudSyncError(error);
+  let title = '同步遇到问题';
+  let message = '同步失败，请稍后重试；如果反复出现，请复制错误详情反馈。';
+  let canAutoRetry = false;
+  let canUserFix = false;
+  let suggestedActions = [
+    '再次点击立即同步',
+    '复制错误详情并反馈'
+  ];
+
+  if (isCloudSyncInstabilityError(rawError)) {
+    title = '云端同步状态暂时不一致';
+    message = '应用会保留本机数据并自动重试；如果持续出现，请查看详情复制诊断信息。';
+    canAutoRetry = true;
+    suggestedActions = [
+      '等待下一次自动同步或稍后手动重试',
+      '确认同一个云同步目录没有被其他工具或旧版本应用改写',
+      '复制错误详情并反馈'
+    ];
+  } else if (isCloudSyncAuthError(rawError)) {
+    title = '云存储认证失败';
+    message = '存储服务拒绝了访问，请检查 WebDAV 用户名、密码或授权状态。';
+    canUserFix = true;
+    suggestedActions = [
+      '重新输入 WebDAV 用户名和密码',
+      '确认账号仍有访问同步目录的权限',
+      '保存配置后重新测试连接'
+    ];
+  } else if (isCloudSyncNetworkError(rawError)) {
+    title = '无法连接到云存储';
+    message = '当前网络或云存储服务暂时不可用，应用会按同步周期自动重试。';
+    canAutoRetry = true;
+    canUserFix = true;
+    suggestedActions = [
+      '检查网络连接和 WebDAV 服务器地址',
+      '确认代理、证书或服务器状态正常',
+      '稍后重试同步'
+    ];
+  } else if (isCloudSyncPathError(rawError)) {
+    title = '云端同步目录不可用';
+    message = '同步目录无法读取或不存在，请检查 WebDAV/iCloud 路径配置。';
+    canUserFix = true;
+    suggestedActions = [
+      '检查云存储目录路径是否存在',
+      '确认应用拥有读取和写入权限',
+      '保存配置后重新同步'
+    ];
+  } else if (isCloudSyncDatabaseError(rawError)) {
+    title = '本地数据读写失败';
+    message = '读取或写入本地数据库失败，请重启应用后重试；若仍失败请复制错误详情反馈。';
+    suggestedActions = [
+      '重启应用后重新同步',
+      '确认本机磁盘空间充足',
+      '复制错误详情并反馈'
+    ];
+  }
+
+  return {
+    title,
+    message,
+    rawError,
+    canAutoRetry,
+    canUserFix,
+    suggestedActions,
+    copyText: createCloudSyncErrorReport(rawError, context, {
+      title,
+      message,
+      canAutoRetry,
+      canUserFix,
+      suggestedActions
+    })
+  };
+}
+
 export function getFriendlyCloudSyncError(error?: string): string {
-  if (!error) return '同步失败，请稍后重试';
+  return getCloudSyncErrorDiagnosis(error).message;
+}
+
+function normalizeCloudSyncError(error?: string): string {
+  if (!error || !error.trim()) {
+    return '未知错误';
+  }
+
+  return error.trim();
+}
+
+function isCloudSyncInstabilityError(error: string): boolean {
   if (
     error.includes('云端同步文件状态持续变化') ||
     error.includes('云同步 manifest 保存后校验失败') ||
+    error.includes('云同步 manifest 保存后数据校验失败') ||
     error.includes('云同步快照文件 保存后')
   ) {
-    return '云端同步状态暂时不稳定，应用会自动重试';
+    return true;
   }
-  if (error.includes('401') || error.includes('Unauthorized') || error.includes('403')) {
-    return '存储服务认证失败，请检查用户名和密码是否正确';
-  }
-  if (
+
+  return false;
+}
+
+function isCloudSyncAuthError(error: string): boolean {
+  return error.includes('401') || error.includes('Unauthorized') || error.includes('403');
+}
+
+function isCloudSyncNetworkError(error: string): boolean {
+  return (
     error.includes('ECONNRESET') ||
     error.includes('ECONNREFUSED') ||
     error.includes('ENOTFOUND') ||
@@ -1617,14 +1731,70 @@ export function getFriendlyCloudSyncError(error?: string): string {
     error.includes('TLS connection') ||
     error.includes('socket disconnected') ||
     error.includes('Network') ||
-    error.includes('network')
-  ) {
-    return '暂时无法连接到云存储，应用会按同步周期自动重试';
+    error.includes('network') ||
+    error.includes('fetch failed')
+  );
+}
+
+function isCloudSyncPathError(error: string): boolean {
+  return (
+    error.includes('404') ||
+    error.includes('Not Found') ||
+    error.includes('not found') ||
+    error.includes('目录不存在') ||
+    error.includes('路径不存在')
+  );
+}
+
+function isCloudSyncDatabaseError(error: string): boolean {
+  return error.includes('数据库') || error.includes('database');
+}
+
+function createCloudSyncErrorReport(
+  rawError: string,
+  context: CloudSyncErrorDiagnosisContext,
+  diagnosis: Omit<CloudSyncErrorDiagnosis, 'rawError' | 'copyText'>
+): string {
+  const lines = [
+    'AI-Gist 云同步错误诊断',
+    `时间: ${context.timestamp || new Date().toISOString()}`,
+    `平台: ${PlatformDetector.getPlatform()}`,
+    `标题: ${diagnosis.title}`,
+    `说明: ${diagnosis.message}`,
+    `自动重试: ${diagnosis.canAutoRetry ? '是' : '否'}`,
+    `用户可处理: ${diagnosis.canUserFix ? '是' : '否'}`
+  ];
+
+  if (context.storageId) {
+    lines.push(`存储配置 ID: ${context.storageId}`);
   }
-  if (error.includes('数据库') || error.includes('database')) {
-    return '读取或写入本地数据失败，请重启应用后再试';
+
+  if (context.reason) {
+    lines.push(`触发原因: ${context.reason}`);
   }
-  return `同步失败：${error}`;
+
+  if (context.status) {
+    lines.push(`同步状态: ${context.status}`);
+  }
+
+  if (typeof context.failureCount === 'number') {
+    lines.push(`连续失败次数: ${context.failureCount}`);
+  }
+
+  if (typeof navigator !== 'undefined' && navigator.userAgent) {
+    lines.push(`User-Agent: ${navigator.userAgent}`);
+  }
+
+  lines.push(
+    '',
+    '建议操作:',
+    ...diagnosis.suggestedActions.map(action => `- ${action}`),
+    '',
+    '原始错误:',
+    rawError
+  );
+
+  return lines.join('\n');
 }
 
 function hasRemoteRevisionChanged(
