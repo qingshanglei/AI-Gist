@@ -100,6 +100,17 @@ class MutableSyncDatabase {
   }
 }
 
+interface TestICloudClientHooks {
+  saveCloudSyncManifest?: (
+    context: {
+      storageId: string
+      manifest: CloudSyncManifest
+      options: CloudSyncManifestSaveOptions
+    },
+    saveNormally: () => Promise<CloudSyncManifestSaveResult>
+  ) => Promise<CloudSyncManifestSaveResult>
+}
+
 const INITIAL_IMAGE = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lZ2nNwAAAABJRU5ErkJggg=='
 const UPDATED_IMAGE = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADUlEQVR42mP8z8BQDwAFgwJ/lZ2nNwAAAABJRU5ErkJggg=='
 
@@ -274,6 +285,89 @@ describe('Cloud sync robustness E2E over iCloud Drive local provider', () => {
     expect(manifestFile.latestSnapshot.dataChecksum)
       .toBe(createCloudSyncDataChecksum(manifestFile.latestSnapshot.data))
   })
+
+  it('iCloud Drive 同步到一半只写入 snapshot 时重启能从快照恢复 manifest', async () => {
+    const storageId = 'icloud-half-written-snapshot-before-manifest'
+    let failManifestWrite = true
+    const interruptedClient = createICloudSyncClient(storageId, {
+      saveCloudSyncManifest: async (_context, saveNormally) => {
+        if (failManifestWrite) {
+          failManifestWrite = false
+          return {
+            success: false,
+            error: 'simulated app close before iCloud manifest pointer was saved'
+          }
+        }
+
+        return saveNormally()
+      }
+    })
+    const data = createRealisticDataSet()
+    const interruptedDevice = createSyncService(
+      interruptedClient,
+      new MutableSyncDatabase(data),
+      new MemoryStorage(),
+      'icloud-device-interrupted'
+    )
+
+    const failed = await interruptedDevice.syncNow(storageId, {
+      deviceName: 'MacBook Interrupted',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(failed.success).toBe(false)
+    expect(failed.error).toContain('iCloud manifest pointer')
+
+    const normalClient = createICloudSyncClient(storageId)
+    expect(await normalClient.listCloudSyncSnapshots(storageId)).toHaveLength(1)
+    expect((await normalClient.getCloudSyncManifest(storageId)).latestSnapshot).toBeUndefined()
+
+    const restartedDevice = createSyncService(
+      normalClient,
+      new MutableSyncDatabase(data),
+      new MemoryStorage(),
+      'icloud-device-interrupted'
+    )
+    const recovered = await restartedDevice.syncNow(storageId, {
+      deviceName: 'MacBook Interrupted Restarted',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(recovered, JSON.stringify(recovered, null, 2)).toMatchObject({
+      success: true,
+      uploadedRemote: false,
+      appliedLocal: false
+    })
+    expect(recovered.error).toBeUndefined()
+
+    const manifest = await normalClient.getCloudSyncManifest(storageId)
+    expect(manifest.latestSnapshot?.deviceId).toBe('icloud-device-interrupted')
+    expect(manifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(manifest.latestSnapshot!.data))
+    expect(manifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'icloud-prompt-launch',
+        title: 'iCloud 发布计划提示词',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(manifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'icloud-history-initial',
+        promptUuid: 'icloud-prompt-launch',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(await normalClient.listCloudSyncSnapshots(storageId)).toHaveLength(1)
+
+    const repeatedClick = await restartedDevice.syncNow(storageId, {
+      deviceName: 'MacBook Interrupted Restarted',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(repeatedClick).toMatchObject({ success: true, action: 'noop' })
+    expect(await normalClient.listCloudSyncSnapshots(storageId)).toHaveLength(1)
+  })
 })
 
 function createSyncService(
@@ -290,7 +384,7 @@ function createSyncService(
   })
 }
 
-function createICloudSyncClient(storageId: string) {
+function createICloudSyncClient(storageId: string, hooks: TestICloudClientHooks = {}) {
   const provider = new ICloudProvider({
     id: storageId,
     name: `iCloud ${storageId}`,
@@ -336,34 +430,46 @@ function createICloudSyncClient(storageId: string) {
       manifest: CloudSyncManifest,
       options: CloudSyncManifestSaveOptions = {}
     ): Promise<CloudSyncManifestSaveResult> {
-      try {
-        await provider.initializeDirectories()
-        const currentManifest = await readManifest()
-        if (!doesCloudSyncManifestMatchExpectedRevision(currentManifest, options.expectedRevision)) {
-          throw createCloudSyncManifestRevisionConflictError(
-            options.expectedRevision,
-            getCloudSyncManifestRevision(currentManifest)
-          )
-        }
+      const saveNormally = async (): Promise<CloudSyncManifestSaveResult> => {
+        try {
+          await provider.initializeDirectories()
+          const currentManifest = await readManifest()
+          if (!doesCloudSyncManifestMatchExpectedRevision(currentManifest, options.expectedRevision)) {
+            throw createCloudSyncManifestRevisionConflictError(
+              options.expectedRevision,
+              getCloudSyncManifestRevision(currentManifest)
+            )
+          }
 
-        const primaryInfo = await provider.getFileInfo(getCloudSyncManifestPath())
-        const content = Buffer.from(JSON.stringify(assertValidCloudSyncManifest(manifest), null, 2), 'utf-8')
-        await provider.writeFile(getCloudSyncManifestPath(), content, {
-          ifMatch: primaryInfo?.etag,
-          ifNoneMatch: !primaryInfo && !currentManifest.latestSnapshot
-        })
-        await provider.writeFile(getCloudSyncManifestBackupPath(), content)
-        return { success: true }
-      } catch (error) {
-        return {
-          success: false,
-          conflict: isRevisionConflictError(error),
-          error: formatError(error),
-          currentRevision: isRevisionConflictError(error)
-            ? getCloudSyncManifestRevision(await readManifest().catch(() => createEmptyCloudSyncManifest()))
-            : undefined
+          const primaryInfo = await provider.getFileInfo(getCloudSyncManifestPath())
+          const content = Buffer.from(JSON.stringify(assertValidCloudSyncManifest(manifest), null, 2), 'utf-8')
+          await provider.writeFile(getCloudSyncManifestPath(), content, {
+            ifMatch: primaryInfo?.etag,
+            ifNoneMatch: !primaryInfo && !currentManifest.latestSnapshot
+          })
+          await provider.writeFile(getCloudSyncManifestBackupPath(), content)
+          return { success: true }
+        } catch (error) {
+          return {
+            success: false,
+            conflict: isRevisionConflictError(error),
+            error: formatError(error),
+            currentRevision: isRevisionConflictError(error)
+              ? getCloudSyncManifestRevision(await readManifest().catch(() => createEmptyCloudSyncManifest()))
+              : undefined
+          }
         }
       }
+
+      if (hooks.saveCloudSyncManifest) {
+        return hooks.saveCloudSyncManifest({
+          storageId: _targetStorageId,
+          manifest,
+          options
+        }, saveNormally)
+      }
+
+      return saveNormally()
     },
 
     async listCloudSyncSnapshots(_targetStorageId: string) {
