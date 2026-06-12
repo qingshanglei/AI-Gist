@@ -51,6 +51,8 @@ const DEFAULT_AUTO_SYNC_RETRY_MS = DEFAULT_REMOTE_POLL_INTERVAL_MS;
 const DEFAULT_STARTUP_SYNC_DELAY_MS = 10000;
 const MAX_AUTO_SYNC_RETRY_MS = 60 * 60 * 1000;
 const MAX_REMOTE_RECHECK_ATTEMPTS = 3;
+const READ_AFTER_WRITE_VERIFY_ATTEMPTS = 4;
+const READ_AFTER_WRITE_VERIFY_RETRY_MS = 120;
 const SYNC_STORE_NAMES: DataStoreName[] = [
   'categories',
   'prompts',
@@ -547,7 +549,10 @@ export class CloudSyncService {
       let latestManifestForUpload: CloudSyncManifest | null = null;
       if (!mergedEqualsRemote) {
         const latestManifest = await this.getCloudClient().getCloudSyncManifest(storageId);
-        if (hasRemoteRevisionChanged(remoteSnapshot, latestManifest.latestSnapshot)) {
+        if (
+          hasRemoteRevisionChanged(remoteSnapshot, latestManifest.latestSnapshot) &&
+          hasRemoteDataChanged(remoteData, latestManifest.latestSnapshot)
+        ) {
           return await this.retryWithLatestRemote(storageId, options, attempt);
         }
 
@@ -632,7 +637,7 @@ export class CloudSyncService {
     attempt: number
   ): Promise<CloudSyncResult> {
     if (attempt + 1 >= MAX_REMOTE_RECHECK_ATTEMPTS) {
-      throw new Error('云端同步文件正在被其他设备更新，请稍后重试');
+      throw new Error('云端同步文件状态持续变化，应用会在下个同步周期自动重试');
     }
 
     return await this.performSync(storageId, options, attempt + 1);
@@ -745,13 +750,33 @@ export class CloudSyncService {
     storageId: string,
     manifest: CloudSyncManifest
   ): Promise<void> {
-    const cloudClient = this.getCloudClient();
+    let lastError: unknown;
+    for (let attempt = 0; attempt < READ_AFTER_WRITE_VERIFY_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) {
+        await delay(READ_AFTER_WRITE_VERIFY_RETRY_MS * attempt);
+      }
+
+      try {
+        await this.verifySavedManifestOnce(storageId, manifest);
+        return;
+      } catch (error) {
+        lastError = error;
+      }
+    }
+
+    throw lastError instanceof Error ? lastError : new Error(String(lastError));
+  }
+
+  private async verifySavedManifestOnce(
+    storageId: string,
+    manifest: CloudSyncManifest
+  ): Promise<void> {
     const expectedSnapshot = manifest.latestSnapshot;
     if (!expectedSnapshot) {
       return;
     }
 
-    const savedManifest = await cloudClient.getCloudSyncManifest(storageId);
+    const savedManifest = await this.getCloudClient().getCloudSyncManifest(storageId);
     const savedSnapshot = savedManifest.latestSnapshot;
     if (!savedSnapshot) {
       throw new Error(
@@ -762,7 +787,7 @@ export class CloudSyncService {
     this.assertValidSavedSnapshot(savedSnapshot);
 
     if (savedSnapshot.revision !== expectedSnapshot.revision) {
-      throw new CloudSyncRemoteChangedError(
+      throw new Error(
         `云同步 manifest 保存后校验失败：期望 revision ${expectedSnapshot.revision}，实际 ${savedSnapshot.revision}`
       );
     }
@@ -1385,6 +1410,12 @@ export function getCloudSyncResultMessage(action?: string, _conflictCount = 0): 
 
 export function getFriendlyCloudSyncError(error?: string): string {
   if (!error) return '同步失败，请稍后重试';
+  if (
+    error.includes('云端同步文件状态持续变化') ||
+    error.includes('云同步 manifest 保存后校验失败')
+  ) {
+    return '云端同步状态暂时不稳定，应用会自动重试';
+  }
   if (error.includes('401') || error.includes('Unauthorized') || error.includes('403')) {
     return '存储服务认证失败，请检查用户名和密码是否正确';
   }
@@ -1412,6 +1443,17 @@ function hasRemoteRevisionChanged(
   latestSnapshot?: CloudSyncSnapshot
 ): boolean {
   return !!latestSnapshot && latestSnapshot.revision !== previousSnapshot.revision;
+}
+
+function hasRemoteDataChanged(
+  previousRemoteData: CloudSyncDataSet,
+  latestSnapshot?: CloudSyncSnapshot
+): boolean {
+  if (!latestSnapshot) {
+    return false;
+  }
+
+  return !dataSetsEqual(previousRemoteData, applyCloudSyncTombstones(latestSnapshot.data));
 }
 
 class CloudSyncRemoteChangedError extends Error {
@@ -1446,6 +1488,10 @@ function isRecoverableCloudSyncManifestCorruption(error: unknown): boolean {
 
 function isBrowserOffline(): boolean {
   return typeof navigator !== 'undefined' && navigator.onLine === false;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
 }
 
 function createEmptySummary(): CloudSyncMergeSummary {

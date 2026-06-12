@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import {
   CloudSyncService,
   DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES,
+  getFriendlyCloudSyncError,
   type CloudSyncServiceDeps
 } from '~/lib/services/cloud-sync.service'
 import { emitDataChange } from '~/lib/services/data-change-events'
@@ -223,14 +224,47 @@ describe('CloudSyncService', () => {
       .mockReset()
       .mockResolvedValueOnce(emptyManifest)
       .mockResolvedValueOnce(emptyManifest)
-      .mockResolvedValueOnce(emptyManifest)
+      .mockImplementation(async () => emptyManifest)
 
     const result = await service.syncNow('cfg-1')
 
     expect(result.success).toBe(false)
     expect(result.error).toContain('云同步 manifest 保存后校验失败')
+    expect(result.error).not.toContain('其他设备')
     expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
     expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toBeNull()
+  })
+
+  it('waits out stale read-after-write responses instead of treating them as another device', async () => {
+    const emptyManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    const { service, cloudClient, storage } = createService(baseData, emptyManifest)
+    let savedManifest: any
+    cloudClient.getCloudSyncManifest
+      .mockReset()
+      .mockResolvedValueOnce(emptyManifest)
+      .mockResolvedValueOnce(emptyManifest)
+      .mockResolvedValueOnce(emptyManifest)
+      .mockImplementation(async () => savedManifest)
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (_storageId: string, manifest: any) => {
+      savedManifest = manifest
+      return { success: true }
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.error).toBeUndefined()
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain(savedManifest.latestSnapshot.revision)
+  })
+
+  it('does not mention other devices for local read-after-write consistency failures', () => {
+    const message = getFriendlyCloudSyncError(
+      '云同步 manifest 保存后校验失败：期望 revision rev-new，实际 rev-old'
+    )
+
+    expect(message).toBe('云端同步状态暂时不稳定，应用会自动重试')
+    expect(message).not.toContain('其他设备')
   })
 
   it('fails sync when a saved manifest reads back the same revision with different data', async () => {
@@ -514,6 +548,46 @@ describe('CloudSyncService', () => {
     expect(savedManifest.latestSnapshot.data.prompts).toEqual(
       expect.arrayContaining([expect.objectContaining({ title: 'Local edit' })])
     )
+  })
+
+  it('continues uploading when the remote revision changes but remote data is unchanged', async () => {
+    const localData = {
+      ...baseData,
+      prompts: [{ id: 1, uuid: 'prompt-1', title: 'Local edit', updatedAt: '2026-01-03T00:00:00.000Z' }]
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(baseData, 'device-b', 'rev-remote-a')
+    const sameDataNewRevisionSnapshot = createCloudSyncSnapshot(baseData, 'device-b', 'rev-remote-b')
+    const initialManifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot: remoteSnapshot
+    }
+    const sameDataManifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:01:00.000Z'),
+      latestSnapshot: sameDataNewRevisionSnapshot,
+      baseSnapshot: sameDataNewRevisionSnapshot
+    }
+    const { service, cloudClient, database } = createService(localData, initialManifest)
+    let savedManifest: any
+    cloudClient.getCloudSyncManifest
+      .mockReset()
+      .mockResolvedValueOnce(initialManifest)
+      .mockResolvedValueOnce(sameDataManifest)
+      .mockImplementation(async () => savedManifest)
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (_storageId: string, manifest: any) => {
+      savedManifest = manifest
+      return { success: true }
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.error).toBeUndefined()
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+    expect(savedManifest.latestSnapshot.data.prompts).toEqual([
+      expect.objectContaining({ title: 'Local edit' })
+    ])
   })
 
   it('retries when the cloud rejects a manifest save because another device wrote first', async () => {
