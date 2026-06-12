@@ -391,6 +391,122 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     expect(retried).toMatchObject({ success: true, action: 'uploaded' })
     expect(retried.error).toBeUndefined()
   })
+
+  it('应用远端数据中途失败时会回滚本机数据，下次同步能继续完整下载', async () => {
+    const storageId = 'robust-local-apply-rollback'
+    const client = createWebDAVSyncClient(storageId)
+    const baseData = createDataSet({ promptTitle: 'Rollback base prompt' })
+    const deviceADatabase = new MutableSyncDatabase(baseData)
+    const deviceAStorage = new MemoryStorage()
+    const deviceA = createSyncService(client, deviceADatabase, deviceAStorage, 'device-a')
+
+    const firstSync = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(firstSync).toMatchObject({ success: true, action: 'uploaded' })
+    const localBeforeFailedDownload = cloneData(deviceADatabase.data)
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'device-b')
+    expect((await deviceB.syncNow(storageId, { platform: 'electron' })).action).toBe('downloaded')
+
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.prompts![0].title = 'Rollback remote prompt from B'
+      data.prompts![0].updatedAt = '2026-06-13T12:00:00.000Z'
+      data.promptVariables![0].defaultValue = 'remote value'
+      data.promptVariables![0].updatedAt = '2026-06-13T12:00:00.000Z'
+      data.promptHistories!.push({
+        id: 31,
+        uuid: 'history-remote-v2',
+        promptId: 10,
+        promptUuid: 'prompt-main',
+        title: 'Rollback remote prompt from B',
+        content: 'Remote v2 history',
+        version: 2,
+        updatedAt: '2026-06-13T12:00:00.000Z'
+      })
+      data.settings = [{
+        key: 'theme',
+        value: 'remote-light',
+        type: 'string',
+        updatedAt: '2026-06-13T12:00:00.000Z'
+      }]
+    })
+    const bUpload = await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(bUpload).toMatchObject({ success: true, action: 'uploaded' })
+    const remoteRevisionBeforeFailedDownload = (await client.getCloudSyncManifest(storageId)).latestSnapshot?.revision
+
+    let replaceCalls = 0
+    deviceADatabase.replaceAllData.mockImplementation(async (nextData: CloudSyncDataSet) => {
+      replaceCalls += 1
+      if (replaceCalls === 1) {
+        deviceADatabase.data = mutateDataSet(nextData, data => {
+          data.promptHistories = []
+        })
+        return {
+          success: false,
+          message: 'partial IndexedDB restore failed',
+          error: 'partial IndexedDB restore failed'
+        }
+      }
+
+      deviceADatabase.data = cloneData(nextData)
+      return {
+        success: true,
+        message: 'ok'
+      }
+    })
+
+    const failedDownload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(failedDownload.success).toBe(false)
+    expect(failedDownload.error).toContain('partial IndexedDB restore failed')
+    expect(failedDownload.appliedLocal).toBe(false)
+    expect(replaceCalls).toBe(2)
+    expect(deviceADatabase.data).toEqual(localBeforeFailedDownload)
+    expect((await client.getCloudSyncManifest(storageId)).latestSnapshot?.revision)
+      .toBe(remoteRevisionBeforeFailedDownload)
+    expect(deviceAStorage.getItem('ai_gist_cloud_sync_state:robust-local-apply-rollback'))
+      .toContain(firstSync.remoteRevision)
+
+    deviceADatabase.replaceAllData.mockImplementation(async (nextData: CloudSyncDataSet) => {
+      deviceADatabase.data = cloneData(nextData)
+      return {
+        success: true,
+        message: 'ok'
+      }
+    })
+
+    const retriedDownload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(retriedDownload, JSON.stringify(retriedDownload, null, 2))
+      .toMatchObject({ success: true, action: 'downloaded' })
+    expect(deviceADatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'prompt-main', title: 'Rollback remote prompt from B' })
+    ]))
+    expect(deviceADatabase.data.promptVariables).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'var-main', defaultValue: 'remote value' })
+    ]))
+    expect(deviceADatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'history-main' }),
+      expect.objectContaining({ uuid: 'history-remote-v2', promptUuid: 'prompt-main' })
+    ]))
+    expect(deviceADatabase.data.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'theme', value: 'remote-light' })
+    ]))
+  })
 })
 
 function createSyncService(
