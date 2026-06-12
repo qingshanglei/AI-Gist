@@ -1448,6 +1448,71 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     ]))
   })
 
+  it('服务端保存 snapshot 失败时不会写 manifest 或本地状态，恢复后可完整重试', async () => {
+    const storageId = 'robust-snapshot-save-fails-before-manifest'
+    const client = createWebDAVSyncClient(storageId)
+    const database = new MutableSyncDatabase(createRealisticDataSet())
+    const storage = new MemoryStorage()
+    const service = createSyncService(client, database, storage, 'device-snapshot-fail')
+    const saveSnapshotSpy = vi.spyOn(client, 'saveCloudSyncSnapshot')
+      .mockResolvedValueOnce({
+        success: false,
+        error: 'HTTP 507 simulated WebDAV snapshot write failure'
+      })
+
+    const failed = await service.syncNow(storageId, {
+      deviceName: 'Laptop Snapshot Fail',
+      platform: 'electron',
+      reason: 'manual'
+    })
+
+    expect(failed.success).toBe(false)
+    expect(failed.error).toContain('HTTP 507')
+    expect(await client.listCloudSyncSnapshots(storageId)).toHaveLength(0)
+    expect((await client.getCloudSyncManifest(storageId)).latestSnapshot).toBeUndefined()
+    expect(storage.getItem(`ai_gist_cloud_sync_state:${storageId}`)).toBeNull()
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+
+    saveSnapshotSpy.mockRestore()
+    const retried = await service.syncNow(storageId, {
+      deviceName: 'Laptop Snapshot Fail',
+      platform: 'electron',
+      reason: 'manual'
+    })
+
+    expect(retried, JSON.stringify(retried, null, 2)).toMatchObject({
+      success: true,
+      action: 'uploaded',
+      uploadedRemote: true,
+      appliedLocal: false
+    })
+    const manifest = await client.getCloudSyncManifest(storageId)
+    expect(manifest.latestSnapshot?.revision).toBe(retried.remoteRevision)
+    expect(manifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(manifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-history-initial',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(storage.getItem(`ai_gist_cloud_sync_state:${storageId}`))
+      .toContain(retried.remoteRevision)
+    expect(await client.listCloudSyncSnapshots(storageId)).toHaveLength(1)
+
+    const repeatedClick = await service.syncNow(storageId, {
+      deviceName: 'Laptop Snapshot Fail',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(repeatedClick).toMatchObject({ success: true, action: 'noop' })
+    expect(await client.listCloudSyncSnapshots(storageId)).toHaveLength(1)
+  })
+
   it('云端已上传但本地同步状态未保存时，下次启动只补状态不会重复上传', async () => {
     const storageId = 'robust-uploaded-state-lost-before-close'
     const client = createWebDAVSyncClient(storageId)
