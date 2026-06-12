@@ -8,7 +8,11 @@ import {
   CLOUD_BACKUP_FILE_PREFIX,
   getCloudBackupFilePath
 } from '@shared/cloud-backup-paths';
-import type { CloudSyncManifest } from '@shared/cloud-sync-manifest';
+import type {
+  CloudSyncManifest,
+  CloudSyncManifestSaveOptions,
+  CloudSyncManifestSaveResult
+} from '@shared/cloud-sync-manifest';
 import {
   assertValidCloudSyncManifest,
   createEmptyCloudSyncManifest
@@ -239,10 +243,11 @@ export class WebCloudBackupService {
     }
   }
 
-  async saveCloudSyncManifest(storageId: string, manifest: CloudSyncManifest): Promise<{
-    success: boolean;
-    error?: string;
-  }> {
+  async saveCloudSyncManifest(
+    storageId: string,
+    manifest: CloudSyncManifest,
+    options: CloudSyncManifestSaveOptions = {}
+  ): Promise<CloudSyncManifestSaveResult> {
     try {
       const config = await this.getWebDAVConfig(storageId);
       await this.request('/api/cloud/webdav/save-sync-manifest', {
@@ -250,10 +255,18 @@ export class WebCloudBackupService {
         manifest: assertValidCloudSyncManifest({
           ...manifest,
           updatedAt: new Date().toISOString()
-        })
+        }),
+        options
       });
       return { success: true };
     } catch (error) {
+      if (this.isRevisionConflictError(error)) {
+        return {
+          success: false,
+          conflict: true,
+          error: this.formatError(error)
+        };
+      }
       return { success: false, error: this.formatError(error) };
     }
   }
@@ -318,6 +331,11 @@ export class WebCloudBackupService {
   private isNotFoundError(error: unknown): boolean {
     const message = this.formatError(error);
     return message.includes('404') || message.includes('not found') || message.includes('不存在');
+  }
+
+  private isRevisionConflictError(error: unknown): boolean {
+    return /manifest 已被其他设备更新|Precondition|412|If-Match|If-None-Match|已被其他设备更新/i
+      .test(this.formatError(error));
   }
 }
 

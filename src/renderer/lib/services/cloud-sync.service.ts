@@ -14,9 +14,14 @@ import {
   mergeCloudSyncData,
   validateCloudSyncSnapshot
 } from '@shared/cloud-sync-engine';
-import type { CloudSyncManifest } from '@shared/cloud-sync-manifest';
+import type {
+  CloudSyncManifest,
+  CloudSyncManifestSaveOptions,
+  CloudSyncManifestSaveResult
+} from '@shared/cloud-sync-manifest';
 import {
   createEmptyCloudSyncManifest,
+  getCloudSyncManifestRevision,
   sanitizeCloudSyncConflictsForMetadata,
   updateCloudSyncManifestDevice
 } from '@shared/cloud-sync-manifest';
@@ -38,7 +43,7 @@ export const CLOUD_SYNC_INTERVAL_SETTING_KEY = 'cloud.sync.intervalMinutes';
 export const DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES = 15;
 export const MIN_CLOUD_SYNC_INTERVAL_MINUTES = 5;
 export const MAX_CLOUD_SYNC_INTERVAL_MINUTES = 1440;
-const DEFAULT_AUTO_SYNC_DEBOUNCE_MS = 60000;
+const DEFAULT_AUTO_SYNC_DEBOUNCE_MS = 5000;
 const DEFAULT_REMOTE_POLL_INTERVAL_MS = DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES * 60 * 1000;
 const DEFAULT_AUTO_SYNC_RETRY_MS = DEFAULT_REMOTE_POLL_INTERVAL_MS;
 const DEFAULT_STARTUP_SYNC_DELAY_MS = 10000;
@@ -88,10 +93,11 @@ export interface CloudSyncOptions extends CloudSyncMergeOptions {
 
 export interface CloudSyncCloudClient {
   getCloudSyncManifest(storageId: string): Promise<CloudSyncManifest>;
-  saveCloudSyncManifest(storageId: string, manifest: CloudSyncManifest): Promise<{
-    success: boolean;
-    error?: string;
-  }>;
+  saveCloudSyncManifest(
+    storageId: string,
+    manifest: CloudSyncManifest,
+    options?: CloudSyncManifestSaveOptions
+  ): Promise<CloudSyncManifestSaveResult>;
 }
 
 export interface CloudSyncDatabaseClient {
@@ -459,7 +465,18 @@ export class CloudSyncService {
         }
 
         const snapshot = createCloudSyncSnapshot(localData, deviceId);
-        await this.saveManifest(storageId, this.buildManifest(latestManifest, snapshot, [], deviceId, now, options));
+        try {
+          await this.saveManifest(
+            storageId,
+            this.buildManifest(latestManifest, snapshot, [], deviceId, now, options),
+            getCloudSyncManifestRevision(latestManifest)
+          );
+        } catch (error) {
+          if (isCloudSyncRemoteChangedError(error)) {
+            return await this.retryWithLatestRemote(storageId, options, attempt);
+          }
+          throw error;
+        }
         this.saveLocalState(storageId, deviceId, snapshot, now);
 
         return {
@@ -531,10 +548,18 @@ export class CloudSyncService {
 
       let uploadedRemote = false;
       if (latestManifestForUpload) {
-        await this.saveManifest(
-          storageId,
-          this.buildManifest(latestManifestForUpload, finalSnapshot, mergeResult.conflicts, deviceId, now, options)
-        );
+        try {
+          await this.saveManifest(
+            storageId,
+            this.buildManifest(latestManifestForUpload, finalSnapshot, mergeResult.conflicts, deviceId, now, options),
+            getCloudSyncManifestRevision(latestManifestForUpload)
+          );
+        } catch (error) {
+          if (isCloudSyncRemoteChangedError(error)) {
+            return await this.retryWithLatestRemote(storageId, options, attempt);
+          }
+          throw error;
+        }
         uploadedRemote = true;
       }
 
@@ -614,10 +639,19 @@ export class CloudSyncService {
     );
   }
 
-  private async saveManifest(storageId: string, manifest: CloudSyncManifest): Promise<void> {
+  private async saveManifest(
+    storageId: string,
+    manifest: CloudSyncManifest,
+    expectedRevision: string | null
+  ): Promise<void> {
     const cloudClient = this.getCloudClient();
-    const result = await cloudClient.saveCloudSyncManifest(storageId, manifest);
+    const result = await cloudClient.saveCloudSyncManifest(storageId, manifest, {
+      expectedRevision
+    });
     if (!result.success) {
+      if (result.conflict || isCloudSyncRevisionConflictMessage(result.error)) {
+        throw new CloudSyncRemoteChangedError(result.error || '云端同步文件已被其他设备更新');
+      }
       throw new Error(result.error || '保存云同步 manifest 失败');
     }
 
@@ -637,7 +671,7 @@ export class CloudSyncService {
     this.assertValidSavedSnapshot(savedSnapshot);
 
     if (savedSnapshot.revision !== expectedSnapshot.revision) {
-      throw new Error(
+      throw new CloudSyncRemoteChangedError(
         `云同步 manifest 保存后校验失败：期望 revision ${expectedSnapshot.revision}，实际 ${savedSnapshot.revision}`
       );
     }
@@ -687,20 +721,23 @@ export class CloudSyncService {
     if (PlatformDetector.isElectron()) {
       return {
         getCloudSyncManifest: storageId => CloudBackupAPI.getCloudSyncManifest(storageId),
-        saveCloudSyncManifest: (storageId, manifest) => CloudBackupAPI.saveCloudSyncManifest(storageId, manifest)
+        saveCloudSyncManifest: (storageId, manifest, options) =>
+          CloudBackupAPI.saveCloudSyncManifest(storageId, manifest, options)
       };
     }
 
     if (PlatformDetector.isWeb()) {
       return {
         getCloudSyncManifest: storageId => webCloudBackupService.getCloudSyncManifest(storageId),
-        saveCloudSyncManifest: (storageId, manifest) => webCloudBackupService.saveCloudSyncManifest(storageId, manifest)
+        saveCloudSyncManifest: (storageId, manifest, options) =>
+          webCloudBackupService.saveCloudSyncManifest(storageId, manifest, options)
       };
     }
 
     return {
       getCloudSyncManifest: storageId => mobileCloudBackupService.getCloudSyncManifest(storageId),
-      saveCloudSyncManifest: (storageId, manifest) => mobileCloudBackupService.saveCloudSyncManifest(storageId, manifest)
+      saveCloudSyncManifest: (storageId, manifest, options) =>
+        mobileCloudBackupService.saveCloudSyncManifest(storageId, manifest, options)
     };
   }
 
@@ -924,6 +961,10 @@ export class CloudSyncService {
 
   private getAutoRunThrottleMs(reason: CloudSyncRunReason): number {
     if (reason === 'config-change' || reason === 'retry' || (reason === 'online' && this.failureCount > 0)) {
+      return 0;
+    }
+
+    if (reason === 'local-change') {
       return 0;
     }
 
@@ -1281,6 +1322,22 @@ function hasRemoteRevisionChanged(
   latestSnapshot?: CloudSyncSnapshot
 ): boolean {
   return !!latestSnapshot && latestSnapshot.revision !== previousSnapshot.revision;
+}
+
+class CloudSyncRemoteChangedError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'CloudSyncRemoteChangedError';
+  }
+}
+
+function isCloudSyncRemoteChangedError(error: unknown): error is CloudSyncRemoteChangedError {
+  return error instanceof CloudSyncRemoteChangedError ||
+    (error instanceof Error && error.name === 'CloudSyncRemoteChangedError');
+}
+
+function isCloudSyncRevisionConflictMessage(message: string | undefined): boolean {
+  return !!message && /manifest 已被其他设备更新|已被其他设备更新|Precondition|412|revision/i.test(message);
 }
 
 function isBrowserOffline(): boolean {

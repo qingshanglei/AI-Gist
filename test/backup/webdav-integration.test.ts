@@ -785,6 +785,65 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
       expect(loaded.latestSnapshot?.revision).toBe('rev-backup-only')
       expect(loaded.latestSnapshot?.data.quickOptimizationConfigs).toHaveLength(1)
     })
+
+    it('保存 manifest 时 expectedRevision 不匹配会拒绝覆盖云端新版本', async () => {
+      const service = MobileCloudBackupService.getInstance()
+      await saveConfig(service)
+
+      const manifestA = {
+        ...createEmptyCloudSyncManifest('2026-03-15T00:00:00.000Z'),
+        latestSnapshot: {
+          schemaVersion: 1 as const,
+          deviceId: 'device-a',
+          revision: 'rev-a',
+          createdAt: '2026-03-15T00:00:00.000Z',
+          data: mockExportData
+        }
+      }
+      const manifestB = {
+        ...createEmptyCloudSyncManifest('2026-03-15T00:01:00.000Z'),
+        latestSnapshot: {
+          schemaVersion: 1 as const,
+          deviceId: 'device-b',
+          revision: 'rev-b',
+          createdAt: '2026-03-15T00:01:00.000Z',
+          data: {
+            ...mockExportData,
+            prompts: [
+              { ...mockExportData.prompts[0], title: 'Device B edit' }
+            ]
+          }
+        }
+      }
+      const manifestC = {
+        ...createEmptyCloudSyncManifest('2026-03-15T00:02:00.000Z'),
+        latestSnapshot: {
+          schemaVersion: 1 as const,
+          deviceId: 'device-c',
+          revision: 'rev-c',
+          createdAt: '2026-03-15T00:02:00.000Z',
+          data: mockExportData
+        }
+      }
+
+      expect((await service.saveCloudSyncManifest('cfg-real', manifestA)).success).toBe(true)
+      expect((await service.saveCloudSyncManifest('cfg-real', manifestB, {
+        expectedRevision: 'rev-a'
+      })).success).toBe(true)
+
+      const staleSave = await service.saveCloudSyncManifest('cfg-real', manifestC, {
+        expectedRevision: 'rev-a'
+      })
+      expect(staleSave).toMatchObject({
+        success: false,
+        conflict: true,
+        currentRevision: 'rev-b'
+      })
+
+      const loaded = await service.getCloudSyncManifest('cfg-real')
+      expect(loaded.latestSnapshot?.revision).toBe('rev-b')
+      expect(loaded.latestSnapshot?.data.prompts[0].title).toBe('Device B edit')
+    })
   })
 
   // ----------------------------------------------------------------

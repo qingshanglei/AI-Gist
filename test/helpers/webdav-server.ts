@@ -23,10 +23,12 @@ function escapeXml(s: string): string {
   return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
 }
 
-function propfindXml(entries: { href: string; isDir: boolean; size: number; mtime: Date }[]): string {
+function propfindXml(entries: { href: string; isDir: boolean; size: number; mtime: Date; etag?: string }[]): string {
   const responses = entries.map(e => {
     const resourcetype = e.isDir ? '<D:resourcetype><D:collection/></D:resourcetype>' : '<D:resourcetype/>'
-    const extra = e.isDir ? '' : `<D:getcontentlength>${e.size}</D:getcontentlength>`
+    const extra = e.isDir
+      ? ''
+      : `<D:getcontentlength>${e.size}</D:getcontentlength><D:getetag>${escapeXml(e.etag || '')}</D:getetag>`
     return `
   <D:response>
     <D:href>${escapeXml(e.href)}</D:href>
@@ -152,7 +154,7 @@ export class TestWebDAVServer {
     }
 
     const depth = req.headers['depth'] ?? '1'
-    const entries: { href: string; isDir: boolean; size: number; mtime: Date }[] = []
+    const entries: { href: string; isDir: boolean; size: number; mtime: Date; etag?: string }[] = []
 
     // 当前资源本身
     entries.push({
@@ -160,6 +162,7 @@ export class TestWebDAVServer {
       isDir: stat.isDirectory(),
       size:  stat.size,
       mtime: stat.mtime,
+      etag:  createEtag(stat),
     })
 
     // depth=1 时列出子项
@@ -174,6 +177,7 @@ export class TestWebDAVServer {
           isDir: childStat.isDirectory(),
           size:  childStat.size,
           mtime: childStat.mtime,
+          etag:  createEtag(childStat),
         })
       }
     }
@@ -193,15 +197,34 @@ export class TestWebDAVServer {
     if (stat.isDirectory()) { res.writeHead(403); res.end(); return }
 
     const data = await fsp.readFile(fsPath)
-    res.writeHead(200, { 'Content-Length': String(data.length) })
+    res.writeHead(200, {
+      'Content-Length': String(data.length),
+      'ETag': createEtag(stat),
+    })
     res.end(data)
   }
 
   private async handlePut(req: http.IncomingMessage, res: http.ServerResponse, fsPath: string) {
+    const existingStat = await fsp.stat(fsPath).catch(() => null)
+    const ifNoneMatch = req.headers['if-none-match']
+    if (ifNoneMatch === '*' && existingStat) {
+      res.writeHead(412); res.end(); return
+    }
+
+    const ifMatch = req.headers['if-match']
+    if (typeof ifMatch === 'string') {
+      if (!existingStat || createEtag(existingStat) !== ifMatch) {
+        res.writeHead(412); res.end(); return
+      }
+    }
+
     await fsp.mkdir(path.dirname(fsPath), { recursive: true })
     const body = await readBody(req)
     await fsp.writeFile(fsPath, body)
-    res.writeHead(201); res.end()
+    const nextStat = await fsp.stat(fsPath)
+    res.writeHead(existingStat ? 204 : 201, {
+      'ETag': createEtag(nextStat),
+    }); res.end()
   }
 
   private async handleDelete(_req: http.IncomingMessage, res: http.ServerResponse, fsPath: string) {
@@ -231,6 +254,10 @@ export class TestWebDAVServer {
 }
 
 // ---- 工具函数 ----
+
+function createEtag(stat: fs.Stats): string {
+  return `"${stat.size}-${Math.floor(stat.mtimeMs)}"`
+}
 
 function readBody(req: http.IncomingMessage): Promise<Buffer> {
   return new Promise((resolve, reject) => {

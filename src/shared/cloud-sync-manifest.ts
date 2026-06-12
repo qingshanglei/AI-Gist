@@ -41,6 +41,23 @@ export interface CloudSyncManifestFallbackReadOptions {
   describeError?: (error: unknown) => string;
 }
 
+export interface CloudSyncManifestSaveOptions {
+  /**
+   * The cloud latestSnapshot revision this save is based on.
+   * - undefined: do not enforce compare-and-swap.
+   * - null: save only if the cloud manifest has no latestSnapshot yet.
+   * - string: save only if the cloud latestSnapshot revision still matches.
+   */
+  expectedRevision?: string | null;
+}
+
+export interface CloudSyncManifestSaveResult {
+  success: boolean;
+  error?: string;
+  conflict?: boolean;
+  currentRevision?: string | null;
+}
+
 export function createEmptyCloudSyncManifest(now = new Date().toISOString()): CloudSyncManifest {
   return {
     kind: CLOUD_SYNC_MANIFEST_KIND,
@@ -157,6 +174,30 @@ export function updateCloudSyncManifestDevice(
       [device.deviceId]: device
     }
   };
+}
+
+export function getCloudSyncManifestRevision(manifest: CloudSyncManifest | null | undefined): string | null {
+  return manifest?.latestSnapshot?.revision || null;
+}
+
+export function doesCloudSyncManifestMatchExpectedRevision(
+  manifest: CloudSyncManifest | null | undefined,
+  expectedRevision: string | null | undefined
+): boolean {
+  if (expectedRevision === undefined) {
+    return true;
+  }
+
+  return getCloudSyncManifestRevision(manifest) === expectedRevision;
+}
+
+export function createCloudSyncManifestRevisionConflictError(
+  expectedRevision: string | null | undefined,
+  currentRevision: string | null | undefined
+): Error {
+  const expected = expectedRevision || '空';
+  const current = currentRevision || '空';
+  return new Error(`云同步 manifest 已被其他设备更新：期望 revision ${expected}，当前 revision ${current}`);
 }
 
 function selectNewestManifest(

@@ -4,7 +4,11 @@ import type {
   ICloudConfig, 
   CloudBackupInfo 
 } from '@shared/types/cloud-backup';
-import type { CloudSyncManifest } from '@shared/cloud-sync-manifest';
+import type {
+  CloudSyncManifest,
+  CloudSyncManifestSaveOptions,
+  CloudSyncManifestSaveResult
+} from '@shared/cloud-sync-manifest';
 import { PlatformDetector } from '@shared/platform';
 import { mobileCloudBackupService } from '../services/mobile-cloud-backup.service';
 import { webCloudBackupService } from '../services/web-cloud-backup.service';
@@ -232,18 +236,19 @@ export class CloudBackupAPI {
   /**
    * 保存云同步 manifest
    */
-  static async saveCloudSyncManifest(storageId: string, manifest: CloudSyncManifest): Promise<{
-    success: boolean;
-    error?: string;
-  }> {
+  static async saveCloudSyncManifest(
+    storageId: string,
+    manifest: CloudSyncManifest,
+    options?: CloudSyncManifestSaveOptions
+  ): Promise<CloudSyncManifestSaveResult> {
     const client = getCloudBackupClient();
     if (client) {
-      return await client.saveCloudSyncManifest(storageId, manifest);
+      return await client.saveCloudSyncManifest(storageId, manifest, options);
     }
 
     if (!this.isElectronAvailable()) {
       throw new Error('Electron API not available');
     }
-    return await window.electronAPI.cloud.saveSyncManifest(storageId, manifest);
+    return await window.electronAPI.cloud.saveSyncManifest(storageId, manifest, options);
   }
 }

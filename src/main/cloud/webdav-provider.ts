@@ -1,5 +1,11 @@
 // 本地模块导入
-import { CloudStorageProvider, CloudFileInfo, WebDAVConfig } from '@shared/types/cloud-backup';
+import {
+  CloudStorageProvider,
+  CloudFileInfo,
+  CloudFileWriteOptions,
+  CloudFileWriteResult,
+  WebDAVConfig
+} from '@shared/types/cloud-backup';
 
 type WebDAVClientFactory = (url: string, options: {
   username?: string;
@@ -226,7 +232,11 @@ export class WebDAVProvider implements CloudStorageProvider {
    * @param filePath 文件路径
    * @param data 文件数据
    */
-  async writeFile(filePath: string, data: Buffer): Promise<void> {
+  async writeFile(
+    filePath: string,
+    data: Buffer,
+    options: CloudFileWriteOptions = {}
+  ): Promise<CloudFileWriteResult> {
     await this.ensureClient();
     try {
       const targetPath = this.normalizeRemotePath(filePath);
@@ -235,10 +245,12 @@ export class WebDAVProvider implements CloudStorageProvider {
         await this.createDirectory(dirPath);
       }
 
+      const headers = this.createConditionalWriteHeaders(options);
       const uploaded = await this.withRequestTimeout(
         signal => this.client.putFileContents(targetPath, data, {
-          overwrite: true,
+          overwrite: options.overwrite ?? true,
           contentLength: data.length,
+          headers,
           signal
         }),
         '写入文件'
@@ -248,7 +260,7 @@ export class WebDAVProvider implements CloudStorageProvider {
         throw new Error('WebDAV PUT 未返回成功状态');
       }
 
-      await this.verifyRemoteWrite(targetPath, data);
+      return await this.verifyRemoteWrite(targetPath, data);
     } catch (error) {
       this.logOperationError(CONSTANTS.LOG_MESSAGES.WRITE_FILE_FAILED, error);
       throw new Error(`${CONSTANTS.ERROR_MESSAGES.WRITE_FILE_FAILED}: ${this.getErrorMessage(error)}`);
@@ -269,6 +281,25 @@ export class WebDAVProvider implements CloudStorageProvider {
     } catch (error) {
       this.logOperationError(CONSTANTS.LOG_MESSAGES.DELETE_FILE_FAILED, error);
       throw new Error(`${CONSTANTS.ERROR_MESSAGES.DELETE_FILE_FAILED}: ${this.getErrorMessage(error)}`);
+    }
+  }
+
+  async getFileInfo(filePath: string): Promise<CloudFileInfo | null> {
+    await this.ensureClient();
+    try {
+      const stat: any = await this.withRequestTimeout(
+        signal => this.client.stat(this.normalizeRemotePath(filePath), { signal }),
+        '获取文件信息'
+      );
+      if (!stat) {
+        return null;
+      }
+      return this.mapFileInfo(stat);
+    } catch (error) {
+      if (this.isNotFoundError(error)) {
+        return null;
+      }
+      throw error;
     }
   }
 
@@ -366,6 +397,9 @@ export class WebDAVProvider implements CloudStorageProvider {
       size: item.size || 0,
       isDirectory: item.type === 'directory',
       modifiedAt: item.lastmod || new Date().toISOString(),
+      etag: typeof item.etag === 'string'
+        ? item.etag
+        : (typeof item.props?.getetag === 'string' ? item.props.getetag : undefined),
     };
   }
 
@@ -385,7 +419,7 @@ export class WebDAVProvider implements CloudStorageProvider {
     return `/${CONSTANTS.BACKUP_DIR}`;
   }
 
-  private async verifyRemoteWrite(filePath: string, expectedData: Buffer): Promise<void> {
+  private async verifyRemoteWrite(filePath: string, expectedData: Buffer): Promise<CloudFileWriteResult> {
     try {
       const stat: any = await this.withRequestTimeout(
         signal => this.client.stat(filePath, { signal }),
@@ -399,9 +433,27 @@ export class WebDAVProvider implements CloudStorageProvider {
       if (remoteData.length !== expectedData.length || Buffer.compare(remoteData, expectedData) !== 0) {
         throw new Error('远端文件内容与本地备份不一致');
       }
+
+      return {
+        etag: typeof stat?.etag === 'string'
+          ? stat.etag
+          : (typeof stat?.props?.getetag === 'string' ? stat.props.getetag : undefined),
+        modifiedAt: typeof stat?.lastmod === 'string' ? stat.lastmod : undefined
+      };
     } catch (error) {
       throw new Error(`${CONSTANTS.ERROR_MESSAGES.WRITE_VERIFY_FAILED}: ${this.getErrorMessage(error)}`);
     }
+  }
+
+  private createConditionalWriteHeaders(options: CloudFileWriteOptions): Record<string, string> | undefined {
+    const headers: Record<string, string> = {};
+    if (options.ifMatch) {
+      headers['If-Match'] = options.ifMatch;
+    }
+    if (options.ifNoneMatch) {
+      headers['If-None-Match'] = '*';
+    }
+    return Object.keys(headers).length > 0 ? headers : undefined;
   }
 
   private normalizeRemotePath(remotePath: string, allowRoot = false): string {
@@ -475,6 +527,10 @@ export class WebDAVProvider implements CloudStorageProvider {
 
   private isDirectoryAlreadyExistsError(error: unknown): boolean {
     return /already exists|405|409/i.test(this.getErrorMessage(error));
+  }
+
+  private isNotFoundError(error: unknown): boolean {
+    return /404|not\s*found|does not exist|ENOENT|不存在|未找到/i.test(this.getErrorMessage(error));
   }
 
   private isAbortError(error: unknown): boolean {

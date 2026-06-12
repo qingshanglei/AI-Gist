@@ -13,6 +13,17 @@ const CLOUD_SYNC_MANIFEST_FILE = 'sync-manifest.json';
 const CLOUD_SYNC_MANIFEST_BACKUP_FILE = 'sync-manifest.backup.json';
 const CLOUD_BACKUP_FILE_PREFIX = 'backup-';
 const CLOUD_BACKUP_FILE_EXTENSION = '.json';
+const REQUIRED_SYNC_COLLECTIONS = [
+  'categories',
+  'prompts',
+  'promptVariables',
+  'promptHistories',
+  'aiConfigs',
+  'quickOptimizationConfigs',
+  'aiHistory',
+  'settings',
+  'syncTombstones'
+];
 
 const DEFAULT_MODELS = {
   openai: ['gpt-4o-mini', 'gpt-4o'],
@@ -247,6 +258,12 @@ function validateCloudSyncSnapshot(snapshot) {
     return { valid: false, reason: 'snapshot data must be an object' };
   }
 
+  for (const collection of REQUIRED_SYNC_COLLECTIONS) {
+    if (!Array.isArray(snapshot.data[collection])) {
+      return { valid: false, reason: `snapshot data missing collection ${collection}` };
+    }
+  }
+
   if (snapshot.dataChecksum === undefined) {
     return { valid: true };
   }
@@ -423,10 +440,13 @@ async function getWebDAVSyncManifest({ config }) {
   const manifestPath = normalizeRemotePath(CLOUD_BACKUP_DIR, CLOUD_SYNC_MANIFEST_FILE);
   const backupPath = normalizeRemotePath(CLOUD_BACKUP_DIR, CLOUD_SYNC_MANIFEST_BACKUP_FILE);
   try {
-    if (!(await client.exists(manifestPath))) {
-      return createEmptyCloudSyncManifest();
+    if (await client.exists(manifestPath)) {
+      return (await readWebDAVSyncManifestFileWithMeta(client, manifestPath)).manifest;
     }
-    return await readWebDAVSyncManifestFile(client, manifestPath);
+    if (await client.exists(backupPath)) {
+      return (await readWebDAVSyncManifestFileWithMeta(client, backupPath)).manifest;
+    }
+    return createEmptyCloudSyncManifest();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes('404') || message.includes('not found')) {
@@ -437,7 +457,7 @@ async function getWebDAVSyncManifest({ config }) {
       if (!(await client.exists(backupPath))) {
         throw new Error('backup manifest not found');
       }
-      return await readWebDAVSyncManifestFile(client, backupPath);
+      return (await readWebDAVSyncManifestFileWithMeta(client, backupPath)).manifest;
     } catch (backupError) {
       throw new Error(
         `读取云同步 manifest 失败，且备份副本不可用: ${formatErrorMessage(error)}；` +
@@ -448,14 +468,25 @@ async function getWebDAVSyncManifest({ config }) {
 }
 
 async function readWebDAVSyncManifestFile(client, remotePath) {
+  return (await readWebDAVSyncManifestFileWithMeta(client, remotePath)).manifest;
+}
+
+async function readWebDAVSyncManifestFileWithMeta(client, remotePath) {
   try {
-    return assertValidCloudSyncManifest(JSON.parse(await readWebDAVText(client, remotePath)));
+    const [text, stat] = await Promise.all([
+      readWebDAVText(client, remotePath),
+      client.stat(remotePath).catch(() => null)
+    ]);
+    return {
+      manifest: assertValidCloudSyncManifest(JSON.parse(text)),
+      etag: typeof stat?.etag === 'string' ? stat.etag : undefined
+    };
   } catch (error) {
     throw new Error(`云同步 manifest 内容无效（${remotePath}）: ${formatErrorMessage(error)}`);
   }
 }
 
-async function saveWebDAVSyncManifest({ config, manifest }) {
+async function saveWebDAVSyncManifest({ config, manifest, options = {} }) {
   const client = await createWebDAVClient(config);
   await ensureWebDAVDirectory(client);
   const manifestPath = normalizeRemotePath(CLOUD_BACKUP_DIR, CLOUD_SYNC_MANIFEST_FILE);
@@ -465,9 +496,82 @@ async function saveWebDAVSyncManifest({ config, manifest }) {
     updatedAt: new Date().toISOString()
   });
   const content = JSON.stringify(normalizedManifest, null, 2);
-  await client.putFileContents(manifestPath, content, { overwrite: true });
+
+  const primaryState = await tryReadWebDAVSyncManifestFileWithMeta(client, manifestPath);
+  let currentManifest = primaryState?.manifest;
+  if (!currentManifest) {
+    const backupState = await tryReadWebDAVSyncManifestFileWithMeta(client, backupPath);
+    currentManifest = backupState?.manifest;
+  }
+  currentManifest = currentManifest || createEmptyCloudSyncManifest();
+
+  assertExpectedCloudSyncRevision(currentManifest, options.expectedRevision);
+
+  const headers = {};
+  if (primaryState?.etag) {
+    headers['If-Match'] = primaryState.etag;
+  } else if (!currentManifest.latestSnapshot) {
+    headers['If-None-Match'] = '*';
+  }
+
+  try {
+    await client.putFileContents(manifestPath, content, {
+      overwrite: true,
+      headers
+    });
+  } catch (error) {
+    if (isRevisionConflictError(error)) {
+      throw createCloudSyncManifestRevisionConflictError(
+        options.expectedRevision,
+        getCloudSyncManifestRevision(currentManifest)
+      );
+    }
+    throw error;
+  }
+
   await client.putFileContents(backupPath, content, { overwrite: true });
   return { ok: true };
+}
+
+async function tryReadWebDAVSyncManifestFileWithMeta(client, remotePath) {
+  try {
+    if (!(await client.exists(remotePath))) {
+      return null;
+    }
+    return await readWebDAVSyncManifestFileWithMeta(client, remotePath);
+  } catch (error) {
+    const message = formatErrorMessage(error);
+    if (/404|not\s*found/i.test(message)) {
+      return null;
+    }
+    throw error;
+  }
+}
+
+function getCloudSyncManifestRevision(manifest) {
+  return manifest?.latestSnapshot?.revision || null;
+}
+
+function assertExpectedCloudSyncRevision(manifest, expectedRevision) {
+  if (expectedRevision === undefined) {
+    return;
+  }
+
+  const currentRevision = getCloudSyncManifestRevision(manifest);
+  if (currentRevision !== expectedRevision) {
+    throw createCloudSyncManifestRevisionConflictError(expectedRevision, currentRevision);
+  }
+}
+
+function createCloudSyncManifestRevisionConflictError(expectedRevision, currentRevision) {
+  const expected = expectedRevision || '空';
+  const current = currentRevision || '空';
+  return new Error(`云同步 manifest 已被其他设备更新：期望 revision ${expected}，当前 revision ${current}`);
+}
+
+function isRevisionConflictError(error) {
+  return /manifest 已被其他设备更新|Precondition|412|If-Match|If-None-Match|已被其他设备更新/i
+    .test(formatErrorMessage(error));
 }
 
 function formatErrorMessage(error) {

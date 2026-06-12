@@ -437,6 +437,58 @@ describe('CloudSyncService', () => {
     )
   })
 
+  it('retries when the cloud rejects a manifest save because another device wrote first', async () => {
+    const localData = {
+      ...baseData,
+      prompts: [{ id: 1, uuid: 'prompt-1', title: 'Local edit', updatedAt: '2026-01-03T00:00:00.000Z' }]
+    }
+    const remoteDataWrittenByOtherDevice = {
+      ...baseData,
+      categories: [
+        ...baseData.categories,
+        { id: 2, uuid: 'cat-2', name: 'Remote category', updatedAt: '2026-01-02T00:00:00.000Z' }
+      ]
+    }
+    const emptyManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    const changedManifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: createCloudSyncSnapshot(remoteDataWrittenByOtherDevice, 'device-b', 'rev-remote-newer')
+    }
+    const { service, cloudClient, database } = createService(localData, emptyManifest)
+    let cloudManifest: any = emptyManifest
+    let saveAttempts = 0
+    cloudClient.getCloudSyncManifest.mockImplementation(async () => cloudManifest)
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (_storageId: string, manifest: any) => {
+      saveAttempts += 1
+      if (saveAttempts === 1) {
+        cloudManifest = changedManifest
+        return {
+          success: false,
+          conflict: true,
+          error: '云同步 manifest 已被其他设备更新'
+        }
+      }
+
+      cloudManifest = manifest
+      return { success: true }
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(2)
+    expect(database.replaceAllData).toHaveBeenCalledWith(expect.objectContaining({
+      categories: expect.arrayContaining([expect.objectContaining({ uuid: 'cat-2' })]),
+      prompts: expect.arrayContaining([expect.objectContaining({ title: 'Local edit' })])
+    }))
+    expect(cloudManifest.latestSnapshot.data.categories).toEqual(
+      expect.arrayContaining([expect.objectContaining({ uuid: 'cat-2' })])
+    )
+    expect(cloudManifest.latestSnapshot.data.prompts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ title: 'Local edit' })])
+    )
+  })
+
   it('does not upload a merged snapshot when applying merged data locally fails', async () => {
     const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
     const localData = {
@@ -846,7 +898,7 @@ describe('CloudSyncService', () => {
     service.stopAutoSync()
   })
 
-  it('throttles automatic local-change syncs until the configured interval has elapsed', async () => {
+  it('syncs local changes after debounce without waiting for the remote polling interval', async () => {
     vi.useFakeTimers()
     let dataChangeListener: ((change: any) => void) | undefined
     const { service, cloudClient, database } = createService(baseData, createEmptyCloudSyncManifest(), {
@@ -884,14 +936,11 @@ describe('CloudSyncService', () => {
     })
 
     await vi.advanceTimersByTimeAsync(25)
-    expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
-    expect(service.getStatus()).toMatchObject({
-      status: 'scheduled',
-      pending: true
-    })
-
-    await vi.advanceTimersByTimeAsync(DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES * 60 * 1000)
     expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(service.getStatus()).toMatchObject({
+      status: 'success',
+      pending: false
+    })
 
     service.stopAutoSync()
   })

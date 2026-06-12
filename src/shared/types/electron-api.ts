@@ -16,7 +16,11 @@ import type {
   CloudStorageConfig,
   CloudBackupInfo
 } from './cloud-backup';
-import type { CloudSyncManifest } from '../cloud-sync-manifest';
+import type {
+  CloudSyncManifest,
+  CloudSyncManifestSaveOptions,
+  CloudSyncManifestSaveResult
+} from '../cloud-sync-manifest';
 
 /**
  * Electron API 接口定义
@@ -106,7 +110,11 @@ export default interface ElectronApi {
       { success: true; manifest: CloudSyncManifest } |
       { success: false; error?: string }
     >
-    saveSyncManifest: (storageId: string, manifest: CloudSyncManifest) => Promise<{ success: boolean; error?: string }>
+    saveSyncManifest: (
+      storageId: string,
+      manifest: CloudSyncManifest,
+      options?: CloudSyncManifestSaveOptions
+    ) => Promise<CloudSyncManifestSaveResult>
   }
 
   // 应用信息和更新

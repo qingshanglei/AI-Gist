@@ -29,9 +29,16 @@ import {
   joinCloudPath,
   normalizeCloudPath
 } from '@shared/cloud-backup-paths'
-import type { CloudSyncManifest } from '@shared/cloud-sync-manifest'
+import type {
+  CloudSyncManifest,
+  CloudSyncManifestSaveOptions,
+  CloudSyncManifestSaveResult
+} from '@shared/cloud-sync-manifest'
 import {
   assertValidCloudSyncManifest,
+  createCloudSyncManifestRevisionConflictError,
+  doesCloudSyncManifestMatchExpectedRevision,
+  getCloudSyncManifestRevision,
   readCloudSyncManifestWithFallback
 } from '@shared/cloud-sync-manifest'
 import {
@@ -364,10 +371,11 @@ export class MobileCloudBackupService {
   /**
    * 保存云同步 manifest。
    */
-  async saveCloudSyncManifest(storageId: string, manifest: CloudSyncManifest): Promise<{
-    success: boolean
-    error?: string
-  }> {
+  async saveCloudSyncManifest(
+    storageId: string,
+    manifest: CloudSyncManifest,
+    options: CloudSyncManifestSaveOptions = {}
+  ): Promise<CloudSyncManifestSaveResult> {
     try {
       const config = await this.getStorageConfigOrThrow(storageId)
       const normalizedManifest = assertValidCloudSyncManifest({
@@ -376,17 +384,26 @@ export class MobileCloudBackupService {
       })
 
       if (config.type === 'webdav') {
-        await this.saveWebDAVSyncManifest(config as any, normalizedManifest)
+        await this.saveWebDAVSyncManifest(config as any, normalizedManifest, options)
         return { success: true }
       }
 
       if (config.type === 'icloud') {
-        await this.saveICloudSyncManifest(config as any, normalizedManifest)
+        await this.saveICloudSyncManifest(config as any, normalizedManifest, options)
         return { success: true }
       }
 
       return { success: false, error: '不支持的存储类型' }
     } catch (error) {
+      if (this.isCloudSyncRevisionConflictError(error)) {
+        return {
+          success: false,
+          conflict: true,
+          currentRevision: await this.tryReadCloudSyncManifestRevision(storageId),
+          error: error instanceof Error ? error.message : '云同步 manifest 已被其他设备更新'
+        }
+      }
+
       this.debugLog('保存云同步 manifest 失败:', error)
       return {
         success: false,
@@ -542,6 +559,13 @@ export class MobileCloudBackupService {
   }
 
   private async readWebDAVSyncManifestFile(config: any, cloudPath: string): Promise<CloudSyncManifest> {
+    return (await this.readWebDAVSyncManifestFileWithMeta(config, cloudPath)).manifest
+  }
+
+  private async readWebDAVSyncManifestFileWithMeta(
+    config: any,
+    cloudPath: string
+  ): Promise<{ manifest: CloudSyncManifest; etag?: string }> {
     const response = await CapacitorHttp.request({
       url: this.buildWebDAVUrlFromCloudPath(config, cloudPath),
       method: 'GET',
@@ -562,34 +586,97 @@ export class MobileCloudBackupService {
     const data = typeof response.data === 'string'
       ? JSON.parse(response.data)
       : response.data
-    return assertValidCloudSyncManifest(data)
+    return {
+      manifest: assertValidCloudSyncManifest(data),
+      etag: this.getResponseHeader(response, 'etag')
+    }
   }
 
-  private async saveWebDAVSyncManifest(config: any, manifest: CloudSyncManifest): Promise<void> {
+  private async saveWebDAVSyncManifest(
+    config: any,
+    manifest: CloudSyncManifest,
+    options: CloudSyncManifestSaveOptions
+  ): Promise<void> {
     await this.ensureWebDAVBackupDirectory(config)
 
-    await this.writeWebDAVSyncManifestFile(config, getCloudSyncManifestBackupPath(), manifest)
-    await this.writeWebDAVSyncManifestFile(config, getCloudSyncManifestPath(), manifest)
+    const primaryPath = getCloudSyncManifestPath()
+    const backupPath = getCloudSyncManifestBackupPath()
+
+    if (options.expectedRevision === undefined) {
+      await this.writeWebDAVSyncManifestFile(config, backupPath, manifest)
+      await this.writeWebDAVSyncManifestFile(config, primaryPath, manifest)
+      return
+    }
+
+    const primaryState = await this.tryReadWebDAVSyncManifestFileWithMeta(config, primaryPath)
+    let currentManifest = primaryState?.manifest
+
+    if (!currentManifest) {
+      try {
+        currentManifest = await this.readWebDAVSyncManifestFile(config, backupPath)
+      } catch (error) {
+        if (!this.isNotFoundError(error)) {
+          throw error
+        }
+      }
+    }
+
+    currentManifest = currentManifest || assertValidCloudSyncManifest({})
+    this.assertExpectedCloudSyncRevision(currentManifest, options.expectedRevision)
+
+    await this.writeWebDAVSyncManifestFile(config, primaryPath, manifest, {
+      ifMatch: primaryState?.etag,
+      ifNoneMatch: !primaryState && !currentManifest.latestSnapshot
+    })
+    await this.writeWebDAVSyncManifestFile(config, backupPath, manifest)
   }
 
   private async writeWebDAVSyncManifestFile(
     config: any,
     cloudPath: string,
-    manifest: CloudSyncManifest
+    manifest: CloudSyncManifest,
+    options: { ifMatch?: string; ifNoneMatch?: boolean } = {}
   ): Promise<void> {
+    const conditionalHeaders: Record<string, string> = {}
+    if (options.ifMatch) {
+      conditionalHeaders['If-Match'] = options.ifMatch
+    }
+    if (options.ifNoneMatch) {
+      conditionalHeaders['If-None-Match'] = '*'
+    }
+
     const response = await CapacitorHttp.request({
       url: this.buildWebDAVUrlFromCloudPath(config, cloudPath),
       method: 'PUT',
       ...this.getWebDAVRequestTimeoutOptions(),
       headers: {
         'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`),
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        ...conditionalHeaders
       },
       data: JSON.stringify(manifest, null, 2)
     })
 
+    if (response.status === 412) {
+      throw createCloudSyncManifestRevisionConflictError(undefined, undefined)
+    }
+
     if (response.status < 200 || response.status >= 300) {
       throw new Error(`保存云同步 manifest 失败（HTTP ${response.status}）`)
+    }
+  }
+
+  private async tryReadWebDAVSyncManifestFileWithMeta(
+    config: any,
+    cloudPath: string
+  ): Promise<{ manifest: CloudSyncManifest; etag?: string } | null> {
+    try {
+      return await this.readWebDAVSyncManifestFileWithMeta(config, cloudPath)
+    } catch (error) {
+      if (this.isNotFoundError(error)) {
+        return null
+      }
+      throw error
     }
   }
 
@@ -716,7 +803,11 @@ export class MobileCloudBackupService {
     return assertValidCloudSyncManifest(JSON.parse(result.data as string))
   }
 
-  private async saveICloudSyncManifest(config: any, manifest: CloudSyncManifest): Promise<void> {
+  private async saveICloudSyncManifest(
+    config: any,
+    manifest: CloudSyncManifest,
+    options: CloudSyncManifestSaveOptions
+  ): Promise<void> {
     const icloudCheck = await this.isICloudAvailable()
     if (!icloudCheck.available) {
       throw new Error(icloudCheck.reason || 'iCloud 不可用')
@@ -725,8 +816,22 @@ export class MobileCloudBackupService {
     const dirPath = config.path || CLOUD_BACKUP_DIR
     await this.ensureICloudDirectory(dirPath)
 
-    await this.writeICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_BACKUP_FILE, manifest)
+    if (options.expectedRevision === undefined) {
+      await this.writeICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_BACKUP_FILE, manifest)
+      await this.writeICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_FILE, manifest)
+      return
+    }
+
+    const currentManifest = await readCloudSyncManifestWithFallback({
+      readPrimary: () => this.readICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_FILE),
+      readBackup: () => this.readICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_BACKUP_FILE),
+      isNotFoundError: error => this.isNotFoundError(error),
+      describeError: error => this.formatErrorMessage(error)
+    })
+    this.assertExpectedCloudSyncRevision(currentManifest, options.expectedRevision)
+
     await this.writeICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_FILE, manifest)
+    await this.writeICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_BACKUP_FILE, manifest)
   }
 
   private async writeICloudSyncManifestFile(
@@ -1526,6 +1631,48 @@ export class MobileCloudBackupService {
 
   private formatErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : String(error)
+  }
+
+  private assertExpectedCloudSyncRevision(
+    manifest: CloudSyncManifest,
+    expectedRevision: string | null | undefined
+  ): void {
+    if (doesCloudSyncManifestMatchExpectedRevision(manifest, expectedRevision)) {
+      return
+    }
+
+    throw createCloudSyncManifestRevisionConflictError(
+      expectedRevision,
+      getCloudSyncManifestRevision(manifest)
+    )
+  }
+
+  private isCloudSyncRevisionConflictError(error: unknown): boolean {
+    return /manifest 已被其他设备更新|Precondition|412|If-Match|If-None-Match|已被其他设备更新/i
+      .test(this.formatErrorMessage(error))
+  }
+
+  private async tryReadCloudSyncManifestRevision(storageId: string): Promise<string | null> {
+    try {
+      return getCloudSyncManifestRevision(await this.getCloudSyncManifest(storageId))
+    } catch {
+      return null
+    }
+  }
+
+  private getResponseHeader(response: any, headerName: string): string | undefined {
+    const headers = response?.headers
+    if (!headers || typeof headers !== 'object') {
+      return undefined
+    }
+
+    const target = headerName.toLowerCase()
+    for (const [key, value] of Object.entries(headers)) {
+      if (key.toLowerCase() === target && typeof value === 'string') {
+        return value
+      }
+    }
+    return undefined
   }
 
   /**
