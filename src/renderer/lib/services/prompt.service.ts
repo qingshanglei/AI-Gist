@@ -763,16 +763,8 @@ export class PromptService extends BaseDatabaseService {
    * @returns Promise<boolean> 删除是否成功
    */
   async deletePromptHistory(id: number): Promise<boolean> {
-    if (!this.db) throw new Error('Database not initialized');
-
-    const transaction = this.db.transaction(['promptHistories'], 'readwrite');
-    const store = transaction.objectStore('promptHistories');
-    const request = store.delete(id);
-
-    return new Promise((resolve, reject) => {
-      request.onsuccess = () => resolve(true);
-      request.onerror = () => reject(request.error);
-    });
+    await this.delete('promptHistories', id);
+    return true;
   }
 
   /**

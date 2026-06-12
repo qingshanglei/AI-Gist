@@ -358,6 +358,158 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     expect(finalNoop).toMatchObject({ success: true, action: 'noop' })
   })
 
+  it('删除提示词后会通过 tombstone 跨端删除变量和历史且不会复活', async () => {
+    const storageId = 'robust-delete-propagates-tombstones'
+    const client = createWebDAVSyncClient(storageId)
+    const deviceADatabase = new MutableSyncDatabase(createRealisticDataSet())
+    const deviceA = createSyncService(client, deviceADatabase, new MemoryStorage(), 'device-a')
+
+    const firstUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(firstUpload).toMatchObject({ success: true, action: 'uploaded' })
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'device-b')
+    expect(await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'downloaded' })
+    expect(deviceBDatabase.data.prompts).toHaveLength(1)
+    expect(deviceBDatabase.data.promptVariables).toHaveLength(1)
+    expect(deviceBDatabase.data.promptHistories).toHaveLength(1)
+
+    deviceADatabase.data = mutateDataSet(deviceADatabase.data, data => {
+      const deletedAt = '2026-06-13T15:00:00.000Z'
+      data.prompts = []
+      data.promptVariables = []
+      data.promptHistories = []
+      data.syncTombstones = [
+        createTombstone('prompts', 'real-prompt-launch', deletedAt),
+        createTombstone('promptVariables', 'real-variable-tone', deletedAt),
+        createTombstone('promptHistories', 'real-history-initial', deletedAt)
+      ]
+    })
+
+    const deleteUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(deleteUpload, JSON.stringify(deleteUpload, null, 2))
+      .toMatchObject({ success: true, action: 'uploaded' })
+
+    const deleteDownload = await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })
+    expect(deleteDownload, JSON.stringify(deleteDownload, null, 2))
+      .toMatchObject({ success: true, action: 'downloaded' })
+    expect(deviceBDatabase.data.prompts).toEqual([])
+    expect(deviceBDatabase.data.promptVariables).toEqual([])
+    expect(deviceBDatabase.data.promptHistories).toEqual([])
+    expect(deviceBDatabase.data.syncTombstones).toEqual(expect.arrayContaining([
+      expect.objectContaining({ collectionName: 'prompts', recordUuid: 'real-prompt-launch' }),
+      expect.objectContaining({ collectionName: 'promptVariables', recordUuid: 'real-variable-tone' }),
+      expect.objectContaining({ collectionName: 'promptHistories', recordUuid: 'real-history-initial' })
+    ]))
+
+    const retry = await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })
+    expect(retry).toMatchObject({ success: true, action: 'noop' })
+  })
+
+  it('旧 tombstone 遇到另一端较新的更新时不会误删用户新内容', async () => {
+    const storageId = 'robust-older-delete-newer-update'
+    const client = createWebDAVSyncClient(storageId)
+    const deviceADatabase = new MutableSyncDatabase(createDataSet({
+      promptTitle: 'Delete conflict base',
+      promptUpdatedAt: '2026-06-13T15:00:00.000Z'
+    }))
+    const deviceAStorage = new MemoryStorage()
+    const deviceA = createSyncService(client, deviceADatabase, deviceAStorage, 'device-a')
+    expect(await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'uploaded' })
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'device-b')
+    expect(await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'downloaded' })
+
+    deviceADatabase.data = mutateDataSet(deviceADatabase.data, data => {
+      data.prompts = []
+      data.syncTombstones = [
+        createTombstone('prompts', 'prompt-main', '2026-06-13T15:05:00.000Z')
+      ]
+    })
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.prompts![0].title = 'Newer edit should survive delete'
+      data.prompts![0].updatedAt = '2026-06-13T15:10:00.000Z'
+    })
+
+    const deleteUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(deleteUpload).toMatchObject({ success: true, action: 'uploaded' })
+
+    const conflictResult = await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(conflictResult.success, JSON.stringify(conflictResult, null, 2)).toBe(true)
+    expect(conflictResult.action).toBe('merged')
+    expect(conflictResult.uploadedRemote).toBe(true)
+    expect(conflictResult.conflicts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        collection: 'prompts',
+        key: 'uuid:prompt-main',
+        reason: 'delete_vs_update',
+        resolution: 'keep-local'
+      })
+    ]))
+
+    const manifest = await client.getCloudSyncManifest(storageId)
+    expect(manifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'prompt-main',
+        title: 'Newer edit should survive delete'
+      })
+    ]))
+    expect(manifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(manifest.latestSnapshot!.data))
+
+    const deviceCDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceC = createSyncService(client, deviceCDatabase, new MemoryStorage(), 'device-c')
+    const cDownload = await deviceC.syncNow(storageId, {
+      deviceName: 'Tablet C',
+      platform: 'web',
+      reason: 'manual'
+    })
+    expect(cDownload).toMatchObject({ success: true, action: 'downloaded' })
+    expect(deviceCDatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'prompt-main',
+        title: 'Newer edit should survive delete'
+      })
+    ]))
+  })
+
   it('保存 manifest 前另一端抢先更新时会自动重读并合并后成功', async () => {
     const storageId = 'robust-remote-changes-during-save'
     const baseClient = createWebDAVSyncClient(storageId)
@@ -1150,6 +1302,17 @@ function mutateDataSet(data: CloudSyncDataSet, mutate: (data: CloudSyncDataSet) 
   const nextData = cloneData(data)
   mutate(nextData)
   return nextData
+}
+
+function createTombstone(collectionName: string, uuid: string, deletedAt: string) {
+  return {
+    storeName: collectionName,
+    collectionName,
+    recordKey: `uuid:${uuid}`,
+    recordUuid: uuid,
+    deletedAt,
+    recordSnapshot: { uuid }
+  }
 }
 
 function cloneData<T>(data: T): T {
