@@ -2546,6 +2546,113 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     expect(newDeviceDatabase.data.aiHistory).toEqual(finalManifest.latestSnapshot?.data.aiHistory)
   })
 
+  it('服务端误报 manifest 保存成功但指针未发布时会立即补写并继续更新', async () => {
+    const storageId = 'robust-manifest-success-without-pointer'
+    let skipFirstManifestWrite = true
+    let manifestSaveAttempts = 0
+    const client = createWebDAVSyncClient(storageId, {
+      saveCloudSyncManifest: async (_context, saveNormally) => {
+        manifestSaveAttempts += 1
+        if (skipFirstManifestWrite) {
+          skipFirstManifestWrite = false
+          return { success: true }
+        }
+
+        return saveNormally()
+      }
+    })
+    const storage = new MemoryStorage()
+    const database = new MutableSyncDatabase(createRealisticDataSet())
+    const service = createSyncService(client, database, storage, 'device-pointer-retry')
+
+    const firstUpload = await service.syncNow(storageId, {
+      deviceName: 'MacBook Pointer Retry',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(firstUpload, JSON.stringify(firstUpload, null, 2)).toMatchObject({
+      success: true,
+      action: 'uploaded',
+      uploadedRemote: true
+    })
+    expect(firstUpload.error).toBeUndefined()
+    expect(manifestSaveAttempts).toBe(2)
+    expect(storage.getItem(`ai_gist_cloud_sync_state:${storageId}`))
+      .toContain(firstUpload.remoteRevision)
+
+    const firstManifest = await createWebDAVSyncClient(storageId).getCloudSyncManifest(storageId)
+    expect(firstManifest.latestSnapshot?.revision).toBe(firstUpload.remoteRevision)
+    expect(firstManifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '发布计划提示词',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(firstManifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] })
+    ]))
+
+    database.data = mutateDataSet(database.data, data => {
+      data.prompts![0].title = '发布计划提示词 - 指针补写后更新'
+      data.prompts![0].imageBlobs = [INITIAL_IMAGE, UPDATED_IMAGE]
+      data.prompts![0].updatedAt = '2026-06-13T16:10:00.000Z'
+      data.promptHistories!.push({
+        id: 90,
+        uuid: 'real-history-after-pointer-retry',
+        promptId: 31,
+        promptUuid: 'real-prompt-launch',
+        title: '发布计划提示词 - 指针补写后更新',
+        content: '指针补写后的真实更新',
+        result: 'Pointer retry follow-up',
+        version: 2,
+        imageBlobs: [UPDATED_IMAGE],
+        createdAt: '2026-06-13T16:11:00.000Z',
+        updatedAt: '2026-06-13T16:11:00.000Z'
+      })
+    })
+
+    const secondUpload = await service.syncNow(storageId, {
+      deviceName: 'MacBook Pointer Retry',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(secondUpload, JSON.stringify(secondUpload, null, 2)).toMatchObject({
+      success: true,
+      action: 'uploaded',
+      uploadedRemote: true
+    })
+    expect(secondUpload.error).toBeUndefined()
+    expect(secondUpload.remoteRevision).not.toBe(firstUpload.remoteRevision)
+
+    const repeatedClick = await service.syncNow(storageId, {
+      deviceName: 'MacBook Pointer Retry',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(repeatedClick).toMatchObject({ success: true, action: 'noop' })
+    expect(repeatedClick.error).toBeUndefined()
+
+    const finalManifest = await createWebDAVSyncClient(storageId).getCloudSyncManifest(storageId)
+    expect(finalManifest.latestSnapshot?.revision).toBe(secondUpload.remoteRevision)
+    expect(finalManifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '发布计划提示词 - 指针补写后更新',
+        imageBlobs: [INITIAL_IMAGE, UPDATED_IMAGE]
+      })
+    ]))
+    expect(finalManifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'real-history-after-pointer-retry', imageBlobs: [UPDATED_IMAGE] })
+    ]))
+    expect(finalManifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(finalManifest.latestSnapshot!.data))
+
+    const snapshots = await client.listCloudSyncSnapshots(storageId)
+    expect(snapshots).toHaveLength(2)
+  })
+
   it('应用远端数据中途失败时会回滚本机数据，下次同步能继续完整下载', async () => {
     const storageId = 'robust-local-apply-rollback'
     const client = createWebDAVSyncClient(storageId)

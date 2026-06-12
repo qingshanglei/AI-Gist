@@ -325,7 +325,7 @@ describe('CloudSyncService', () => {
     expect(result.success).toBe(true)
     expect(callOrder).toEqual(['snapshot', 'manifest'])
     expect(savedSnapshots.has(cloudManifest.latestSnapshot!.revision)).toBe(true)
-    expect(cloudClient.getCloudSyncManifest).toHaveBeenCalledTimes(2)
+    expect(cloudClient.getCloudSyncManifest).toHaveBeenCalledTimes(3)
   })
 
   it('keeps checksums stable across real JSON snapshot and manifest round trips', async () => {
@@ -402,10 +402,15 @@ describe('CloudSyncService', () => {
     const remoteSnapshot = createCloudSyncSnapshot(baseData, 'device-b', 'rev-from-file')
     const savedSnapshots: any[] = []
     const savedManifests: any[] = []
+    let recoveredManifest: any
     const cloudClient = {
-      getCloudSyncManifest: vi.fn().mockRejectedValue(
-        new Error('读取云同步 manifest 失败，且备份副本不可用: sync-manifest.json snapshot data checksum mismatch')
-      ),
+      getCloudSyncManifest: vi.fn().mockImplementation(async () => {
+        if (recoveredManifest) {
+          return recoveredManifest
+        }
+
+        throw new Error('读取云同步 manifest 失败，且备份副本不可用: sync-manifest.json snapshot data checksum mismatch')
+      }),
       listCloudSyncSnapshots: vi.fn().mockResolvedValue([{
         revision: remoteSnapshot.revision,
         path: '/AI-Gist-Backup/sync/snapshots/rev-from-file.json',
@@ -418,6 +423,7 @@ describe('CloudSyncService', () => {
       }),
       saveCloudSyncManifest: vi.fn().mockImplementation(async (_storageId: string, manifest: any) => {
         savedManifests.push(manifest)
+        recoveredManifest = manifest
         return { success: true }
       })
     }
@@ -635,8 +641,33 @@ describe('CloudSyncService', () => {
     expect(result.success).toBe(false)
     expect(result.error).toContain('云同步 manifest 保存后校验失败')
     expect(result.error).not.toContain('其他设备')
-    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(2)
     expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toBeNull()
+  })
+
+  it('retries a falsely successful manifest save until the manifest pointer is published', async () => {
+    const emptyManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    const { service, cloudClient, storage } = createService(baseData, emptyManifest)
+    let cloudManifest: any = emptyManifest
+    let saveAttempts = 0
+    cloudClient.getCloudSyncManifest.mockImplementation(async () => cloudManifest)
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (_storageId: string, manifest: any) => {
+      saveAttempts += 1
+      if (saveAttempts === 1) {
+        return { success: true }
+      }
+
+      cloudManifest = manifest
+      return { success: true }
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.action).toBe('uploaded')
+    expect(result.error).toBeUndefined()
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(2)
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain(cloudManifest.latestSnapshot.revision)
   })
 
   it('accepts a reported manifest save failure when the submitted manifest is already readable', async () => {

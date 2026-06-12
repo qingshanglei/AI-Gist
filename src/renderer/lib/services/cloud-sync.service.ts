@@ -952,7 +952,13 @@ export class CloudSyncService {
     const result = await cloudClient.saveCloudSyncManifest(storageId, manifest, {
       expectedRevision
     });
-    await this.confirmManifestSaveResult(storageId, manifest, result, '保存云同步 manifest 失败');
+    await this.confirmManifestSaveResult(
+      storageId,
+      manifest,
+      result,
+      '保存云同步 manifest 失败',
+      { expectedRevision }
+    );
   }
 
   private async overwriteManifest(
@@ -968,7 +974,8 @@ export class CloudSyncService {
     storageId: string,
     manifest: CloudSyncManifest,
     result: CloudSyncManifestSaveResult,
-    fallbackErrorMessage: string
+    fallbackErrorMessage: string,
+    retryOptions?: CloudSyncManifestSaveOptions
   ): Promise<void> {
     if (!result.success) {
       if (result.conflict || isCloudSyncRevisionConflictMessage(result.error)) {
@@ -982,7 +989,28 @@ export class CloudSyncService {
       throw new Error(result.error || fallbackErrorMessage);
     }
 
-    await this.verifySavedManifest(storageId, manifest);
+    try {
+      await this.verifySavedManifest(storageId, manifest);
+    } catch (error) {
+      const retryResult = await this.getCloudClient().saveCloudSyncManifest(storageId, manifest, retryOptions);
+      if (!retryResult.success) {
+        if (await this.isSavedManifestReadable(storageId, manifest)) {
+          return;
+        }
+
+        if (retryResult.conflict || isCloudSyncRevisionConflictMessage(retryResult.error)) {
+          throw new CloudSyncRemoteChangedError(retryResult.error || '云端同步文件已被其他设备更新');
+        }
+
+        throw new Error(retryResult.error || fallbackErrorMessage);
+      }
+
+      try {
+        await this.verifySavedManifest(storageId, manifest);
+      } catch {
+        throw error;
+      }
+    }
   }
 
   private async isSavedManifestReadable(
@@ -1063,7 +1091,6 @@ export class CloudSyncService {
     const savedSnapshotFile = await this.readSnapshotFileIfSupported(storageId, expectedSnapshot.revision);
     if (savedSnapshotFile) {
       this.assertSavedSnapshotMatches(savedSnapshotFile, expectedSnapshot, '云同步快照文件');
-      return;
     }
 
     await this.verifySavedManifestContentOnce(storageId, manifest);
