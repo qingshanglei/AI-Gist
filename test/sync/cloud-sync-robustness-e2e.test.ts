@@ -1448,6 +1448,86 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     ]))
   })
 
+  it('云端已上传但本地同步状态未保存时，下次启动只补状态不会重复上传', async () => {
+    const storageId = 'robust-uploaded-state-lost-before-close'
+    const client = createWebDAVSyncClient(storageId)
+    const database = new MutableSyncDatabase(createRealisticDataSet())
+    const storage = new MemoryStorage()
+    let failLocalStateSave = true
+    const storageSetSpy = vi.spyOn(storage, 'setItem')
+      .mockImplementation((key: string, value: string) => {
+        if (failLocalStateSave && key.startsWith('ai_gist_cloud_sync_state:')) {
+          throw new Error('simulated app close before local sync state persisted')
+        }
+
+        MemoryStorage.prototype.setItem.call(storage, key, value)
+      })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const firstDevice = createSyncService(client, database, storage, 'device-state-lost')
+
+    try {
+      const uploaded = await firstDevice.syncNow(storageId, {
+        deviceName: 'Laptop State Lost',
+        platform: 'electron',
+        reason: 'manual'
+      })
+
+      expect(uploaded, JSON.stringify(uploaded, null, 2)).toMatchObject({
+        success: true,
+        action: 'uploaded',
+        uploadedRemote: true,
+        appliedLocal: false
+      })
+      expect(storage.getItem(`ai_gist_cloud_sync_state:${storageId}`)).toBeNull()
+      expect(warnSpy).toHaveBeenCalledWith(
+        '保存本地同步状态失败:',
+        expect.any(Error)
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+
+    const manifestAfterUpload = await client.getCloudSyncManifest(storageId)
+    const snapshotsAfterUpload = await client.listCloudSyncSnapshots(storageId)
+    expect(snapshotsAfterUpload).toHaveLength(1)
+    expect(manifestAfterUpload.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '发布计划提示词',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+
+    failLocalStateSave = false
+    const restartedDevice = createSyncService(client, database, storage, 'device-state-lost')
+    const recovered = await restartedDevice.syncNow(storageId, {
+      deviceName: 'Laptop State Lost Restarted',
+      platform: 'electron',
+      reason: 'manual'
+    })
+
+    expect(recovered, JSON.stringify(recovered, null, 2)).toMatchObject({
+      success: true,
+      action: 'noop',
+      uploadedRemote: false,
+      appliedLocal: false
+    })
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+    expect(storage.getItem(`ai_gist_cloud_sync_state:${storageId}`))
+      .toContain(manifestAfterUpload.latestSnapshot?.revision)
+    expect(await client.listCloudSyncSnapshots(storageId)).toHaveLength(snapshotsAfterUpload.length)
+
+    const repeatedClick = await restartedDevice.syncNow(storageId, {
+      deviceName: 'Laptop State Lost Restarted',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(repeatedClick).toMatchObject({ success: true, action: 'noop' })
+    expect(await client.listCloudSyncSnapshots(storageId)).toHaveLength(snapshotsAfterUpload.length)
+
+    storageSetSpy.mockRestore()
+  })
+
   it('manifest 可读时不会把残留的孤立快照误提升为云端最新数据', async () => {
     const storageId = 'robust-readable-manifest-ignores-loose-snapshot'
     const client = createWebDAVSyncClient(storageId)
