@@ -809,6 +809,18 @@ export class CloudSyncService {
     options: CloudSyncOptions,
     readOptions: { required: boolean }
   ): Promise<CloudSyncManifest> {
+    const repairedMatchingSnapshotManifest = await this.repairManifestFromMatchingSnapshotFile(
+      storageId,
+      manifest,
+      deviceId,
+      now,
+      options,
+      readOptions
+    );
+    if (repairedMatchingSnapshotManifest) {
+      return repairedMatchingSnapshotManifest;
+    }
+
     if (!readOptions.required && manifest.latestSnapshot) {
       return manifest;
     }
@@ -829,6 +841,51 @@ export class CloudSyncService {
     const repairedManifest = this.buildManifest(
       manifest,
       newestSnapshot,
+      manifest.conflicts || [],
+      deviceId,
+      now,
+      options
+    );
+
+    try {
+      await this.overwriteManifest(storageId, repairedManifest);
+    } catch (error) {
+      if (readOptions.required) {
+        throw error;
+      }
+    }
+
+    return repairedManifest;
+  }
+
+  private async repairManifestFromMatchingSnapshotFile(
+    storageId: string,
+    manifest: CloudSyncManifest,
+    deviceId: string,
+    now: string,
+    options: CloudSyncOptions,
+    readOptions: { required: boolean }
+  ): Promise<CloudSyncManifest | null> {
+    const manifestSnapshot = manifest.latestSnapshot;
+    if (!manifestSnapshot) {
+      return null;
+    }
+
+    const snapshotFile = await this.readSnapshotFileIfSupported(storageId, manifestSnapshot.revision);
+    if (!snapshotFile || snapshotFile.revision !== manifestSnapshot.revision) {
+      return null;
+    }
+
+    if (
+      snapshotFile.dataChecksum === manifestSnapshot.dataChecksum &&
+      dataSetsEqual(snapshotFile.data, manifestSnapshot.data)
+    ) {
+      return null;
+    }
+
+    const repairedManifest = this.buildManifest(
+      manifest,
+      snapshotFile,
       manifest.conflicts || [],
       deviceId,
       now,

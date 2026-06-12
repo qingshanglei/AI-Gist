@@ -2245,6 +2245,138 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
       .toBe(createCloudSyncDataChecksum(finalManifest.latestSnapshot!.data))
   })
 
+  it('manifest 内联快照损坏但同 revision 快照文件完整时会自动修复并下载正确数据', async () => {
+    const storageId = 'robust-inline-manifest-drift-repaired-from-snapshot'
+    const client = createWebDAVSyncClient(storageId)
+    const deviceADatabase = new MutableSyncDatabase(createRealisticDataSet())
+    const deviceA = createSyncService(client, deviceADatabase, new MemoryStorage(), 'device-a')
+
+    const firstUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(firstUpload).toMatchObject({ success: true, action: 'uploaded' })
+    const manifestBeforeDrift = await client.getCloudSyncManifest(storageId)
+    expect(manifestBeforeDrift.latestSnapshot?.revision).toBe(firstUpload.remoteRevision)
+    expect(await client.listCloudSyncSnapshots(storageId)).toHaveLength(1)
+
+    const driftedData = mutateDataSet(manifestBeforeDrift.latestSnapshot!.data, data => {
+      data.prompts![0].title = 'manifest 内联副本里的错误标题不应生效'
+      data.prompts![0].imageBlobs = []
+      data.promptHistories = []
+      data.aiHistory = []
+      data.settings = [{
+        key: 'theme',
+        value: 'corrupted-inline',
+        type: 'string',
+        updatedAt: '2026-06-13T23:20:00.000Z'
+      }]
+    })
+    const driftedSnapshot = {
+      ...manifestBeforeDrift.latestSnapshot!,
+      data: driftedData,
+      dataChecksum: createCloudSyncDataChecksum(driftedData)
+    }
+    const driftedManifest = assertValidCloudSyncManifest({
+      ...manifestBeforeDrift,
+      updatedAt: '2026-06-13T23:20:00.000Z',
+      latestSnapshot: driftedSnapshot
+    })
+    const driftedManifestContent = JSON.stringify(driftedManifest, null, 2)
+    await corruptRemoteFile(storageId, getCloudSyncManifestPath(), driftedManifestContent)
+    await corruptRemoteFile(storageId, getCloudSyncManifestBackupPath(), driftedManifestContent)
+
+    const manifestAfterDrift = await client.getCloudSyncManifest(storageId)
+    expect(manifestAfterDrift.latestSnapshot?.revision).toBe(firstUpload.remoteRevision)
+    expect(manifestAfterDrift.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ title: 'manifest 内联副本里的错误标题不应生效', imageBlobs: [] })
+    ]))
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'device-b')
+    const download = await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })
+
+    expect(download, JSON.stringify(download, null, 2))
+      .toMatchObject({ success: true, action: 'downloaded' })
+    expect(deviceBDatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '发布计划提示词',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(deviceBDatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] })
+    ]))
+    expect(deviceBDatabase.data.aiHistory).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-ai-history-initial' })
+    ]))
+    expect(deviceBDatabase.data.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'theme', value: 'dark' })
+    ]))
+
+    const repairedManifest = await client.getCloudSyncManifest(storageId)
+    expect(repairedManifest.latestSnapshot?.revision).toBe(firstUpload.remoteRevision)
+    expect(repairedManifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '发布计划提示词',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(repairedManifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] })
+    ]))
+    expect(repairedManifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(repairedManifest.latestSnapshot!.data))
+
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.prompts![0].title = '内联副本修复后的继续编辑'
+      data.prompts![0].updatedAt = '2026-06-13T23:25:00.000Z'
+      data.promptHistories!.push({
+        id: 87,
+        uuid: 'real-history-after-inline-repair',
+        promptId: 31,
+        promptUuid: 'real-prompt-launch',
+        title: '内联副本修复后的继续编辑',
+        content: '修复 manifest 内联副本后继续生成',
+        result: 'Inline repair follow-up',
+        version: 2,
+        imageBlobs: [UPDATED_IMAGE],
+        createdAt: '2026-06-13T23:26:00.000Z',
+        updatedAt: '2026-06-13T23:26:00.000Z'
+      })
+    })
+    const uploadAfterRepair = await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(uploadAfterRepair, JSON.stringify(uploadAfterRepair, null, 2))
+      .toMatchObject({ success: true, action: 'uploaded' })
+
+    const finalManifest = await client.getCloudSyncManifest(storageId)
+    expect(finalManifest.latestSnapshot?.revision).toBe(uploadAfterRepair.remoteRevision)
+    expect(finalManifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '内联副本修复后的继续编辑',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(finalManifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'real-history-after-inline-repair', imageBlobs: [UPDATED_IMAGE] })
+    ]))
+    expect(finalManifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(finalManifest.latestSnapshot!.data))
+  })
+
   it('大量数据并发连续点击同步时只生成必要快照且不会反复报错', async () => {
     const storageId = 'robust-large-concurrent-clicks'
     const client = createWebDAVSyncClient(storageId)
