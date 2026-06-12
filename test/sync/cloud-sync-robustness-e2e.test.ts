@@ -1026,6 +1026,149 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     ]))
   })
 
+  it('本机已应用合并数据后云端又更新时会继续自动重试并收敛', async () => {
+    const storageId = 'robust-remote-changes-after-local-apply'
+    const baseClient = createWebDAVSyncClient(storageId)
+    const initialData = createDataSet({ promptTitle: 'Apply conflict base', settingValue: 'base-dark' })
+    const deviceAStorage = new MemoryStorage()
+    const deviceADatabase = new MutableSyncDatabase(initialData)
+    const deviceAInitial = createSyncService(baseClient, deviceADatabase, deviceAStorage, 'device-a')
+    expect(await deviceAInitial.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'uploaded' })
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(baseClient, deviceBDatabase, new MemoryStorage(), 'device-b')
+    expect(await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'downloaded' })
+
+    const deviceCDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceC = createSyncService(baseClient, deviceCDatabase, new MemoryStorage(), 'device-c')
+    expect(await deviceC.syncNow(storageId, {
+      deviceName: 'Tablet C',
+      platform: 'web',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'downloaded' })
+
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.prompts![0].title = 'B remote prompt before A upload'
+      data.prompts![0].updatedAt = '2026-06-13T11:10:00.000Z'
+    })
+    expect(await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'uploaded' })
+
+    deviceADatabase.data = mutateDataSet(deviceADatabase.data, data => {
+      data.categories![0].name = 'A category applied before upload conflict'
+      data.categories![0].updatedAt = '2026-06-13T11:11:00.000Z'
+    })
+    deviceCDatabase.data = mutateDataSet(deviceCDatabase.data, data => {
+      data.settings = [{
+        key: 'theme',
+        value: 'remote-c-light',
+        type: 'string',
+        updatedAt: '2026-06-13T11:12:00.000Z'
+      }]
+    })
+
+    let injectedRemoteChange = false
+    const racingClient = createWebDAVSyncClient(storageId, {
+      saveCloudSyncManifest: async (_context, saveNormally) => {
+        if (!injectedRemoteChange) {
+          injectedRemoteChange = true
+          expect(deviceADatabase.data.prompts).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+              uuid: 'prompt-main',
+              title: 'B remote prompt before A upload'
+            })
+          ]))
+          expect(deviceADatabase.data.categories).toEqual(expect.arrayContaining([
+            expect.objectContaining({
+              uuid: 'cat-main',
+              name: 'A category applied before upload conflict'
+            })
+          ]))
+
+          const remoteResult = await deviceC.syncNow(storageId, {
+            deviceName: 'Tablet C',
+            platform: 'web',
+            reason: 'manual'
+          })
+          expect(remoteResult, JSON.stringify(remoteResult, null, 2))
+            .toMatchObject({ success: true, action: 'merged' })
+        }
+
+        return saveNormally()
+      }
+    })
+    const racingDeviceA = createSyncService(racingClient, deviceADatabase, deviceAStorage, 'device-a')
+
+    const result = await racingDeviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+
+    expect(result, JSON.stringify(result, null, 2)).toMatchObject({
+      success: true,
+      action: 'merged',
+      appliedLocal: true,
+      uploadedRemote: true
+    })
+    expect(result.error).toBeUndefined()
+    expect(injectedRemoteChange).toBe(true)
+    expect(deviceADatabase.replaceAllData).toHaveBeenCalledTimes(2)
+
+    expect(deviceADatabase.data.categories).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'cat-main',
+        name: 'A category applied before upload conflict'
+      })
+    ]))
+    expect(deviceADatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'prompt-main',
+        title: 'B remote prompt before A upload'
+      })
+    ]))
+    expect(deviceADatabase.data.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'theme', value: 'remote-c-light' })
+    ]))
+
+    const manifest = await baseClient.getCloudSyncManifest(storageId)
+    expect(manifest.latestSnapshot?.data.categories).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'cat-main',
+        name: 'A category applied before upload conflict'
+      })
+    ]))
+    expect(manifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'prompt-main',
+        title: 'B remote prompt before A upload'
+      })
+    ]))
+    expect(manifest.latestSnapshot?.data.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'theme', value: 'remote-c-light' })
+    ]))
+    expect(manifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(manifest.latestSnapshot!.data))
+
+    const retryClick = await racingDeviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(retryClick).toMatchObject({ success: true, action: 'noop' })
+  })
+
   it('同步到一半只写入 snapshot 时，下次启动能从快照文件恢复 manifest', async () => {
     const storageId = 'robust-half-written-sync'
     let failManifestWrite = true
