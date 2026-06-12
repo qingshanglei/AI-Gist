@@ -42,79 +42,6 @@
         </div>
       </ion-list>
 
-      <ion-list class="conflict-log-list">
-        <ion-list-header>
-          <ion-label>同步冲突记录</ion-label>
-          <ion-button
-            v-if="conflictLogEntries.length > 0"
-            fill="clear"
-            size="small"
-            @click="clearConflictLog"
-          >
-            清理
-          </ion-button>
-        </ion-list-header>
-        <ion-item lines="none">
-          <ion-label>
-            <p>{{ conflictLogSummary }}</p>
-          </ion-label>
-        </ion-item>
-        <template v-if="visibleConflictLogEntries.length > 0">
-          <div
-            v-for="entry in visibleConflictLogEntries"
-            :key="entry.id"
-            class="conflict-entry"
-          >
-            <details>
-              <summary>
-                <ion-icon :icon="warningOutline"></ion-icon>
-                <span>{{ formatConflictEntryTitle(entry) }}</span>
-                <ion-badge color="warning">{{ entry.conflicts.length }}</ion-badge>
-              </summary>
-              <div class="conflict-entry-meta">
-                <span>{{ getStorageName(entry.storageId) }}</span>
-                <span>本地 {{ entry.localRevision || '空' }}</span>
-                <span>远端 {{ entry.remoteRevision || '空' }}</span>
-                <span>结果 {{ entry.resolvedRevision || '空' }}</span>
-              </div>
-              <div
-                v-for="(conflict, index) in entry.conflicts"
-                :key="`${entry.id}-${index}`"
-                class="conflict-record"
-              >
-                <div class="conflict-record-heading">
-                  <ion-badge color="medium">
-                    {{ getConflictCollectionLabel(conflict.collection) }}
-                  </ion-badge>
-                  <strong>{{ getConflictRecordLabel(conflict) }}</strong>
-                </div>
-                <p>
-                  {{ getConflictReasonLabel(conflict.reason) }} ·
-                  {{ getConflictResolutionLabel(conflict.resolution) }}
-                </p>
-                <details class="conflict-values">
-                  <summary>查看数据差异</summary>
-                  <div class="conflict-value-grid">
-                    <div>
-                      <span>本地</span>
-                      <pre>{{ formatConflictValue(conflict.local) }}</pre>
-                    </div>
-                    <div>
-                      <span>远端</span>
-                      <pre>{{ formatConflictValue(conflict.remote) }}</pre>
-                    </div>
-                    <div>
-                      <span>基线</span>
-                      <pre>{{ formatConflictValue(conflict.base) }}</pre>
-                    </div>
-                  </div>
-                </details>
-              </div>
-            </details>
-          </div>
-        </template>
-      </ion-list>
-
       <!-- 存储配置列表 -->
       <ion-list v-if="storageConfigs.length > 0">
         <ion-list-header>
@@ -321,7 +248,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { Capacitor } from '@capacitor/core'
 import {
@@ -365,8 +292,7 @@ import {
   folderOpenOutline,
   refreshOutline,
   createOutline,
-  syncOutline,
-  warningOutline
+  syncOutline
 } from 'ionicons/icons'
 import { useI18n } from '~/composables/useI18n'
 import { mobileCloudBackupService } from '~/lib/services/mobile-cloud-backup.service'
@@ -381,7 +307,6 @@ import {
 import { databaseService } from '~/lib/db'
 import { presentMobileToast } from '~/lib/utils/mobile-toast'
 import type { CloudStorageConfig, CloudBackupInfo } from '@shared/types/cloud-backup'
-import type { CloudSyncConflictLogEntry } from '~/lib/services/cloud-sync.service'
 
 const { t } = useI18n()
 const router = useRouter()
@@ -389,7 +314,6 @@ const platform = Capacitor.getPlatform()
 
 const storageConfigs = ref<CloudStorageConfig[]>([])
 const currentBackups = ref<CloudBackupInfo[]>([])
-const conflictLogEntries = ref<CloudSyncConflictLogEntry[]>([])
 const syncIntervalMinutes = ref(DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES)
 const selectedConfig = ref<CloudStorageConfig | null>(null)
 const editingConfig = ref<CloudStorageConfig | null>(null)
@@ -397,7 +321,6 @@ const iCloudAvailable = ref(false)
 
 const showAddConfigModal = ref(false)
 const showBackupModal = ref(false)
-let unsubscribeSyncStatus: (() => void) | null = null
 
 const configForm = ref({
   name: '',
@@ -433,18 +356,6 @@ const isConfigValid = computed(() => {
   return false
 })
 
-const visibleConflictLogEntries = computed(() => conflictLogEntries.value)
-
-const conflictLogSummary = computed(() => {
-  if (visibleConflictLogEntries.value.length === 0) {
-    return '自动合并后的冲突会保存在这里'
-  }
-
-  const conflictCount = visibleConflictLogEntries.value
-    .reduce((total, entry) => total + entry.conflicts.length, 0)
-  return `${visibleConflictLogEntries.value.length} 次同步，${conflictCount} 项冲突`
-})
-
 const handleSyncIntervalInput = (event: CustomEvent<{ value?: string | number | null }>) => {
   const value = Number(event.detail?.value)
   if (Number.isFinite(value)) {
@@ -467,16 +378,6 @@ const saveSyncInterval = async () => {
   } finally {
     loading.value.saveSyncInterval = false
   }
-}
-
-const loadConflictLog = () => {
-  conflictLogEntries.value = cloudSyncService.getConflictLog()
-}
-
-const clearConflictLog = async () => {
-  cloudSyncService.clearConflictLog()
-  loadConflictLog()
-  await showToast('同步冲突记录已清理')
 }
 
 // 检查 iCloud 可用性
@@ -757,7 +658,6 @@ const syncCloudData = async () => {
     })
 
     if (result.success) {
-      loadConflictLog()
       showToast(getCloudSyncResultMessage(result.action, result.conflicts.length))
     } else {
       showToast(getFriendlyCloudSyncError(result.error), 'danger')
@@ -905,64 +805,6 @@ const getDeviceLabel = () => {
   return `${platform}-${language}`
 }
 
-const getStorageName = (storageId: string) => {
-  return storageConfigs.value.find(config => config.id === storageId)?.name || storageId
-}
-
-const formatConflictEntryTitle = (entry: CloudSyncConflictLogEntry) => {
-  return `${formatDate(entry.detectedAt)} · ${entry.conflicts.length} 项冲突`
-}
-
-const getConflictCollectionLabel = (collection: string) => {
-  const labels: Record<string, string> = {
-    categories: '分类',
-    prompts: '提示词',
-    promptVariables: '变量',
-    promptHistories: '提示词历史',
-    aiConfigs: 'AI 配置',
-    quickOptimizationConfigs: '快速优化',
-    aiHistory: 'AI 历史',
-    settings: '设置',
-    syncTombstones: '删除标记'
-  }
-  return labels[collection] || collection
-}
-
-const getConflictReasonLabel = (reason: string) => {
-  const labels: Record<string, string> = {
-    both_modified: '双方修改',
-    create_collision: '同时创建',
-    delete_vs_update: '删除与更新'
-  }
-  return labels[reason] || reason
-}
-
-const getConflictResolutionLabel = (resolution: string) => {
-  const labels: Record<string, string> = {
-    'keep-local': '保留本地',
-    'take-remote': '采用远端',
-    'take-newer': '采用较新'
-  }
-  return labels[resolution] || resolution
-}
-
-const getConflictRecordLabel = (conflict: any) => {
-  const record = conflict.local || conflict.remote || conflict.base || {}
-  return record.title || record.name || record.key || conflict.key
-}
-
-const formatConflictValue = (value: any) => {
-  if (value === undefined) return '无'
-
-  try {
-    const text = JSON.stringify(value, null, 2)
-    if (!text) return String(value)
-    return text.length > 700 ? `${text.slice(0, 700)}...` : text
-  } catch (error) {
-    return String(value)
-  }
-}
-
 // 格式化大小
 const formatSize = (size: number) => {
   if (!size || isNaN(size) || size <= 0) return '0 B'
@@ -1025,14 +867,6 @@ onMounted(() => {
   loadSyncInterval()
   loadStorageConfigs()
   checkICloudAvailability()
-  loadConflictLog()
-  unsubscribeSyncStatus = cloudSyncService.onStatusChange(() => {
-    loadConflictLog()
-  })
-})
-
-onUnmounted(() => {
-  unsubscribeSyncStatus?.()
 })
 </script>
 
@@ -1068,95 +902,5 @@ onUnmounted(() => {
 .connection-test-button {
   width: 100%;
   margin: 8px 0;
-}
-
-.conflict-log-list {
-  margin-top: 8px;
-}
-
-.conflict-entry {
-  padding: 0 16px 12px;
-}
-
-.conflict-entry details {
-  border: 1px solid var(--ion-color-step-200, #d7d8da);
-  border-radius: 8px;
-  padding: 10px 12px;
-  background: var(--ion-item-background, #fff);
-}
-
-.conflict-entry summary {
-  display: grid;
-  grid-template-columns: 20px 1fr auto;
-  gap: 8px;
-  align-items: center;
-  list-style: none;
-  cursor: pointer;
-}
-
-.conflict-entry summary::-webkit-details-marker {
-  display: none;
-}
-
-.conflict-entry-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px 10px;
-  margin-top: 10px;
-  color: var(--ion-color-medium);
-  font-size: 12px;
-}
-
-.conflict-record {
-  margin-top: 12px;
-  padding-top: 12px;
-  border-top: 1px solid var(--ion-color-step-150, #e6e6e6);
-}
-
-.conflict-record-heading {
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-
-.conflict-record p {
-  margin: 6px 0 0;
-  color: var(--ion-color-medium);
-  font-size: 12px;
-}
-
-.conflict-values {
-  margin-top: 8px;
-  color: var(--ion-color-medium);
-  font-size: 12px;
-}
-
-.conflict-values summary {
-  display: block;
-  cursor: pointer;
-}
-
-.conflict-value-grid {
-  display: grid;
-  gap: 8px;
-  margin-top: 8px;
-}
-
-.conflict-value-grid span {
-  display: block;
-  margin-bottom: 4px;
-}
-
-.conflict-value-grid pre {
-  margin: 0;
-  max-height: 180px;
-  overflow: auto;
-  padding: 8px;
-  border-radius: 6px;
-  background: var(--ion-color-step-100, #f3f4f5);
-  color: var(--ion-text-color);
-  font-size: 11px;
-  white-space: pre-wrap;
-  word-break: break-word;
 }
 </style>
