@@ -202,16 +202,6 @@ export class PromptService extends BaseDatabaseService {
     }    // 计算总数
     const total = filteredPrompts.length;
     
-    // 调试信息
-    console.log('getAllPrompts debug:', {
-      filters,
-      totalPrompts: prompts.length,
-      filteredPromptsLength: filteredPrompts.length,
-      total,
-      page: filters?.page,
-      limit: filters?.limit
-    });
-
     // 应用分页
     let paginatedPrompts = filteredPrompts;
     if (filters?.page && filters?.limit) {

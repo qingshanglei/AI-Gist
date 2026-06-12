@@ -46,6 +46,18 @@
         </ion-chip>
       </div>
 
+      <div v-if="!loading && prompts.length > 0" class="mobile-list-toolbar">
+        <span>{{ t('promptManagement.mobileResultCount', { count: totalCount }) }}</span>
+        <ion-segment v-model="viewMode" class="view-mode-segment">
+          <ion-segment-button value="list" :aria-label="t('promptManagement.viewModeList')">
+            <ion-icon :icon="listOutline"></ion-icon>
+          </ion-segment-button>
+          <ion-segment-button value="waterfall" :aria-label="t('promptManagement.viewModeWaterfall')">
+            <ion-icon :icon="gridOutline"></ion-icon>
+          </ion-segment-button>
+        </ion-segment>
+      </div>
+
       <!-- 加载状态 -->
       <div v-if="loading" class="loading-container">
         <ion-spinner></ion-spinner>
@@ -236,6 +248,8 @@ import {
   IonModal,
   IonListHeader,
   IonToggle,
+  IonSegment,
+  IonSegmentButton,
   IonItemSliding,
   IonItemOptions,
   IonItemOption,
@@ -278,6 +292,8 @@ let isPageActive = true
 let pendingRealtimeRefresh = false
 let realtimeRefreshTimer: ReturnType<typeof setTimeout> | null = null
 let realtimeRefreshRunning = false
+let searchTimer: ReturnType<typeof setTimeout> | null = null
+let promptLoadSequence = 0
 
 // 状态
 const prompts = ref<Prompt[]>([])
@@ -317,6 +333,7 @@ const hasActiveFilters = computed(() => {
 // 加载提示词列表
 const loadPrompts = async (append = false, options: { showLoading?: boolean } = {}) => {
   const showLoading = options.showLoading ?? true
+  const loadId = ++promptLoadSequence
 
   if (!append) {
     if (showLoading) {
@@ -338,6 +355,10 @@ const loadPrompts = async (append = false, options: { showLoading?: boolean } = 
 
     const result = await api.prompts.getAll.query(filters)
 
+    if (loadId !== promptLoadSequence) {
+      return
+    }
+
     if (append) {
       prompts.value = [...prompts.value, ...(result.data || [])]
     } else {
@@ -346,10 +367,13 @@ const loadPrompts = async (append = false, options: { showLoading?: boolean } = 
     hasNextPage.value = result.hasNextPage || false
     totalCount.value = result.total || 0
   } catch (error) {
+    if (loadId !== promptLoadSequence) {
+      return
+    }
     console.error('加载提示词失败:', error)
     await showToast(t('promptManagement.loadFailed'), 'danger')
   } finally {
-    if (!append && showLoading) {
+    if (loadId === promptLoadSequence && !append && showLoading) {
       loading.value = false
     }
   }
@@ -380,7 +404,14 @@ const getFirstLineOfContent = (content: string | undefined) => {
 
 // 搜索处理
 const handleSearch = () => {
-  loadPrompts()
+  if (searchTimer) {
+    clearTimeout(searchTimer)
+  }
+
+  searchTimer = setTimeout(() => {
+    searchTimer = null
+    loadPrompts()
+  }, 260)
 }
 
 // 下拉刷新
@@ -466,8 +497,10 @@ const handleDelete = async (prompt: Prompt) => {
         handler: async () => {
           try {
             await api.prompts.delete.mutate(prompt.id!)
-
+            prompts.value = prompts.value.filter(item => item.id !== prompt.id)
+            totalCount.value = Math.max(0, totalCount.value - 1)
             await showToast(t('promptManagement.deleteSuccess'))
+            scheduleRealtimeRefresh()
           } catch (error) {
             console.error('删除提示词失败:', error)
             await showToast(t('promptManagement.deleteFailed'), 'danger')
@@ -576,6 +609,9 @@ onActivated(() => {
 })
 
 onUnmounted(() => {
+  if (searchTimer) {
+    clearTimeout(searchTimer)
+  }
   if (realtimeRefreshTimer) {
     clearTimeout(realtimeRefreshTimer)
   }
@@ -590,6 +626,27 @@ onUnmounted(() => {
   gap: 8px;
   flex-wrap: wrap;
   background: var(--ion-background-color);
+}
+
+.mobile-list-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 44px;
+  padding: 8px 16px;
+  color: var(--ion-color-medium);
+  font-size: 13px;
+  border-bottom: 1px solid var(--ion-border-color, rgba(0, 0, 0, 0.08));
+}
+
+.view-mode-segment {
+  width: 112px;
+  min-width: 112px;
+}
+
+.view-mode-segment ion-segment-button {
+  min-height: 32px;
 }
 
 .loading-container {
@@ -640,5 +697,9 @@ onUnmounted(() => {
 
 ion-chip {
   margin: 0;
+}
+
+ion-content {
+  --padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 104px);
 }
 </style>

@@ -117,7 +117,7 @@ import { presentMobileToast } from '~/lib/utils/mobile-toast'
 
 const router = useRouter()
 const { t, currentLocale, switchLocale } = useI18n()
-const { setThemeSource, themeSource } = useTheme()
+const { themeSource } = useTheme()
 
 const currentLanguage = ref(currentLocale.value)
 const currentTheme = ref(themeSource.value || 'system')
@@ -126,31 +126,17 @@ const appVersion = ref(typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ 
 // 语言切换
 const handleLanguageChange = (event: any) => {
   const newLocale = event.detail.value
-  console.log('[Settings] 语言切换:', {
-    from: currentLanguage.value,
-    to: newLocale
-  })
-
   switchLocale(newLocale)
   currentLanguage.value = newLocale
-
-  console.log('[Settings] 语言切换完成，当前语言:', currentLanguage.value)
 }
 
 // 主题切换
 const handleThemeChange = async (event: any) => {
   const newTheme = event.detail.value as 'system' | 'light' | 'dark'
 
-  console.log('[Settings] 主题切换开始:', {
-    from: currentTheme.value,
-    to: newTheme
-  })
-
   // 保存到本地存储
   localStorage.setItem('theme', newTheme)
   currentTheme.value = newTheme
-
-  console.log('[Settings] 主题已保存到 localStorage')
 
   // 应用主题
   applyTheme(newTheme)
@@ -158,8 +144,6 @@ const handleThemeChange = async (event: any) => {
 
 // 应用主题函数
 const applyTheme = (theme: 'system' | 'light' | 'dark') => {
-  console.log('[Settings] applyTheme 调用，参数:', theme)
-
   const html = document.documentElement
 
   let isDark = false
@@ -167,13 +151,9 @@ const applyTheme = (theme: 'system' | 'light' | 'dark') => {
   if (theme === 'system') {
     // 使用系统主题
     isDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-    console.log('[Settings] 使用系统主题，检测到:', isDark ? 'dark' : 'light')
   } else {
     isDark = theme === 'dark'
-    console.log('[Settings] 使用指定主题:', theme)
   }
-
-  console.log('[Settings] 应用主题前 html.classList:', html.classList.toString())
 
   // 1. Ionic 官方暗色调色板（控制 Ionic 组件颜色变量）
   html.classList.toggle('ion-palette-dark', isDark)
@@ -184,9 +164,6 @@ const applyTheme = (theme: 'system' | 'light' | 'dark') => {
   html.classList.toggle('light', !isDark)
   body.classList.toggle('dark', isDark)
   body.classList.toggle('light', !isDark)
-
-  console.log('[Settings] 应用主题后 html.classList:', html.classList.toString())
-  console.log('[Settings] 主题应用完成，isDark:', isDark)
 }
 
 // 导出数据
@@ -353,27 +330,19 @@ const navigateToAbout = () => {
 }
 
 onMounted(() => {
-  console.log('[Settings] 组件挂载')
-
   // 加载应用版本
   // appVersion.value = window.electronAPI?.getAppVersion() || '1.0.0'
 
   // 从本地存储加载主题设置
   const savedTheme = localStorage.getItem('theme') as 'system' | 'light' | 'dark' | null
-  console.log('[Settings] 从 localStorage 读取主题:', savedTheme)
 
   if (savedTheme) {
     currentTheme.value = savedTheme
-    console.log('[Settings] 应用保存的主题:', savedTheme)
     applyTheme(savedTheme)
   } else {
     // 默认使用系统主题
-    console.log('[Settings] 没有保存的主题，使用系统默认')
     applyTheme('system')
   }
-
-  console.log('[Settings] 当前语言:', currentLanguage.value)
-  console.log('[Settings] 当前主题:', currentTheme.value)
 })
 </script>
 

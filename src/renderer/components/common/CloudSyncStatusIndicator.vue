@@ -247,7 +247,7 @@ onUnmounted(() => {
 @media (max-width: 768px) {
   .cloud-sync-indicator {
     right: 16px;
-    bottom: calc(env(safe-area-inset-bottom, 0px) + 82px);
+    bottom: calc(env(safe-area-inset-bottom, 0px) + 146px);
   }
 }
 </style>

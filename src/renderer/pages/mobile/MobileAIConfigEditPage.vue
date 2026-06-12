@@ -137,8 +137,8 @@
           </div>
         </div>
 
-        <!-- 模型配置 - 测试成功后显示 -->
-        <div v-if="testResult?.success" class="form-section">
+        <!-- 模型配置 -->
+        <div v-if="shouldShowModelConfig" class="form-section">
           <div class="section-title">{{ t('aiConfig.modelConfig') }}</div>
           <div class="form-content">
             <ion-list lines="none">
@@ -257,6 +257,9 @@ const testResult = ref<{
 
 // 判断是否为编辑模式
 const isEditMode = computed(() => !!route.params.id)
+const shouldShowModelConfig = computed(() => {
+  return !!testResult.value?.success || isEditMode.value || formData.models.length > 0 || !!formData.customModel
+})
 
 // 计算属性：服务商信息
 const getServiceInfo = computed(() => {
@@ -395,21 +398,12 @@ const handleTestConnection = async () => {
   testResult.value = null
 
   try {
-    console.log('[Page] 准备测试连接，formData:', {
-      type: formData.type,
-      baseURL: formData.baseURL,
-      hasApiKey: !!formData.apiKey,
-      apiKeyLength: formData.apiKey?.length || 0
-    })
-
     // 使用统一的 API 调用（会自动根据平台选择实现）
     const result = await api.aiConfigs.test.mutate({
       type: formData.type,
       baseURL: formData.baseURL,
       apiKey: formData.apiKey
     })
-
-    console.log('[Page] 测试结果:', result)
 
     if (result.success) {
       const resultMessage = getModelListDisplayMessage(result)
@@ -525,6 +519,13 @@ const handleSave = async () => {
   saving.value = true
 
   try {
+    if (!formData.defaultModel && formData.models.length > 0) {
+      formData.defaultModel = formData.models[0]
+    }
+    if (!formData.defaultModel && formData.customModel) {
+      formData.defaultModel = formData.customModel
+    }
+
     const configData: Partial<AIConfig> = {
       type: formData.type,
       name: formData.name,

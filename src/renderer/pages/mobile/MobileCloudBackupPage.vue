@@ -12,12 +12,12 @@
     <ion-content :fullscreen="true">
       <ion-list>
         <ion-list-header>
-          <ion-label>自动同步</ion-label>
+          <ion-label>{{ t('cloudBackup.autoSync') }}</ion-label>
         </ion-list-header>
         <ion-item>
           <ion-label>
-            <h3>检查间隔</h3>
-            <p>当前每 {{ syncIntervalMinutes }} 分钟检查一次云端变化</p>
+            <h3>{{ t('cloudBackup.syncInterval') }}</h3>
+            <p>{{ t('cloudBackup.syncIntervalDescription', { minutes: syncIntervalMinutes }) }}</p>
           </ion-label>
           <ion-input
             class="sync-interval-input"
@@ -37,7 +37,7 @@
             @click="saveSyncInterval"
             :disabled="loading.saveSyncInterval"
           >
-            保存频率
+            {{ t('cloudBackup.saveSyncInterval') }}
           </ion-button>
         </div>
       </ion-list>
@@ -162,6 +162,19 @@
               <ion-label>{{ t('cloudBackup.enableConfig') }}</ion-label>
               <ion-toggle v-model="configForm.enabled"></ion-toggle>
             </ion-item>
+
+            <ion-item lines="none">
+              <ion-button
+                expand="block"
+                fill="outline"
+                class="connection-test-button"
+                @click="testConfigConnection"
+                :disabled="!isConfigValid || loading.testConnection"
+              >
+                <ion-spinner v-if="loading.testConnection" slot="start"></ion-spinner>
+                {{ t('aiConfig.connectionTest') }}
+              </ion-button>
+            </ion-item>
           </ion-list>
         </ion-content>
       </ion-modal>
@@ -190,7 +203,7 @@
             </ion-button>
             <ion-button expand="block" fill="outline" @click="syncCloudData" :disabled="loading.syncNow">
               <ion-icon :icon="syncOutline" slot="start"></ion-icon>
-              立即同步
+              {{ t('cloudBackup.syncNow') }}
             </ion-button>
           </div>
 
@@ -264,6 +277,7 @@ import {
   IonItemSliding,
   IonItemOptions,
   IonItemOption,
+  IonSpinner,
   alertController,
   loadingController
 } from '@ionic/vue'
@@ -322,20 +336,21 @@ const loading = ref({
   createBackup: false,
   restoreBackup: false,
   syncNow: false,
-  saveSyncInterval: false
+  saveSyncInterval: false,
+  testConnection: false
 })
 
 const isConfigValid = computed(() => {
-  if (!configForm.value.name) return false
+  if (!configForm.value.name.trim()) return false
 
   if (configForm.value.type === 'webdav') {
-    return !!(configForm.value.url && configForm.value.username && configForm.value.password)
+    return !!(configForm.value.url.trim() && configForm.value.username.trim() && configForm.value.password)
   } else if (configForm.value.type === 'icloud') {
     // Android 不支持 iCloud
     if (platform === 'android') return false
     // iOS 需要 iCloud 可用
     if (!iCloudAvailable.value) return false
-    return !!configForm.value.path
+    return !!configForm.value.path.trim()
   }
 
   return false
@@ -356,10 +371,10 @@ const saveSyncInterval = async () => {
   loading.value.saveSyncInterval = true
   try {
     syncIntervalMinutes.value = await cloudSyncService.setAutoSyncIntervalMinutes(syncIntervalMinutes.value)
-    await showToast(`自动同步频率已设为 ${syncIntervalMinutes.value} 分钟`)
+    await showToast(t('cloudBackup.saveSyncIntervalSuccess', { minutes: syncIntervalMinutes.value }))
   } catch (error) {
     console.error('保存自动同步频率失败:', error)
-    await showToast('保存自动同步频率失败', 'danger')
+    await showToast(t('cloudBackup.saveSyncIntervalFailed'), 'danger')
   } finally {
     loading.value.saveSyncInterval = false
   }
@@ -370,9 +385,6 @@ const checkICloudAvailability = async () => {
   try {
     const result = await mobileCloudBackupService.isICloudAvailable()
     iCloudAvailable.value = result.available
-    if (!result.available) {
-      console.log('iCloud 不可用:', result.reason)
-    }
   } catch (error) {
     console.error('检查 iCloud 可用性失败:', error)
     iCloudAvailable.value = false
@@ -468,16 +480,14 @@ const resetConfigForm = () => {
 // 加载备份列表
 const loadBackupList = async (storageId: string) => {
   try {
-    console.log('开始加载备份列表，存储ID:', storageId)
     currentBackups.value = await mobileCloudBackupService.getCloudBackupList(storageId)
-    console.log('备份列表加载完成，数量:', currentBackups.value.length)
   } catch (error) {
     console.error('加载备份列表失败:', error)
     const errorMessage = error instanceof Error ? error.message : String(error)
 
     // 如果是 iCloud 目录不存在的错误，显示友好提示
     if (errorMessage.includes('does not exist')) {
-      showToast('备份目录不存在，已自动创建。请创建第一个备份。', 'warning')
+      showToast(t('cloudBackup.backupDirectoryCreated'), 'warning')
     } else {
       showToast(t('cloudBackup.loadBackupsFailed') + ': ' + errorMessage, 'danger')
     }
@@ -505,15 +515,15 @@ const saveConfig = async () => {
     await loadingEl.present()
 
     const configData = {
-      name: configForm.value.name,
+      name: configForm.value.name.trim(),
       type: configForm.value.type,
       enabled: configForm.value.enabled,
       ...(configForm.value.type === 'webdav' ? {
-        url: configForm.value.url,
-        username: configForm.value.username,
+        url: configForm.value.url.trim(),
+        username: configForm.value.username.trim(),
         password: configForm.value.password
       } : {
-        path: configForm.value.path
+        path: configForm.value.path.trim()
       })
     }
 
@@ -545,6 +555,40 @@ const saveConfig = async () => {
   }
 }
 
+const testConfigConnection = async () => {
+  if (!isConfigValid.value) return
+
+  loading.value.testConnection = true
+  try {
+    const result = await mobileCloudBackupService.testStorageConnection({
+      id: editingConfig.value?.id || 'draft',
+      createdAt: editingConfig.value?.createdAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      name: configForm.value.name.trim(),
+      type: configForm.value.type,
+      enabled: configForm.value.enabled,
+      ...(configForm.value.type === 'webdav' ? {
+        url: configForm.value.url.trim(),
+        username: configForm.value.username.trim(),
+        password: configForm.value.password
+      } : {
+        path: configForm.value.path.trim()
+      })
+    } as CloudStorageConfig)
+
+    if (result.success) {
+      await showToast(t('aiConfig.connectionTestSuccess'))
+    } else {
+      await showToast(result.error || t('aiConfig.connectionTestFailed'), 'danger')
+    }
+  } catch (error) {
+    console.error('测试存储连接失败:', error)
+    await showToast(t('aiConfig.connectionTestFailed'), 'danger')
+  } finally {
+    loading.value.testConnection = false
+  }
+}
+
 // 关闭配置模态框
 const closeConfigModal = () => {
   showAddConfigModal.value = false
@@ -571,7 +615,7 @@ const createBackup = async () => {
     }
 
     // 创建云端备份
-    const timestamp = new Date().toLocaleString('zh-CN')
+    const timestamp = new Date().toLocaleString()
     const result = await mobileCloudBackupService.createCloudBackup(
       selectedConfig.value.id,
       exportResult.data,
@@ -600,7 +644,7 @@ const syncCloudData = async () => {
   if (!selectedConfig.value) return
 
   const loadingEl = await loadingController.create({
-    message: '正在同步'
+    message: t('cloudBackup.syncing')
   })
 
   loading.value.syncNow = true
@@ -610,7 +654,7 @@ const syncCloudData = async () => {
 
     const result = await cloudSyncService.syncNow(selectedConfig.value.id, {
       platform,
-      deviceName: navigator.userAgent
+      deviceName: getDeviceLabel()
     })
 
     if (result.success) {
@@ -753,7 +797,12 @@ const getConfigDescription = (config: CloudStorageConfig) => {
 
 // 格式化日期
 const formatDate = (dateString: string) => {
-  return new Date(dateString).toLocaleString('zh-CN')
+  return new Date(dateString).toLocaleString()
+}
+
+const getDeviceLabel = () => {
+  const language = navigator.language || 'unknown-locale'
+  return `${platform}-${language}`
 }
 
 // 格式化大小
@@ -848,5 +897,10 @@ onMounted(() => {
 
 .sync-interval-actions {
   padding: 0 16px 12px;
+}
+
+.connection-test-button {
+  width: 100%;
+  margin: 8px 0;
 }
 </style>
