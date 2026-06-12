@@ -666,7 +666,7 @@ async function saveWebDAVSyncManifest({ config, manifest, options = {} }) {
   const headers = {};
   if (options.expectedRevision !== undefined) {
     if (primaryState?.etag) {
-      headers['If-Match'] = primaryState.etag;
+      headers['If-Match'] = normalizeIfMatchHeaderValue(primaryState.etag);
     } else if (!currentManifest.latestSnapshot) {
       headers['If-None-Match'] = '*';
     }
@@ -837,6 +837,15 @@ function isRevisionConflictError(error) {
 
 function formatErrorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function normalizeIfMatchHeaderValue(etag) {
+  const value = String(etag || '').trim();
+  if (!value || value === '*' || value.startsWith('"') || value.startsWith('W/"')) {
+    return value;
+  }
+
+  return `"${value.replace(/^"+|"+$/g, '')}"`;
 }
 
 function getProviderType(config) {

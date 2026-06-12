@@ -709,7 +709,7 @@ export class MobileCloudBackupService {
   ): Promise<void> {
     const conditionalHeaders: Record<string, string> = {}
     if (options.ifMatch) {
-      conditionalHeaders['If-Match'] = options.ifMatch
+      conditionalHeaders['If-Match'] = this.normalizeIfMatchHeaderValue(options.ifMatch)
     }
     if (options.ifNoneMatch) {
       conditionalHeaders['If-None-Match'] = '*'
@@ -734,6 +734,15 @@ export class MobileCloudBackupService {
     if (response.status < 200 || response.status >= 300) {
       throw new Error(`保存云同步 manifest 失败（HTTP ${response.status}）`)
     }
+  }
+
+  private normalizeIfMatchHeaderValue(etag: string): string {
+    const value = String(etag || '').trim()
+    if (!value || value === '*' || value.startsWith('"') || value.startsWith('W/"')) {
+      return value
+    }
+
+    return `"${value.replace(/^"+|"+$/g, '')}"`
   }
 
   private async listWebDAVSyncSnapshots(config: any): Promise<CloudSyncRemoteSnapshotInfo[]> {

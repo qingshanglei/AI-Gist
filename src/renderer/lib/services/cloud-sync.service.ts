@@ -606,15 +606,7 @@ export class CloudSyncService {
 
       let appliedLocal = false;
       if (!mergedEqualsLocal) {
-        this.applyingRemoteDataDepth++;
-        try {
-          const importResult = await this.database.replaceAllData(mergedData);
-          if (!importResult.success) {
-            throw new Error(importResult.error || importResult.message || '同步合并数据写入本地失败');
-          }
-        } finally {
-          this.applyingRemoteDataDepth--;
-        }
+        await this.replaceLocalDataForSync(mergedData, localData);
         appliedLocal = true;
       }
 
@@ -677,6 +669,38 @@ export class CloudSyncService {
       throw new Error(exportResult.error || exportResult.message || '导出同步数据失败');
     }
     return normalizeCloudSyncDataSet(applyCloudSyncTombstones(exportResult.data));
+  }
+
+  private async replaceLocalDataForSync(nextData: CloudSyncDataSet, rollbackData: CloudSyncDataSet): Promise<void> {
+    this.applyingRemoteDataDepth++;
+    try {
+      const importResult = await this.database.replaceAllData(nextData);
+      if (!importResult.success) {
+        throw new Error(importResult.error || importResult.message || '同步合并数据写入本地失败');
+      }
+    } catch (error) {
+      const rollbackError = await this.rollbackLocalDataAfterFailedSync(rollbackData);
+      if (rollbackError) {
+        const originalMessage = error instanceof Error ? error.message : String(error);
+        const rollbackMessage = rollbackError instanceof Error ? rollbackError.message : String(rollbackError);
+        throw new Error(`同步合并数据写入本地失败，且本机数据回滚失败：${rollbackMessage}；原始错误：${originalMessage}`);
+      }
+      throw error;
+    } finally {
+      this.applyingRemoteDataDepth--;
+    }
+  }
+
+  private async rollbackLocalDataAfterFailedSync(rollbackData: CloudSyncDataSet): Promise<unknown | null> {
+    try {
+      const rollbackResult = await this.database.replaceAllData(rollbackData);
+      if (!rollbackResult.success) {
+        return new Error(rollbackResult.error || rollbackResult.message || '同步失败后恢复本机数据失败');
+      }
+      return null;
+    } catch (error) {
+      return error;
+    }
   }
 
   private async retryWithLatestRemote(
@@ -778,6 +802,10 @@ export class CloudSyncService {
     options: CloudSyncOptions,
     readOptions: { required: boolean }
   ): Promise<CloudSyncManifest> {
+    if (!readOptions.required && manifest.latestSnapshot) {
+      return manifest;
+    }
+
     const newestSnapshot = await this.getNewestRemoteSnapshot(storageId, readOptions);
     if (!newestSnapshot) {
       return manifest;

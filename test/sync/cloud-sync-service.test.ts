@@ -118,7 +118,7 @@ describe('CloudSyncService', () => {
       platform: 'ios'
     })
 
-    expect(result.success).toBe(true)
+    expect(result.success, JSON.stringify(result, null, 2)).toBe(true)
     expect(result.action).toBe('uploaded')
     expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
     const savedManifest = cloudClient.saveCloudSyncManifest.mock.calls[0][1]
@@ -412,7 +412,7 @@ describe('CloudSyncService', () => {
     expect(database.replaceAllData).not.toHaveBeenCalled()
   })
 
-  it('repairs a stale manifest pointer to the newest snapshot file', async () => {
+  it('does not promote loose snapshot files over a readable manifest pointer', async () => {
     const oldSnapshot = {
       ...createCloudSyncSnapshot(baseData, 'device-b', 'rev-old'),
       createdAt: '2026-01-01T00:00:00.000Z'
@@ -431,6 +431,7 @@ describe('CloudSyncService', () => {
       baseSnapshot: oldSnapshot
     }
     const savedManifests: any[] = []
+    const savedSnapshots: any[] = []
     const cloudClient = {
       getCloudSyncManifest: vi.fn().mockImplementation(async () => cloudManifest),
       listCloudSyncSnapshots: vi.fn().mockResolvedValue([{
@@ -438,8 +439,14 @@ describe('CloudSyncService', () => {
         path: '/AI-Gist-Backup/sync/snapshots/rev-new-file.json',
         modifiedAt: '2026-01-02T00:00:00.000Z'
       }]),
-      readCloudSyncSnapshot: vi.fn().mockImplementation(async () => newerSnapshot),
-      saveCloudSyncSnapshot: vi.fn().mockResolvedValue({ success: true }),
+      readCloudSyncSnapshot: vi.fn().mockImplementation(async (_storageId: string, snapshot: any) => {
+        const revision = typeof snapshot === 'string' ? snapshot : snapshot.revision
+        return savedSnapshots.find(savedSnapshot => savedSnapshot.revision === revision) || newerSnapshot
+      }),
+      saveCloudSyncSnapshot: vi.fn().mockImplementation(async (_storageId: string, snapshot: any) => {
+        savedSnapshots.push(snapshot)
+        return { success: true }
+      }),
       saveCloudSyncManifest: vi.fn().mockImplementation(async (_storageId: string, manifest: any) => {
         savedManifests.push(manifest)
         cloudManifest = manifest
@@ -466,11 +473,21 @@ describe('CloudSyncService', () => {
 
     const result = await service.syncNow('cfg-1')
 
-    expect(result.success).toBe(true)
-    expect(result.remoteRevision).toBe('rev-new-file')
-    expect(savedManifests[0].latestSnapshot.revision).toBe('rev-new-file')
+    expect(result.success, JSON.stringify(result, null, 2)).toBe(true)
+    expect(result.action).toBe('uploaded')
+    expect(result.remoteRevision).not.toBe('rev-new-file')
+    expect(cloudClient.listCloudSyncSnapshots).not.toHaveBeenCalled()
+    expect(cloudClient.readCloudSyncSnapshot).not.toHaveBeenCalledWith('cfg-1', 'rev-new-file')
+    expect(cloudClient.readCloudSyncSnapshot).not.toHaveBeenCalledWith(
+      'cfg-1',
+      expect.objectContaining({ revision: 'rev-new-file' })
+    )
+    expect(savedManifests[0].latestSnapshot.revision).not.toBe('rev-new-file')
+    expect(savedManifests[0].latestSnapshot.data.prompts[0].title).toBe('New file snapshot')
     expect(cloudClient.saveCloudSyncSnapshot).toHaveBeenCalledWith('cfg-1', expect.objectContaining({
-      revision: 'rev-new-file'
+      data: expect.objectContaining({
+        prompts: expect.arrayContaining([expect.objectContaining({ title: 'New file snapshot' })])
+      })
     }))
     expect(database.replaceAllData).not.toHaveBeenCalled()
   })
@@ -1050,18 +1067,25 @@ describe('CloudSyncService', () => {
       lastKnownRevision: 'rev-base',
       baseSnapshot
     }))
-    database.replaceAllData.mockResolvedValue({
+    database.replaceAllData.mockResolvedValueOnce({
       success: false,
       message: 'write failed',
       error: 'IndexedDB write failed'
+    }).mockResolvedValueOnce({
+      success: true,
+      message: 'rollback ok'
     })
 
     const result = await service.syncNow('cfg-1')
 
     expect(result.success).toBe(false)
     expect(result.error).toContain('IndexedDB write failed')
-    expect(database.replaceAllData).toHaveBeenCalledWith(expect.objectContaining({
+    expect(database.replaceAllData).toHaveBeenNthCalledWith(1, expect.objectContaining({
       categories: expect.arrayContaining([expect.objectContaining({ uuid: 'cat-2' })]),
+      prompts: expect.arrayContaining([expect.objectContaining({ title: 'Local edit' })])
+    }))
+    expect(database.replaceAllData).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      categories: expect.arrayContaining([expect.objectContaining({ uuid: 'cat-1' })]),
       prompts: expect.arrayContaining([expect.objectContaining({ title: 'Local edit' })])
     }))
     expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()

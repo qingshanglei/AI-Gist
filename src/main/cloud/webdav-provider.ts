@@ -448,12 +448,21 @@ export class WebDAVProvider implements CloudStorageProvider {
   private createConditionalWriteHeaders(options: CloudFileWriteOptions): Record<string, string> | undefined {
     const headers: Record<string, string> = {};
     if (options.ifMatch) {
-      headers['If-Match'] = options.ifMatch;
+      headers['If-Match'] = this.normalizeIfMatchHeaderValue(options.ifMatch);
     }
     if (options.ifNoneMatch) {
       headers['If-None-Match'] = '*';
     }
     return Object.keys(headers).length > 0 ? headers : undefined;
+  }
+
+  private normalizeIfMatchHeaderValue(etag: string): string {
+    const value = etag.trim();
+    if (!value || value === '*' || value.startsWith('"') || value.startsWith('W/"')) {
+      return value;
+    }
+
+    return `"${value.replace(/^"+|"+$/g, '')}"`;
   }
 
   private normalizeRemotePath(remotePath: string, allowRoot = false): string {

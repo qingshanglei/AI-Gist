@@ -395,7 +395,7 @@ export class DatabaseServiceManager {
         settings
       ] = results.map(result => result.status === 'fulfilled' ? (result.value || []) : []);
       
-      const exportData = {
+      const exportData = this.attachRelationUUIDsToExportData({
         categories: categories as any[],
         prompts: prompts as any[],
         promptVariables: promptVariables as any[],
@@ -404,7 +404,7 @@ export class DatabaseServiceManager {
         quickOptimizationConfigs: quickOptimizationConfigs as any[],
         aiHistory: aiHistory as any[],
         settings: settings as any[]
-      };
+      });
       
       this.debugLog('渲染进程: 数据导出完成', {
         分类数: exportData.categories.length,
@@ -459,6 +459,102 @@ export class DatabaseServiceManager {
         error: error instanceof Error ? error.message : String(error)
       };
     }
+  }
+
+  private attachRelationUUIDsToExportData(data: any): any {
+    const categoriesById = new Map<string, any>(
+      (data.categories || [])
+        .filter((category: any) => category?.id !== undefined && category?.id !== null)
+        .map((category: any) => [String(category.id), category])
+    );
+    const promptsById = new Map<string, any>(
+      (data.prompts || [])
+        .filter((prompt: any) => prompt?.id !== undefined && prompt?.id !== null)
+        .map((prompt: any) => [String(prompt.id), prompt])
+    );
+
+    return {
+      ...data,
+      prompts: (data.prompts || []).map((prompt: any) => {
+        const category = prompt.category || categoriesById.get(String(prompt.categoryId));
+        return category?.uuid && !prompt.categoryUuid
+          ? { ...prompt, categoryUuid: category.uuid }
+          : prompt;
+      }),
+      promptVariables: (data.promptVariables || []).map((variable: any) => {
+        const prompt = promptsById.get(String(variable.promptId));
+        return prompt?.uuid && !variable.promptUuid
+          ? { ...variable, promptUuid: prompt.uuid }
+          : variable;
+      }),
+      promptHistories: (data.promptHistories || []).map((history: any) => {
+        const prompt = promptsById.get(String(history.promptId));
+        const category = categoriesById.get(String(history.categoryId));
+        return {
+          ...history,
+          ...(prompt?.uuid && !history.promptUuid ? { promptUuid: prompt.uuid } : {}),
+          ...(category?.uuid && !history.categoryUuid ? { categoryUuid: category.uuid } : {})
+        };
+      })
+    };
+  }
+
+  private resolveRestoredPromptId(
+    record: any,
+    idMapping: Record<string, number>,
+    uuidMapping: Record<string, number>,
+    restoredIds: Set<number>
+  ): number | undefined {
+    if (record.promptId !== undefined) {
+      const mappedId = idMapping[`prompt_${record.promptId}`];
+      if (mappedId !== undefined) {
+        return mappedId;
+      }
+    }
+
+    if (record.promptUuid && uuidMapping[record.promptUuid] !== undefined) {
+      return uuidMapping[record.promptUuid];
+    }
+
+    if (record.promptId !== undefined) {
+      const numericId = Number(record.promptId);
+      if (restoredIds.has(numericId)) {
+        return numericId;
+      }
+    }
+
+    if (restoredIds.size === 1) {
+      return [...restoredIds][0];
+    }
+
+    return undefined;
+  }
+
+  private resolveRestoredCategoryId(
+    record: any,
+    idMapping: Record<string, number>,
+    uuidMapping: Record<string, number>,
+    restoredIds: Set<number>
+  ): number | undefined {
+    if (record.categoryId !== undefined && record.categoryId !== null) {
+      const mappedId = idMapping[`category_${record.categoryId}`];
+      if (mappedId !== undefined) {
+        return mappedId;
+      }
+    }
+
+    if (record.categoryUuid && uuidMapping[record.categoryUuid] !== undefined) {
+      return uuidMapping[record.categoryUuid];
+    }
+
+    if (record.categoryId !== undefined && record.categoryId !== null) {
+      const numericId = Number(record.categoryId);
+      if (restoredIds.has(numericId)) {
+        return numericId;
+      }
+    }
+
+    return undefined;
   }
 
   /**
@@ -532,6 +628,10 @@ export class DatabaseServiceManager {
       
       // ID映射表：旧ID -> 新ID
       const idMapping: Record<string, number> = {};
+      const categoryUuidMapping: Record<string, number> = {};
+      const promptUuidMapping: Record<string, number> = {};
+      const restoredCategoryIds = new Set<number>();
+      const restoredPromptIds = new Set<number>();
       
       // 导入分类数据
       if (data.categories && data.categories.length > 0) {
@@ -546,6 +646,12 @@ export class DatabaseServiceManager {
             if (oldId !== undefined) {
               idMapping[`category_${oldId}`] = newCategory.id!;
               this.debugLog(`分类ID映射: ${oldId} -> ${newCategory.id}`);
+            }
+            if (newCategory.id !== undefined) {
+              restoredCategoryIds.add(newCategory.id);
+              if (category.uuid) {
+                categoryUuidMapping[category.uuid] = newCategory.id;
+              }
             }
           } catch (err) {
             this.debugWarn('导入分类数据失败:', category.id, err);
@@ -567,10 +673,15 @@ export class DatabaseServiceManager {
           }
           
           // 处理分类ID映射
-          if (promptDataWithoutId.categoryId !== undefined) {
+          if (promptDataWithoutId.categoryId !== undefined || promptDataWithoutId.categoryUuid) {
             const oldCategoryId = promptDataWithoutId.categoryId;
-            const newCategoryId = idMapping[`category_${oldCategoryId}`];
-            
+            const newCategoryId = this.resolveRestoredCategoryId(
+              promptDataWithoutId,
+              idMapping,
+              categoryUuidMapping,
+              restoredCategoryIds
+            );
+
             if (newCategoryId !== undefined) {
               promptDataWithoutId.categoryId = newCategoryId;
               this.debugLog(`提示词分类ID映射: ${oldCategoryId} -> ${newCategoryId}`);
@@ -589,6 +700,12 @@ export class DatabaseServiceManager {
               idMapping[`prompt_${oldPromptId}`] = newPrompt.id!;
               this.debugLog(`提示词ID映射: ${oldPromptId} -> ${newPrompt.id}`);
             }
+            if (newPrompt.id !== undefined) {
+              restoredPromptIds.add(newPrompt.id);
+              if (prompt.uuid) {
+                promptUuidMapping[prompt.uuid] = newPrompt.id;
+              }
+            }
           } catch (err) {
             this.debugWarn('导入提示词数据失败:', prompt.id, err);
             totalErrors++;
@@ -603,8 +720,13 @@ export class DatabaseServiceManager {
           const variableDataWithoutId = { ...variable };
           delete variableDataWithoutId.id;
 
-          if (variableDataWithoutId.promptId !== undefined) {
-            const newPromptId = idMapping[`prompt_${variableDataWithoutId.promptId}`];
+          if (variableDataWithoutId.promptId !== undefined || variableDataWithoutId.promptUuid) {
+            const newPromptId = this.resolveRestoredPromptId(
+              variableDataWithoutId,
+              idMapping,
+              promptUuidMapping,
+              restoredPromptIds
+            );
             if (newPromptId !== undefined) {
               variableDataWithoutId.promptId = newPromptId;
             } else {
@@ -629,14 +751,33 @@ export class DatabaseServiceManager {
         for (const history of data.promptHistories) {
           const { id, ...historyDataWithoutId } = history;
 
-          if (historyDataWithoutId.promptId !== undefined) {
-            const newPromptId = idMapping[`prompt_${historyDataWithoutId.promptId}`];
+          if (historyDataWithoutId.promptId !== undefined || historyDataWithoutId.promptUuid) {
+            const newPromptId = this.resolveRestoredPromptId(
+              historyDataWithoutId,
+              idMapping,
+              promptUuidMapping,
+              restoredPromptIds
+            );
             if (newPromptId !== undefined) {
               historyDataWithoutId.promptId = newPromptId;
             } else {
               this.debugWarn(`未找到提示词历史的提示词ID映射: ${historyDataWithoutId.promptId}`);
               totalErrors++;
               continue;
+            }
+          }
+
+          if (historyDataWithoutId.categoryId !== undefined || historyDataWithoutId.categoryUuid) {
+            const newCategoryId = this.resolveRestoredCategoryId(
+              historyDataWithoutId,
+              idMapping,
+              categoryUuidMapping,
+              restoredCategoryIds
+            );
+            if (newCategoryId !== undefined) {
+              historyDataWithoutId.categoryId = newCategoryId;
+            } else {
+              delete historyDataWithoutId.categoryId;
             }
           }
 
@@ -790,6 +931,10 @@ export class DatabaseServiceManager {
       
       // ID映射表：旧ID -> 新ID
       const idMapping: Record<string, number> = {};
+      const categoryUuidMapping: Record<string, number> = {};
+      const promptUuidMapping: Record<string, number> = {};
+      const restoredCategoryIds = new Set<number>();
+      const restoredPromptIds = new Set<number>();
       
       // 恢复分类数据
       if (backupData.categories && backupData.categories.length > 0) {
@@ -804,6 +949,12 @@ export class DatabaseServiceManager {
             if (oldId !== undefined) {
               idMapping[`category_${oldId}`] = newCategory.id!;
               this.debugLog(`分类ID映射: ${oldId} -> ${newCategory.id}`);
+            }
+            if (newCategory.id !== undefined) {
+              restoredCategoryIds.add(newCategory.id);
+              if (category.uuid) {
+                categoryUuidMapping[category.uuid] = newCategory.id;
+              }
             }
           } catch (err) {
             this.debugWarn('恢复分类数据失败:', category.id, err);
@@ -825,10 +976,15 @@ export class DatabaseServiceManager {
           }
           
           // 处理分类ID映射
-          if (promptDataWithoutId.categoryId !== undefined) {
+          if (promptDataWithoutId.categoryId !== undefined || promptDataWithoutId.categoryUuid) {
             const oldCategoryId = promptDataWithoutId.categoryId;
-            const newCategoryId = idMapping[`category_${oldCategoryId}`];
-            
+            const newCategoryId = this.resolveRestoredCategoryId(
+              promptDataWithoutId,
+              idMapping,
+              categoryUuidMapping,
+              restoredCategoryIds
+            );
+
             if (newCategoryId !== undefined) {
               promptDataWithoutId.categoryId = newCategoryId;
               this.debugLog(`提示词分类ID映射: ${oldCategoryId} -> ${newCategoryId}`);
@@ -847,6 +1003,12 @@ export class DatabaseServiceManager {
               idMapping[`prompt_${oldPromptId}`] = newPrompt.id!;
               this.debugLog(`提示词ID映射: ${oldPromptId} -> ${newPrompt.id}`);
             }
+            if (newPrompt.id !== undefined) {
+              restoredPromptIds.add(newPrompt.id);
+              if (prompt.uuid) {
+                promptUuidMapping[prompt.uuid] = newPrompt.id;
+              }
+            }
           } catch (err) {
             this.debugWarn('恢复提示词数据失败:', prompt.id, err);
             totalErrors++;
@@ -861,8 +1023,13 @@ export class DatabaseServiceManager {
           const variableDataWithoutId = { ...variable };
           delete variableDataWithoutId.id;
 
-          if (variableDataWithoutId.promptId !== undefined) {
-            const newPromptId = idMapping[`prompt_${variableDataWithoutId.promptId}`];
+          if (variableDataWithoutId.promptId !== undefined || variableDataWithoutId.promptUuid) {
+            const newPromptId = this.resolveRestoredPromptId(
+              variableDataWithoutId,
+              idMapping,
+              promptUuidMapping,
+              restoredPromptIds
+            );
             if (newPromptId !== undefined) {
               variableDataWithoutId.promptId = newPromptId;
             } else {
@@ -887,14 +1054,33 @@ export class DatabaseServiceManager {
         for (const history of backupData.promptHistories) {
           const { id, ...historyDataWithoutId } = history;
 
-          if (historyDataWithoutId.promptId !== undefined) {
-            const newPromptId = idMapping[`prompt_${historyDataWithoutId.promptId}`];
+          if (historyDataWithoutId.promptId !== undefined || historyDataWithoutId.promptUuid) {
+            const newPromptId = this.resolveRestoredPromptId(
+              historyDataWithoutId,
+              idMapping,
+              promptUuidMapping,
+              restoredPromptIds
+            );
             if (newPromptId !== undefined) {
               historyDataWithoutId.promptId = newPromptId;
             } else {
               this.debugWarn(`未找到提示词历史的提示词ID映射: ${historyDataWithoutId.promptId}`);
               totalErrors++;
               continue;
+            }
+          }
+
+          if (historyDataWithoutId.categoryId !== undefined || historyDataWithoutId.categoryUuid) {
+            const newCategoryId = this.resolveRestoredCategoryId(
+              historyDataWithoutId,
+              idMapping,
+              categoryUuidMapping,
+              restoredCategoryIds
+            );
+            if (newCategoryId !== undefined) {
+              historyDataWithoutId.categoryId = newCategoryId;
+            } else {
+              delete historyDataWithoutId.categoryId;
             }
           }
 

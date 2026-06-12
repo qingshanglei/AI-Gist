@@ -373,6 +373,21 @@ describe('DatabaseServiceManager', () => {
       expect(result.data!.syncTombstones).toEqual([mockSyncTombstone])
     })
 
+    it('同步导出为变量和历史补充稳定父级 UUID', async () => {
+      mockPromptService.getAllPromptHistories.mockResolvedValueOnce([{
+        ...mockPromptHistory,
+        categoryId: mockCategory.id
+      }])
+
+      const result = await manager.exportAllDataForSync()
+
+      expect(result.success).toBe(true)
+      expect(result.data!.prompts[0].categoryUuid).toBe(mockCategory.uuid)
+      expect(result.data!.promptVariables[0].promptUuid).toBe(mockPrompt.uuid)
+      expect(result.data!.promptHistories[0].promptUuid).toBe(mockPrompt.uuid)
+      expect(result.data!.promptHistories[0].categoryUuid).toBe(mockCategory.uuid)
+    })
+
     it('UUID 迁移失败时不生成同步快照', async () => {
       mockCategoryService.migrateAllRecordsToUUID.mockResolvedValue({
         categories: 0,
@@ -609,6 +624,50 @@ describe('DatabaseServiceManager', () => {
         isSystem: true,
         createdAt: mockSetting.createdAt,
         updatedAt: mockSetting.updatedAt
+      })
+    })
+
+    it('完整替换会用父级 UUID 修复跨端漂移的数字关系 ID', async () => {
+      vi.spyOn(manager, 'forceCleanAllTables').mockResolvedValue()
+      const driftedData = {
+        ...makeExportData(),
+        prompts: [{
+          ...mockPrompt,
+          categoryId: 999,
+          categoryUuid: mockCategory.uuid
+        }],
+        promptVariables: [{
+          ...mockPromptVariable,
+          promptId: 999,
+          promptUuid: mockPrompt.uuid
+        }],
+        promptHistories: [{
+          ...mockPromptHistory,
+          promptId: 999,
+          promptUuid: mockPrompt.uuid,
+          categoryId: 999,
+          categoryUuid: mockCategory.uuid
+        }]
+      }
+
+      const result = await manager.replaceAllData(driftedData)
+
+      expect(result.success).toBe(true)
+      expect(restoredRecords.prompts[0]).toMatchObject({
+        uuid: mockPrompt.uuid,
+        categoryId: 10
+      })
+      expect(restoredRecords.promptVariables[0]).toMatchObject({
+        uuid: mockPromptVariable.uuid,
+        promptId: 20,
+        promptUuid: mockPrompt.uuid
+      })
+      expect(restoredRecords.promptHistories[0]).toMatchObject({
+        uuid: mockPromptHistory.uuid,
+        promptId: 20,
+        promptUuid: mockPrompt.uuid,
+        categoryId: 10,
+        categoryUuid: mockCategory.uuid
       })
     })
 
