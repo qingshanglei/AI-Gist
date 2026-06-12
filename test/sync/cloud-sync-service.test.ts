@@ -1675,6 +1675,141 @@ describe('CloudSyncService', () => {
     service.stopAutoSync()
   })
 
+  it('queues an automatic local-change sync when local data changes during a running sync', async () => {
+    vi.useFakeTimers()
+    const initialData = {
+      ...baseData,
+      prompts: [{ ...baseData.prompts[0], title: 'Before running sync' }]
+    }
+    const editedData = {
+      ...baseData,
+      prompts: [{ ...baseData.prompts[0], title: 'Edited during running sync', updatedAt: '2026-01-03T00:00:00.000Z' }]
+    }
+    let currentData = initialData
+    let cloudManifest: any = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    let releaseFirstSave!: () => void
+    let notifyFirstSaveStarted!: () => void
+    const firstSaveStarted = new Promise<void>(resolve => {
+      notifyFirstSaveStarted = resolve
+    })
+    const releaseFirstSavePromise = new Promise<void>(resolve => {
+      releaseFirstSave = resolve
+    })
+    let saveAttempts = 0
+    const { service, cloudClient, database } = createService(initialData, cloudManifest, {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      }
+    })
+    database.exportAllDataForSync.mockImplementation(async () => ({
+      success: true,
+      message: 'ok',
+      data: currentData
+    }))
+    cloudClient.getCloudSyncManifest.mockImplementation(async () => cloudManifest)
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (_storageId: string, manifest: any) => {
+      saveAttempts += 1
+      cloudManifest = manifest
+      if (saveAttempts === 1) {
+        notifyFirstSaveStarted()
+        await releaseFirstSavePromise
+      }
+
+      return { success: true }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 0,
+      pollIntervalMs: 0,
+      retryMs: 0,
+      storageIds: ['cfg-1']
+    })
+
+    const firstSync = service.syncNow('cfg-1', { reason: 'local-change' })
+    await firstSaveStarted
+    currentData = editedData
+    const queuedSync = service.syncNow('cfg-1', { reason: 'local-change' })
+    expect(saveAttempts).toBe(1)
+
+    releaseFirstSave()
+    await firstSync
+    await queuedSync
+    await vi.runOnlyPendingTimersAsync()
+    await vi.runOnlyPendingTimersAsync()
+
+    expect(saveAttempts).toBe(2)
+    expect(cloudClient.saveCloudSyncManifest.mock.calls[1][1].latestSnapshot.data.prompts)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ title: 'Edited during running sync' })
+      ]))
+
+    service.stopAutoSync()
+  })
+
+  it('drops a queued automatic local-change sync when auto sync is stopped', async () => {
+    vi.useFakeTimers()
+    let currentData = {
+      ...baseData,
+      prompts: [{ ...baseData.prompts[0], title: 'Before stopped auto sync' }]
+    }
+    let cloudManifest: any = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    let releaseFirstSave!: () => void
+    let notifyFirstSaveStarted!: () => void
+    const firstSaveStarted = new Promise<void>(resolve => {
+      notifyFirstSaveStarted = resolve
+    })
+    const releaseFirstSavePromise = new Promise<void>(resolve => {
+      releaseFirstSave = resolve
+    })
+    let saveAttempts = 0
+    const { service, cloudClient, database } = createService(currentData, cloudManifest, {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      }
+    })
+    database.exportAllDataForSync.mockImplementation(async () => ({
+      success: true,
+      message: 'ok',
+      data: currentData
+    }))
+    cloudClient.getCloudSyncManifest.mockImplementation(async () => cloudManifest)
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (_storageId: string, manifest: any) => {
+      saveAttempts += 1
+      cloudManifest = manifest
+      if (saveAttempts === 1) {
+        notifyFirstSaveStarted()
+        await releaseFirstSavePromise
+      }
+
+      return { success: true }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 0,
+      pollIntervalMs: 0,
+      retryMs: 0,
+      storageIds: ['cfg-1']
+    })
+
+    const firstSync = service.syncNow('cfg-1', { reason: 'local-change' })
+    await firstSaveStarted
+    currentData = {
+      ...baseData,
+      prompts: [{ ...baseData.prompts[0], title: 'Edited after auto sync stopped' }]
+    }
+    const queuedSync = service.syncNow('cfg-1', { reason: 'local-change' })
+    service.stopAutoSync()
+
+    releaseFirstSave()
+    await firstSync
+    await queuedSync
+    await vi.runOnlyPendingTimersAsync()
+
+    expect(saveAttempts).toBe(1)
+  })
+
   it('backs off automatic retries after a transient cloud read failure', async () => {
     vi.useFakeTimers()
     let dataChangeListener: ((change: any) => void) | undefined

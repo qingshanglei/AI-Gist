@@ -209,6 +209,7 @@ export class CloudSyncService {
   private readonly createDeviceId: () => string;
   private readonly subscribeToDataChanges: (listener: (change: DataChangeEventPayload) => void) => () => void;
   private readonly runningSyncs = new Map<string, Promise<CloudSyncResult>>();
+  private readonly queuedAutoSyncs = new Map<string, CloudSyncRunReason>();
   private readonly statusListeners = new Set<CloudSyncStatusListener>();
   private autoSyncOptions: CloudSyncAutoOptions | null = null;
   private unsubscribeDataChanges: (() => void) | null = null;
@@ -246,6 +247,7 @@ export class CloudSyncService {
   async syncNow(storageId: string, options: CloudSyncOptions = {}): Promise<CloudSyncResult> {
     const running = this.runningSyncs.get(storageId);
     if (running) {
+      this.queueAutoSyncAfterRunning(storageId, options.reason || 'manual');
       return running;
     }
 
@@ -280,9 +282,41 @@ export class CloudSyncService {
         }
         return result;
       })
-      .finally(() => this.runningSyncs.delete(storageId));
+      .finally(() => {
+        this.runningSyncs.delete(storageId);
+        setTimeout(() => this.scheduleQueuedAutoSync(storageId), 0);
+      });
     this.runningSyncs.set(storageId, syncPromise);
     return syncPromise;
+  }
+
+  private queueAutoSyncAfterRunning(storageId: string, reason: CloudSyncRunReason): void {
+    if (reason === 'manual') {
+      return;
+    }
+
+    if (!this.autoSyncOptions) {
+      return;
+    }
+
+    this.queuedAutoSyncs.set(storageId, reason);
+  }
+
+  private scheduleQueuedAutoSync(storageId: string): void {
+    const reason = this.queuedAutoSyncs.get(storageId);
+    if (!reason) {
+      return;
+    }
+
+    this.queuedAutoSyncs.delete(storageId);
+    if (!this.autoSyncOptions) {
+      return;
+    }
+
+    this.scheduleSync(reason, {
+      storageId,
+      delayMs: 0
+    });
   }
 
   startAutoSync(options: CloudSyncAutoOptions = {}): void {
@@ -354,6 +388,7 @@ export class CloudSyncService {
   stopAutoSync(): void {
     this.clearScheduledTimer();
     this.clearRetryTimer();
+    this.queuedAutoSyncs.clear();
 
     if (this.pollTimer) {
       clearInterval(this.pollTimer);

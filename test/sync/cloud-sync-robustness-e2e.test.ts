@@ -3124,6 +3124,121 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     }
   })
 
+  it('自动同步运行中本机继续编辑时会在结束后补跑并上传最新数据', async () => {
+    const storageId = 'robust-auto-sync-local-change-during-running-sync'
+    let blockFirstManifestSave = true
+    let manifestSaveAttempts = 0
+    let releaseFirstManifestSave!: () => void
+    let notifyFirstManifestSaveStarted!: () => void
+    const firstManifestSaveStarted = new Promise<void>(resolve => {
+      notifyFirstManifestSaveStarted = resolve
+    })
+    const releaseFirstManifestSavePromise = new Promise<void>(resolve => {
+      releaseFirstManifestSave = resolve
+    })
+    const client = createWebDAVSyncClient(storageId, {
+      saveCloudSyncManifest: async (_context, saveNormally) => {
+        manifestSaveAttempts += 1
+        const result = await saveNormally()
+        if (blockFirstManifestSave) {
+          blockFirstManifestSave = false
+          notifyFirstManifestSaveStarted()
+          await releaseFirstManifestSavePromise
+        }
+
+        return result
+      }
+    })
+    const database = new MutableSyncDatabase(createDataSet({
+      promptTitle: 'Auto sync initial prompt',
+      settingValue: 'initial-auto'
+    }))
+    const service = createSyncService(client, database, new MemoryStorage(), 'device-auto-running-change')
+
+    service.startAutoSync({
+      enabled: true,
+      storageIds: [storageId],
+      debounceMs: 0,
+      retryMs: 0,
+      pollIntervalMs: 0,
+      startupDelayMs: 0,
+      syncOnStart: false
+    })
+
+    try {
+      service.scheduleSync('local-change', { storageId, delayMs: 0 })
+      await firstManifestSaveStarted
+
+      database.data = mutateDataSet(database.data, data => {
+        data.prompts![0].title = 'Auto sync edit made during running sync'
+        data.prompts![0].imageBlobs = [UPDATED_IMAGE]
+        data.prompts![0].updatedAt = '2026-06-13T17:10:00.000Z'
+        data.promptHistories!.push({
+          id: 404,
+          uuid: 'history-auto-edit-during-running-sync',
+          promptId: 10,
+          promptUuid: 'prompt-main',
+          title: 'Auto sync edit made during running sync',
+          content: '自动同步运行时继续编辑',
+          result: 'Second auto sync should upload this',
+          version: 2,
+          imageBlobs: [UPDATED_IMAGE],
+          createdAt: '2026-06-13T17:11:00.000Z',
+          updatedAt: '2026-06-13T17:11:00.000Z'
+        })
+        data.settings = [{
+          key: 'theme',
+          value: 'auto-edited-during-running-sync',
+          type: 'string',
+          updatedAt: '2026-06-13T17:12:00.000Z'
+        }]
+      })
+      service.scheduleSync('local-change', { storageId, delayMs: 0 })
+      await new Promise(resolve => setTimeout(resolve, 20))
+      expect(manifestSaveAttempts).toBe(1)
+
+      releaseFirstManifestSave()
+      await waitForCondition(() =>
+        manifestSaveAttempts >= 2 &&
+        service.getStatus().status === 'success' &&
+        service.getStatus().lastResult?.success === true
+      )
+
+      const manifest = await createWebDAVSyncClient(storageId).getCloudSyncManifest(storageId)
+      expect(manifest.latestSnapshot?.deviceId).toBe('device-auto-running-change')
+      expect(manifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          uuid: 'prompt-main',
+          title: 'Auto sync edit made during running sync',
+          imageBlobs: [UPDATED_IMAGE]
+        })
+      ]))
+      expect(manifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          uuid: 'history-auto-edit-during-running-sync',
+          imageBlobs: [UPDATED_IMAGE]
+        })
+      ]))
+      expect(manifest.latestSnapshot?.data.settings).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          key: 'theme',
+          value: 'auto-edited-during-running-sync'
+        })
+      ]))
+      expect(manifest.latestSnapshot?.dataChecksum)
+        .toBe(createCloudSyncDataChecksum(manifest.latestSnapshot!.data))
+
+      const repeated = await service.syncNow(storageId, {
+        deviceName: 'Auto Running Change',
+        platform: 'electron',
+        reason: 'manual'
+      })
+      expect(repeated).toMatchObject({ success: true, action: 'noop' })
+    } finally {
+      service.stopAutoSync()
+    }
+  })
+
   it('远端快照文件局部损坏时仍能使用 manifest 内联快照继续同步', async () => {
     const storageId = 'robust-corrupt-snapshot-file-uses-manifest'
     const client = createWebDAVSyncClient(storageId)
