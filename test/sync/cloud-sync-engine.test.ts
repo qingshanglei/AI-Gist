@@ -705,4 +705,96 @@ describe('cloud sync engine', () => {
     expect(result.data.prompts).toHaveLength(1)
     expect(result.data.prompts?.[0].title).toBe('Newer remote edit')
   })
+
+  it('does not apply cascade child tombstones when the parent prompt delete loses to a newer prompt update', () => {
+    const local = {
+      prompts: [],
+      promptVariables: [],
+      promptHistories: [],
+      aiHistory: [],
+      syncTombstones: [
+        {
+          collectionName: 'prompts',
+          recordKey: 'uuid:prompt-1',
+          recordUuid: 'prompt-1',
+          deletedAt: '2026-01-02T00:00:00.000Z',
+          recordSnapshot: {
+            id: 10,
+            uuid: 'prompt-1'
+          }
+        },
+        {
+          collectionName: 'promptVariables',
+          recordKey: 'uuid:variable-1',
+          recordUuid: 'variable-1',
+          deletedAt: '2026-01-02T00:00:00.000Z',
+          recordSnapshot: {
+            id: 20,
+            uuid: 'variable-1',
+            promptId: 10,
+            promptUuid: 'prompt-1'
+          }
+        },
+        {
+          collectionName: 'promptHistories',
+          recordKey: 'uuid:history-1',
+          recordUuid: 'history-1',
+          deletedAt: '2026-01-02T00:00:00.000Z',
+          recordSnapshot: {
+            id: 30,
+            uuid: 'history-1',
+            promptId: 10,
+            promptUuid: 'prompt-1'
+          }
+        }
+      ]
+    }
+    const remote = {
+      prompts: [
+        { id: 10, uuid: 'prompt-1', title: 'Newer generation', updatedAt: '2026-01-03T00:00:00.000Z' }
+      ],
+      promptVariables: [
+        {
+          id: 20,
+          uuid: 'variable-1',
+          promptId: 10,
+          promptUuid: 'prompt-1',
+          name: 'tone',
+          updatedAt: '2026-01-01T00:00:00.000Z'
+        }
+      ],
+      promptHistories: [
+        {
+          id: 30,
+          uuid: 'history-1',
+          promptId: 10,
+          promptUuid: 'prompt-1',
+          result: 'Earlier history',
+          updatedAt: '2026-01-01T00:00:00.000Z'
+        },
+        {
+          id: 31,
+          uuid: 'history-2',
+          promptId: 10,
+          promptUuid: 'prompt-1',
+          result: 'New generation history',
+          updatedAt: '2026-01-03T00:00:00.000Z'
+        }
+      ],
+      aiHistory: []
+    }
+
+    const result = mergeCloudSyncData(local, remote)
+
+    expect(result.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'prompt-1', title: 'Newer generation' })
+    ]))
+    expect(result.data.promptVariables).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'variable-1', promptUuid: 'prompt-1' })
+    ]))
+    expect(result.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'history-1', promptUuid: 'prompt-1' }),
+      expect.objectContaining({ uuid: 'history-2', promptUuid: 'prompt-1' })
+    ]))
+  })
 })

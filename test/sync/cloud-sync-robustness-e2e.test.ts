@@ -956,6 +956,155 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     ]))
   })
 
+  it('删除提示词遇到另一端较新生成历史时会保留提示词元数据和新历史', async () => {
+    const storageId = 'robust-delete-vs-newer-generated-history'
+    const client = createWebDAVSyncClient(storageId)
+    const deviceADatabase = new MutableSyncDatabase(createRealisticDataSet())
+    const deviceA = createSyncService(client, deviceADatabase, new MemoryStorage(), 'device-a')
+    expect(await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'uploaded' })
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'device-b')
+    expect(await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'downloaded' })
+
+    const deletedAt = '2026-06-13T15:05:00.000Z'
+    deviceADatabase.data = mutateDataSet(deviceADatabase.data, data => {
+      const deletedPrompt = data.prompts![0]
+      const deletedVariable = data.promptVariables![0]
+      const deletedHistory = data.promptHistories![0]
+      data.prompts = []
+      data.promptVariables = []
+      data.promptHistories = []
+      data.syncTombstones = [
+        createTombstoneFromRecord('prompts', deletedPrompt, deletedAt),
+        createTombstoneFromRecord('promptVariables', deletedVariable, deletedAt),
+        createTombstoneFromRecord('promptHistories', deletedHistory, deletedAt)
+      ]
+    })
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.prompts![0].title = '删除冲突后保留的新生成提示词'
+      data.prompts![0].useCount = 4
+      data.prompts![0].updatedAt = '2026-06-13T15:10:00.000Z'
+      data.promptHistories!.push({
+        id: 84,
+        uuid: 'real-history-after-delete-conflict',
+        promptId: 31,
+        promptUuid: 'real-prompt-launch',
+        title: '删除冲突后的新生成历史',
+        content: '另一端删除期间继续生成',
+        result: 'New generation should survive older delete',
+        version: 2,
+        imageBlobs: [UPDATED_IMAGE],
+        createdAt: '2026-06-13T15:11:00.000Z',
+        updatedAt: '2026-06-13T15:11:00.000Z'
+      })
+      data.aiHistory!.push({
+        id: 94,
+        uuid: 'real-ai-history-after-delete-conflict',
+        promptUuid: 'real-prompt-launch',
+        input: '另一端删除期间继续生成',
+        output: 'New generation should survive older delete',
+        provider: 'openai',
+        model: 'gpt-4.1',
+        createdAt: '2026-06-13T15:12:00.000Z',
+        updatedAt: '2026-06-13T15:12:00.000Z'
+      })
+    })
+
+    expect(await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'uploaded' })
+
+    const merged = await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })
+    expect(merged, JSON.stringify(merged, null, 2)).toMatchObject({
+      success: true,
+      action: 'merged',
+      uploadedRemote: true,
+      appliedLocal: true
+    })
+    expect(merged.conflicts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        collection: 'prompts',
+        key: 'uuid:real-prompt-launch',
+        reason: 'delete_vs_update',
+        resolution: 'keep-local'
+      })
+    ]))
+
+    expect(deviceBDatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '删除冲突后保留的新生成提示词',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(deviceBDatabase.data.promptVariables).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-variable-tone',
+        promptUuid: 'real-prompt-launch',
+        defaultValue: 'friendly'
+      })
+    ]))
+    expect(deviceBDatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'real-history-after-delete-conflict', imageBlobs: [UPDATED_IMAGE] })
+    ]))
+    expect(deviceBDatabase.data.aiHistory).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-ai-history-initial' }),
+      expect.objectContaining({
+        uuid: 'real-ai-history-after-delete-conflict',
+        output: 'New generation should survive older delete'
+      })
+    ]))
+
+    const manifest = await client.getCloudSyncManifest(storageId)
+    expect(manifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-prompt-launch', title: '删除冲突后保留的新生成提示词' })
+    ]))
+    expect(manifest.latestSnapshot?.data.promptVariables).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-variable-tone', promptUuid: 'real-prompt-launch' })
+    ]))
+    expect(manifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'real-history-after-delete-conflict', imageBlobs: [UPDATED_IMAGE] })
+    ]))
+    expect(manifest.latestSnapshot?.data.aiHistory).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-ai-history-initial' }),
+      expect.objectContaining({ uuid: 'real-ai-history-after-delete-conflict' })
+    ]))
+    expect(manifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(manifest.latestSnapshot!.data))
+
+    const deviceCDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceC = createSyncService(client, deviceCDatabase, new MemoryStorage(), 'device-c')
+    expect(await deviceC.syncNow(storageId, {
+      deviceName: 'Desktop C',
+      platform: 'electron',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'downloaded' })
+    expect(deviceCDatabase.data.promptVariables).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-variable-tone', promptUuid: 'real-prompt-launch' })
+    ]))
+    expect(deviceCDatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial' }),
+      expect.objectContaining({ uuid: 'real-history-after-delete-conflict' })
+    ]))
+  })
+
   it('新设备只有本地数字 ID 重建时不会误上传新 revision 或打断引用关系', async () => {
     const storageId = 'robust-reinstall-regenerated-local-ids'
     const client = createWebDAVSyncClient(storageId)
@@ -2960,6 +3109,18 @@ function createTombstone(collectionName: string, uuid: string, deletedAt: string
     recordUuid: uuid,
     deletedAt,
     recordSnapshot: { uuid }
+  }
+}
+
+function createTombstoneFromRecord(collectionName: string, record: any, deletedAt: string) {
+  const recordKey = record?.uuid ? `uuid:${record.uuid}` : `id:${record.id}`
+  return {
+    storeName: collectionName,
+    collectionName,
+    recordKey,
+    recordUuid: record?.uuid,
+    deletedAt,
+    recordSnapshot: cloneData(record)
   }
 }
 

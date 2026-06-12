@@ -96,6 +96,16 @@ interface CloudSyncRelationContext {
   promptUuidById: Map<string, string>;
 }
 
+interface PreservedPromptDeleteContext {
+  promptUuids: Set<string>;
+  promptIds: Set<string>;
+}
+
+interface CloudSyncTombstoneMergeContext {
+  tombstones: CloudSyncTombstone[];
+  preservedPromptDeletes: PreservedPromptDeleteContext;
+}
+
 export interface CloudSyncSnapshotValidationResult {
   valid: boolean;
   reason?: string;
@@ -343,6 +353,7 @@ export function mergeCloudSyncData<TData extends CloudSyncDataSet>(
     remote: createRelationContext(remoteData),
     base: createRelationContext(baseData)
   };
+  const tombstoneContext = createTombstoneMergeContext(localData, remoteData, baseData);
 
   const collections = getAllCollectionNames(localData, remoteData, baseData);
 
@@ -353,6 +364,7 @@ export function mergeCloudSyncData<TData extends CloudSyncDataSet>(
       remoteData[collection] || [],
       baseData[collection] || [],
       relationContexts,
+      tombstoneContext,
       options
     );
 
@@ -398,6 +410,7 @@ export function getCloudSyncRecordKey(collection: string, record: any): string {
 export function applyCloudSyncTombstones<TData extends CloudSyncDataSet>(data: TData): TData {
   const cloned = cloneValue(data) as CloudSyncDataSet;
   const tombstones = normalizeCloudSyncTombstones(cloned.syncTombstones || []);
+  const preservedPromptDeletes = createPreservedPromptDeleteContext(cloned, tombstones);
 
   for (const collection of Object.keys(cloned)) {
     if (collection === 'syncTombstones') {
@@ -410,7 +423,13 @@ export function applyCloudSyncTombstones<TData extends CloudSyncDataSet>(data: T
     }
 
     cloned[collection] = records.filter(record =>
-      !tombstones.some(tombstone => tombstoneDeletesRecord(tombstone, collection, record))
+      !tombstones.some(tombstone => {
+        if (shouldIgnoreCascadePromptChildTombstone(tombstone, preservedPromptDeletes)) {
+          return false;
+        }
+
+        return tombstoneDeletesRecord(tombstone, collection, record);
+      })
     );
   }
 
@@ -428,6 +447,7 @@ function mergeCollection(
     remote: CloudSyncRelationContext;
     base: CloudSyncRelationContext;
   },
+  tombstoneContext: CloudSyncTombstoneMergeContext,
   options: CloudSyncMergeOptions
 ): {
   records: any[];
@@ -458,7 +478,19 @@ function mergeCollection(
       continue;
     }
 
-    mergeWithBase(collection, key, localRecord, remoteRecord, baseRecord, records, conflicts, summary, relationContexts, options);
+    mergeWithBase(
+      collection,
+      key,
+      localRecord,
+      remoteRecord,
+      baseRecord,
+      records,
+      conflicts,
+      summary,
+      relationContexts,
+      tombstoneContext,
+      options
+    );
   }
 
   return { records, conflicts, summary };
@@ -532,6 +564,7 @@ function mergeWithBase(
     remote: CloudSyncRelationContext;
     base: CloudSyncRelationContext;
   },
+  tombstoneContext: CloudSyncTombstoneMergeContext,
   options: CloudSyncMergeOptions
 ): void {
   const localExists = isPresent(localRecord);
@@ -543,6 +576,12 @@ function mergeWithBase(
   }
 
   if (!localExists) {
+    if (hasIgnoredCascadePromptChildTombstone(tombstoneContext, collection, remoteRecord)) {
+      records.push(cloneValue(remoteRecord));
+      summary.updated++;
+      return;
+    }
+
     const remoteChanged = !recordsEqual(collection, remoteRecord, baseRecord, relationContexts.remote, relationContexts.base);
     if (!remoteChanged) {
       summary.deleted++;
@@ -564,6 +603,12 @@ function mergeWithBase(
   }
 
   if (!remoteExists) {
+    if (hasIgnoredCascadePromptChildTombstone(tombstoneContext, collection, localRecord)) {
+      records.push(cloneValue(localRecord));
+      summary.kept++;
+      return;
+    }
+
     const localChanged = !recordsEqual(collection, localRecord, baseRecord, relationContexts.local, relationContexts.base);
     if (!localChanged) {
       summary.deleted++;
@@ -1135,7 +1180,107 @@ function getCloudSyncTombstoneKey(tombstone: any): string {
   return '';
 }
 
+function createTombstoneMergeContext(...dataSets: CloudSyncDataSet[]): CloudSyncTombstoneMergeContext {
+  const tombstones = normalizeCloudSyncTombstones(
+    dataSets.flatMap(data => data.syncTombstones || [])
+  );
+  const promptData: CloudSyncDataSet = {
+    prompts: dataSets.flatMap(data => Array.isArray(data.prompts) ? data.prompts : [])
+  };
+
+  return {
+    tombstones,
+    preservedPromptDeletes: createPreservedPromptDeleteContext(promptData, tombstones)
+  };
+}
+
+function createPreservedPromptDeleteContext(
+  data: CloudSyncDataSet,
+  tombstones: CloudSyncTombstone[]
+): PreservedPromptDeleteContext {
+  const context: PreservedPromptDeleteContext = {
+    promptUuids: new Set<string>(),
+    promptIds: new Set<string>()
+  };
+
+  const prompts = Array.isArray(data.prompts) ? data.prompts : [];
+  for (const tombstone of tombstones) {
+    if (tombstone.collectionName !== 'prompts') {
+      continue;
+    }
+
+    for (const prompt of prompts) {
+      if (
+        tombstoneMatchesRecord(tombstone, 'prompts', prompt) &&
+        !tombstoneDeletesRecord(tombstone, 'prompts', prompt)
+      ) {
+        const promptUuid = typeof prompt?.uuid === 'string' ? prompt.uuid : '';
+        const promptId = normalizeRelationId(prompt?.id);
+        if (promptUuid) {
+          context.promptUuids.add(promptUuid);
+        }
+        if (promptId) {
+          context.promptIds.add(promptId);
+        }
+      }
+    }
+  }
+
+  return context;
+}
+
+function hasIgnoredCascadePromptChildTombstone(
+  tombstoneContext: CloudSyncTombstoneMergeContext,
+  collection: string,
+  record: any
+): boolean {
+  if (!isPresent(record)) {
+    return false;
+  }
+
+  return tombstoneContext.tombstones.some(tombstone =>
+    shouldIgnoreCascadePromptChildTombstone(tombstone, tombstoneContext.preservedPromptDeletes) &&
+    tombstoneMatchesRecord(tombstone, collection, record)
+  );
+}
+
+function shouldIgnoreCascadePromptChildTombstone(
+  tombstone: CloudSyncTombstone,
+  preservedPromptDeletes: PreservedPromptDeleteContext
+): boolean {
+  if (
+    tombstone.collectionName !== 'promptVariables' &&
+    tombstone.collectionName !== 'promptHistories' &&
+    tombstone.collectionName !== 'aiHistory'
+  ) {
+    return false;
+  }
+
+  const snapshot = tombstone.recordSnapshot;
+  if (!snapshot || typeof snapshot !== 'object') {
+    return false;
+  }
+
+  const promptUuid = typeof snapshot.promptUuid === 'string' ? snapshot.promptUuid : '';
+  if (promptUuid && preservedPromptDeletes.promptUuids.has(promptUuid)) {
+    return true;
+  }
+
+  const promptId = normalizeRelationId(snapshot.promptId);
+  return !!promptId && preservedPromptDeletes.promptIds.has(promptId);
+}
+
 function tombstoneDeletesRecord(tombstone: CloudSyncTombstone, collection: string, record: any): boolean {
+  if (!tombstoneMatchesRecord(tombstone, collection, record)) {
+    return false;
+  }
+
+  const tombstoneTime = getTombstoneTime(tombstone);
+  const recordTime = getRecordTime(record);
+  return tombstoneTime === 0 || recordTime === 0 || tombstoneTime >= recordTime;
+}
+
+function tombstoneMatchesRecord(tombstone: CloudSyncTombstone, collection: string, record: any): boolean {
   if (tombstone.collectionName !== collection || !isPresent(record)) {
     return false;
   }
@@ -1144,13 +1289,7 @@ function tombstoneDeletesRecord(tombstone: CloudSyncTombstone, collection: strin
   const matchesKey = tombstone.recordKey === recordKey;
   const matchesUuid = !!tombstone.recordUuid && tombstone.recordUuid === record?.uuid;
 
-  if (!matchesKey && !matchesUuid) {
-    return false;
-  }
-
-  const tombstoneTime = getTombstoneTime(tombstone);
-  const recordTime = getRecordTime(record);
-  return tombstoneTime === 0 || recordTime === 0 || tombstoneTime >= recordTime;
+  return matchesKey || matchesUuid;
 }
 
 function getTombstoneTime(tombstone: CloudSyncTombstone): number {
