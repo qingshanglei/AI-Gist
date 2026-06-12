@@ -91,6 +91,11 @@ export interface CloudSyncMergeOptions {
   prefer?: 'local' | 'remote' | 'newer';
 }
 
+interface CloudSyncRelationContext {
+  categoryUuidById: Map<string, string>;
+  promptUuidById: Map<string, string>;
+}
+
 export interface CloudSyncSnapshotValidationResult {
   valid: boolean;
   reason?: string;
@@ -169,13 +174,14 @@ export function createCloudSyncDataChecksum(data: CloudSyncDataSet): string {
 
 export function createCloudSyncSemanticChecksum(data: CloudSyncDataSet): string {
   const normalizedData = normalizeCloudSyncDataSet(data);
+  const relationContext = createRelationContext(normalizedData);
   const comparableData: Record<string, any[]> = {};
 
   for (const collection of getAllCollectionNames(normalizedData)) {
     comparableData[collection] = (normalizedData[collection] || [])
       .map(record => ({
         key: getCloudSyncRecordKey(collection, record),
-        value: normalizeForCompare(collection, record)
+        value: normalizeForCompare(collection, record, relationContext)
       }))
       .sort((left, right) => {
         const keyOrder = left.key.localeCompare(right.key);
@@ -332,6 +338,11 @@ export function mergeCloudSyncData<TData extends CloudSyncDataSet>(
     kept: 0,
     conflicts: 0
   };
+  const relationContexts = {
+    local: createRelationContext(localData),
+    remote: createRelationContext(remoteData),
+    base: createRelationContext(baseData)
+  };
 
   const collections = getAllCollectionNames(localData, remoteData, baseData);
 
@@ -341,6 +352,7 @@ export function mergeCloudSyncData<TData extends CloudSyncDataSet>(
       localData[collection] || [],
       remoteData[collection] || [],
       baseData[collection] || [],
+      relationContexts,
       options
     );
 
@@ -411,6 +423,11 @@ function mergeCollection(
   localRecords: any[],
   remoteRecords: any[],
   baseRecords: any[],
+  relationContexts: {
+    local: CloudSyncRelationContext;
+    remote: CloudSyncRelationContext;
+    base: CloudSyncRelationContext;
+  },
   options: CloudSyncMergeOptions
 ): {
   records: any[];
@@ -437,11 +454,11 @@ function mergeCollection(
     const baseRecord = base.get(key);
 
     if (!baseRecord) {
-      mergeWithoutBase(collection, key, localRecord, remoteRecord, records, conflicts, summary, options);
+      mergeWithoutBase(collection, key, localRecord, remoteRecord, records, conflicts, summary, relationContexts, options);
       continue;
     }
 
-    mergeWithBase(collection, key, localRecord, remoteRecord, baseRecord, records, conflicts, summary, options);
+    mergeWithBase(collection, key, localRecord, remoteRecord, baseRecord, records, conflicts, summary, relationContexts, options);
   }
 
   return { records, conflicts, summary };
@@ -455,13 +472,17 @@ function mergeWithoutBase(
   records: any[],
   conflicts: CloudSyncConflict[],
   summary: CloudSyncMergeSummary,
+  relationContexts: {
+    local: CloudSyncRelationContext;
+    remote: CloudSyncRelationContext;
+  },
   options: CloudSyncMergeOptions
 ): void {
   const localExists = isPresent(localRecord);
   const remoteExists = isPresent(remoteRecord);
 
   if (localExists && remoteExists) {
-    if (recordsEqual(collection, localRecord, remoteRecord)) {
+    if (recordsEqual(collection, localRecord, remoteRecord, relationContexts.local, relationContexts.remote)) {
       records.push(cloneValue(localRecord));
       summary.kept++;
       return;
@@ -506,6 +527,11 @@ function mergeWithBase(
   records: any[],
   conflicts: CloudSyncConflict[],
   summary: CloudSyncMergeSummary,
+  relationContexts: {
+    local: CloudSyncRelationContext;
+    remote: CloudSyncRelationContext;
+    base: CloudSyncRelationContext;
+  },
   options: CloudSyncMergeOptions
 ): void {
   const localExists = isPresent(localRecord);
@@ -517,7 +543,7 @@ function mergeWithBase(
   }
 
   if (!localExists) {
-    const remoteChanged = !recordsEqual(collection, remoteRecord, baseRecord);
+    const remoteChanged = !recordsEqual(collection, remoteRecord, baseRecord, relationContexts.remote, relationContexts.base);
     if (!remoteChanged) {
       summary.deleted++;
       return;
@@ -538,7 +564,7 @@ function mergeWithBase(
   }
 
   if (!remoteExists) {
-    const localChanged = !recordsEqual(collection, localRecord, baseRecord);
+    const localChanged = !recordsEqual(collection, localRecord, baseRecord, relationContexts.local, relationContexts.base);
     if (!localChanged) {
       summary.deleted++;
       return;
@@ -558,14 +584,14 @@ function mergeWithBase(
     return;
   }
 
-  if (recordsEqual(collection, localRecord, remoteRecord)) {
+  if (recordsEqual(collection, localRecord, remoteRecord, relationContexts.local, relationContexts.remote)) {
     records.push(cloneValue(localRecord));
     summary.kept++;
     return;
   }
 
-  const localChanged = !recordsEqual(collection, localRecord, baseRecord);
-  const remoteChanged = !recordsEqual(collection, remoteRecord, baseRecord);
+  const localChanged = !recordsEqual(collection, localRecord, baseRecord, relationContexts.local, relationContexts.base);
+  const remoteChanged = !recordsEqual(collection, remoteRecord, baseRecord, relationContexts.remote, relationContexts.base);
 
   if (!localChanged && remoteChanged) {
     records.push(cloneValue(remoteRecord));
@@ -579,7 +605,14 @@ function mergeWithBase(
     return;
   }
 
-  const mergedRecord = mergeChangedRecordFields(collection, localRecord, remoteRecord, baseRecord, options);
+  const mergedRecord = mergeChangedRecordFields(
+    collection,
+    localRecord,
+    remoteRecord,
+    baseRecord,
+    relationContexts,
+    options
+  );
   records.push(cloneValue(mergedRecord.record));
 
   if (mergedRecord.hasFieldConflict) {
@@ -594,7 +627,7 @@ function mergeWithBase(
     });
   }
 
-  if (!recordsEqual(collection, mergedRecord.record, localRecord)) {
+  if (!recordsEqual(collection, mergedRecord.record, localRecord, relationContexts.local, relationContexts.local)) {
     summary.updated++;
   } else {
     summary.kept++;
@@ -654,6 +687,11 @@ function mergeChangedRecordFields(
   localRecord: any,
   remoteRecord: any,
   baseRecord: any,
+  relationContexts: {
+    local: CloudSyncRelationContext;
+    remote: CloudSyncRelationContext;
+    base: CloudSyncRelationContext;
+  },
   options: CloudSyncMergeOptions
 ): { record: any; hasFieldConflict: boolean; resolution: CloudSyncResolution } {
   const chosen = chooseRecord(localRecord, remoteRecord, options);
@@ -670,7 +708,7 @@ function mergeChangedRecordFields(
     const localValue = localRecord?.[field];
     const remoteValue = remoteRecord?.[field];
 
-    if (fieldValuesEqual(collection, field, localValue, remoteValue)) {
+    if (fieldValuesEqual(collection, field, localValue, remoteValue, relationContexts.local, relationContexts.remote)) {
       merged[field] = cloneValue(localValue);
       continue;
     }
@@ -691,8 +729,8 @@ function mergeChangedRecordFields(
       continue;
     }
 
-    const localChanged = !fieldValuesEqual(collection, field, localValue, baseValue);
-    const remoteChanged = !fieldValuesEqual(collection, field, remoteValue, baseValue);
+    const localChanged = !fieldValuesEqual(collection, field, localValue, baseValue, relationContexts.local, relationContexts.base);
+    const remoteChanged = !fieldValuesEqual(collection, field, remoteValue, baseValue, relationContexts.remote, relationContexts.base);
 
     if (localChanged && !remoteChanged) {
       merged[field] = cloneValue(localValue);
@@ -720,13 +758,36 @@ function mergeChangedRecordFields(
   };
 }
 
-function fieldValuesEqual(collection: string, field: string, left: any, right: any): boolean {
+function fieldValuesEqual(
+  collection: string,
+  field: string,
+  left: any,
+  right: any,
+  leftRelationContext?: CloudSyncRelationContext,
+  rightRelationContext?: CloudSyncRelationContext
+): boolean {
   if (field === 'tags') {
     return stableSerialize(normalizeTags(left)) === stableSerialize(normalizeTags(right));
   }
 
   if (collection === 'prompts' && field === 'variables') {
     return true;
+  }
+
+  if (field === 'categoryId' && (collection === 'prompts' || collection === 'promptHistories')) {
+    const leftCategoryUuid = getRelationUuidById(leftRelationContext?.categoryUuidById, left);
+    const rightCategoryUuid = getRelationUuidById(rightRelationContext?.categoryUuidById, right);
+    if (leftCategoryUuid && rightCategoryUuid) {
+      return leftCategoryUuid === rightCategoryUuid;
+    }
+  }
+
+  if (field === 'promptId' && (collection === 'promptVariables' || collection === 'promptHistories')) {
+    const leftPromptUuid = getRelationUuidById(leftRelationContext?.promptUuidById, left);
+    const rightPromptUuid = getRelationUuidById(rightRelationContext?.promptUuidById, right);
+    if (leftPromptUuid && rightPromptUuid) {
+      return leftPromptUuid === rightPromptUuid;
+    }
   }
 
   return stableSerialize(normalizeForCompare(collection, left)) ===
@@ -822,16 +883,26 @@ function isPresent(record: any | undefined): boolean {
     record.isDeleted !== true;
 }
 
-function recordsEqual(collection: string, left: any, right: any): boolean {
+function recordsEqual(
+  collection: string,
+  left: any,
+  right: any,
+  leftRelationContext?: CloudSyncRelationContext,
+  rightRelationContext?: CloudSyncRelationContext
+): boolean {
   if (!isPresent(left) || !isPresent(right)) {
     return isPresent(left) === isPresent(right);
   }
 
-  return stableSerialize(normalizeForCompare(collection, left)) ===
-    stableSerialize(normalizeForCompare(collection, right));
+  return stableSerialize(normalizeForCompare(collection, left, leftRelationContext)) ===
+    stableSerialize(normalizeForCompare(collection, right, rightRelationContext));
 }
 
-function normalizeForCompare(collection: string, value: any): any {
+function normalizeForCompare(
+  collection: string,
+  value: any,
+  relationContext?: CloudSyncRelationContext
+): any {
   if (value === null || value === undefined) {
     return value;
   }
@@ -848,7 +919,7 @@ function normalizeForCompare(collection: string, value: any): any {
   }
 
   if (Array.isArray(value)) {
-    const normalizedArray = value.map(item => normalizeForCompare(collection, item));
+    const normalizedArray = value.map(item => normalizeForCompare(collection, item, relationContext));
     if (collection === 'prompts' && value.every(item => item && typeof item === 'object')) {
       return normalizedArray.sort((a, b) =>
         stableSerialize(a).localeCompare(stableSerialize(b))
@@ -863,9 +934,24 @@ function normalizeForCompare(collection: string, value: any): any {
 
   const normalized: Record<string, any> = {};
   const valueRecord = value as Record<string, any>;
+  const inferredCategoryUuid = getInferredCategoryUuid(valueRecord, relationContext);
+  const inferredPromptUuid = getInferredPromptUuid(valueRecord, relationContext);
 
   if (collection === 'prompts' && valueRecord.category?.uuid) {
     normalized.categoryUuid = valueRecord.category.uuid;
+  } else if (collection === 'prompts' && inferredCategoryUuid) {
+    normalized.categoryUuid = inferredCategoryUuid;
+  }
+
+  if (collection === 'promptHistories' && inferredCategoryUuid) {
+    normalized.categoryUuid = valueRecord.categoryUuid || inferredCategoryUuid;
+  }
+
+  if (
+    (collection === 'promptHistories' || collection === 'promptVariables') &&
+    inferredPromptUuid
+  ) {
+    normalized.promptUuid = valueRecord.promptUuid || inferredPromptUuid;
   }
 
   for (const [key, fieldValue] of Object.entries(valueRecord)) {
@@ -873,7 +959,7 @@ function normalizeForCompare(collection: string, value: any): any {
       continue;
     }
 
-    if (key === 'categoryId' && (valueRecord.category?.uuid || valueRecord.categoryUuid)) {
+    if (key === 'categoryId' && (valueRecord.category?.uuid || valueRecord.categoryUuid || inferredCategoryUuid)) {
       continue;
     }
 
@@ -890,10 +976,78 @@ function normalizeForCompare(collection: string, value: any): any {
       continue;
     }
 
-    normalized[key] = normalizeForCompare(collection, fieldValue);
+    normalized[key] = normalizeForCompare(collection, fieldValue, relationContext);
   }
 
   return normalized;
+}
+
+function createRelationContext(data: CloudSyncDataSet): CloudSyncRelationContext {
+  const categoryUuidById = new Map<string, string>();
+  const promptUuidById = new Map<string, string>();
+
+  for (const category of data.categories || []) {
+    const id = normalizeRelationId(category?.id);
+    if (id && typeof category?.uuid === 'string' && category.uuid) {
+      categoryUuidById.set(id, category.uuid);
+    }
+  }
+
+  for (const prompt of data.prompts || []) {
+    const id = normalizeRelationId(prompt?.id);
+    if (id && typeof prompt?.uuid === 'string' && prompt.uuid) {
+      promptUuidById.set(id, prompt.uuid);
+    }
+  }
+
+  return {
+    categoryUuidById,
+    promptUuidById
+  };
+}
+
+function getInferredCategoryUuid(
+  record: Record<string, any>,
+  relationContext?: CloudSyncRelationContext
+): string | undefined {
+  if (typeof record.categoryUuid === 'string' && record.categoryUuid) {
+    return record.categoryUuid;
+  }
+
+  if (record.category?.uuid) {
+    return String(record.category.uuid);
+  }
+
+  const categoryId = normalizeRelationId(record.categoryId);
+  return categoryId ? relationContext?.categoryUuidById.get(categoryId) : undefined;
+}
+
+function getInferredPromptUuid(
+  record: Record<string, any>,
+  relationContext?: CloudSyncRelationContext
+): string | undefined {
+  if (typeof record.promptUuid === 'string' && record.promptUuid) {
+    return record.promptUuid;
+  }
+
+  const promptId = normalizeRelationId(record.promptId);
+  return promptId ? relationContext?.promptUuidById.get(promptId) : undefined;
+}
+
+function getRelationUuidById(
+  idMap: Map<string, string> | undefined,
+  id: unknown
+): string | undefined {
+  const normalizedId = normalizeRelationId(id);
+  return normalizedId ? idMap?.get(normalizedId) : undefined;
+}
+
+function normalizeRelationId(value: unknown): string {
+  if (value === undefined || value === null || value === '') {
+    return '';
+  }
+
+  return String(value);
 }
 
 function normalizeTags(tags: any): string[] {

@@ -182,6 +182,94 @@ describe('cloud sync engine', () => {
     expect(mergeCloudSyncData(firstDeviceData, secondDeviceData).hasConflicts).toBe(false)
   })
 
+  it('infers missing legacy relation UUIDs from related records before comparing regenerated ids', () => {
+    const legacyCloudData = {
+      categories: [
+        { id: 1, uuid: 'cat-legacy', name: 'Legacy category', updatedAt: '2026-06-12T00:00:00.000Z' }
+      ],
+      prompts: [
+        {
+          id: 10,
+          uuid: 'prompt-legacy',
+          title: 'Legacy prompt',
+          content: 'Hello',
+          categoryId: 1,
+          updatedAt: '2026-06-12T00:00:00.000Z'
+        }
+      ],
+      promptVariables: [
+        {
+          id: 20,
+          uuid: 'var-legacy',
+          promptId: 10,
+          name: 'tone',
+          defaultValue: 'calm',
+          updatedAt: '2026-06-12T00:00:00.000Z'
+        }
+      ],
+      promptHistories: [
+        {
+          id: 30,
+          uuid: 'history-legacy',
+          promptId: 10,
+          categoryId: 1,
+          content: 'History',
+          result: 'Result',
+          updatedAt: '2026-06-12T00:00:00.000Z'
+        }
+      ],
+      aiConfigs: [],
+      quickOptimizationConfigs: [],
+      aiHistory: [],
+      settings: [],
+      syncTombstones: []
+    }
+    const regeneratedInstallData = {
+      categories: [
+        { ...legacyCloudData.categories[0], id: 501 }
+      ],
+      prompts: [
+        {
+          ...legacyCloudData.prompts[0],
+          id: 601,
+          categoryId: 501,
+          categoryUuid: 'cat-legacy'
+        }
+      ],
+      promptVariables: [
+        {
+          ...legacyCloudData.promptVariables[0],
+          id: 701,
+          promptId: 601,
+          promptUuid: 'prompt-legacy'
+        }
+      ],
+      promptHistories: [
+        {
+          ...legacyCloudData.promptHistories[0],
+          id: 801,
+          promptId: 601,
+          promptUuid: 'prompt-legacy',
+          categoryId: 501,
+          categoryUuid: 'cat-legacy'
+        }
+      ],
+      aiConfigs: [],
+      quickOptimizationConfigs: [],
+      aiHistory: [],
+      settings: [],
+      syncTombstones: []
+    }
+
+    expect(createCloudSyncDataChecksum(legacyCloudData)).not.toBe(
+      createCloudSyncDataChecksum(regeneratedInstallData)
+    )
+    expect(createCloudSyncSemanticChecksum(legacyCloudData)).toBe(
+      createCloudSyncSemanticChecksum(regeneratedInstallData)
+    )
+    expect(mergeCloudSyncData(regeneratedInstallData, legacyCloudData).hasConflicts).toBe(false)
+  })
+
   it('fails instead of silently overwriting duplicate sync keys', () => {
     expect(() => mergeCloudSyncData({
       prompts: [

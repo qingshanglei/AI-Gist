@@ -14,6 +14,7 @@ import { WebDAVProvider } from '../../src/main/cloud/webdav-provider'
 import type { CloudSyncDataSet, CloudSyncSnapshot } from '@shared/cloud-sync-engine'
 import {
   createCloudSyncDataChecksum,
+  createCloudSyncSemanticChecksum,
   createCloudSyncSnapshot
 } from '@shared/cloud-sync-engine'
 import type {
@@ -863,6 +864,76 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
         id: 5041,
         promptId: 5031,
         promptUuid: 'real-prompt-launch'
+      })
+    ]))
+  })
+
+  it('旧版云端缺少 relation UUID 时重装设备不会误上传或打断历史引用', async () => {
+    const storageId = 'robust-legacy-relation-uuid-missing'
+    const client = createWebDAVSyncClient(storageId)
+    const legacyRemoteData = stripRelationUuids(createRealisticDataSet())
+    const legacyDeviceDatabase = new MutableSyncDatabase(legacyRemoteData)
+    const legacyDevice = createSyncService(client, legacyDeviceDatabase, new MemoryStorage(), 'legacy-device')
+
+    const firstUpload = await legacyDevice.syncNow(storageId, {
+      deviceName: 'Legacy Desktop',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(firstUpload).toMatchObject({ success: true, action: 'uploaded' })
+    const manifestBeforeReinstall = await client.getCloudSyncManifest(storageId)
+    const snapshotsBeforeReinstall = await client.listCloudSyncSnapshots(storageId)
+    expect(manifestBeforeReinstall.latestSnapshot?.data.prompts?.[0]).not.toHaveProperty('categoryUuid')
+    expect(manifestBeforeReinstall.latestSnapshot?.data.promptVariables?.[0]).not.toHaveProperty('promptUuid')
+    expect(manifestBeforeReinstall.latestSnapshot?.data.promptHistories?.[0]).not.toHaveProperty('promptUuid')
+
+    const regeneratedLocalData = regenerateLocalNumericIds(createRealisticDataSet(), 7000)
+    expect(createCloudSyncSemanticChecksum(regeneratedLocalData))
+      .toBe(createCloudSyncSemanticChecksum(legacyRemoteData))
+    const newInstallDatabase = new MutableSyncDatabase(regeneratedLocalData)
+    const newInstall = createSyncService(client, newInstallDatabase, new MemoryStorage(), 'new-install-from-legacy')
+
+    const result = await newInstall.syncNow(storageId, {
+      deviceName: 'Fresh Install From Legacy Cloud',
+      platform: 'web',
+      reason: 'manual'
+    })
+
+    expect(result, JSON.stringify(result, null, 2)).toMatchObject({
+      success: true,
+      action: 'noop',
+      uploadedRemote: false,
+      appliedLocal: false
+    })
+    const manifestAfterReinstall = await client.getCloudSyncManifest(storageId)
+    const snapshotsAfterReinstall = await client.listCloudSyncSnapshots(storageId)
+    expect(manifestAfterReinstall.latestSnapshot?.revision)
+      .toBe(manifestBeforeReinstall.latestSnapshot?.revision)
+    expect(snapshotsAfterReinstall).toHaveLength(snapshotsBeforeReinstall.length)
+    expect(newInstallDatabase.replaceAllData).not.toHaveBeenCalled()
+    expect(newInstallDatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        id: 7031,
+        categoryId: 7011,
+        categoryUuid: 'real-category-product'
+      })
+    ]))
+    expect(newInstallDatabase.data.promptVariables).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-variable-tone',
+        id: 7041,
+        promptId: 7031,
+        promptUuid: 'real-prompt-launch'
+      })
+    ]))
+    expect(newInstallDatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-history-initial',
+        id: 7041,
+        promptId: 7031,
+        promptUuid: 'real-prompt-launch',
+        imageBlobs: [INITIAL_IMAGE]
       })
     ]))
   })
@@ -2414,6 +2485,21 @@ function regenerateLocalNumericIds(data: CloudSyncDataSet, offset: number): Clou
     id: setting.id === undefined ? undefined : Number(setting.id || 0) + offset
   }))
 
+  return nextData
+}
+
+function stripRelationUuids(data: CloudSyncDataSet): CloudSyncDataSet {
+  const nextData = cloneData(data)
+  for (const prompt of nextData.prompts || []) {
+    delete prompt.categoryUuid
+  }
+  for (const variable of nextData.promptVariables || []) {
+    delete variable.promptUuid
+  }
+  for (const history of nextData.promptHistories || []) {
+    delete history.promptUuid
+    delete history.categoryUuid
+  }
   return nextData
 }
 
