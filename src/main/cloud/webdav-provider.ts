@@ -1,6 +1,46 @@
 // 本地模块导入
 import { CloudStorageProvider, CloudFileInfo, WebDAVConfig } from '@shared/types/cloud-backup';
 
+type WebDAVClientFactory = (url: string, options: {
+  username?: string;
+  password?: string;
+}) => any;
+
+interface WebDAVModule {
+  createClient?: WebDAVClientFactory;
+  default?: {
+    createClient?: WebDAVClientFactory;
+  };
+}
+
+type RuntimeImporter = <T>(specifier: string) => Promise<T>;
+
+declare global {
+  var __AI_GIST_WEB_DAV_IMPORT__: RuntimeImporter | undefined;
+}
+
+// TypeScript 会把 CommonJS 目标里的原生动态导入编译成 CommonJS require 调用。
+// 这里保留真正的运行时 import()，用于加载 webdav 5.x 这类 ESM-only 包。
+const preservedRuntimeImport = new Function('specifier', 'return import(specifier)') as RuntimeImporter;
+
+function runtimeImport<T>(specifier: string): Promise<T> {
+  const importOverride = globalThis.__AI_GIST_WEB_DAV_IMPORT__;
+  if (typeof importOverride === 'function') {
+    return importOverride<T>(specifier);
+  }
+
+  return preservedRuntimeImport<T>(specifier);
+}
+
+function getWebDAVCreateClient(webdavModule: WebDAVModule): WebDAVClientFactory {
+  const createClient = webdavModule.createClient || webdavModule.default?.createClient;
+  if (typeof createClient !== 'function') {
+    throw new Error(CONSTANTS.ERROR_MESSAGES.MODULE_EXPORT_ERROR);
+  }
+
+  return createClient;
+}
+
 /**
  * 常量定义
  */
@@ -62,21 +102,15 @@ export class WebDAVProvider implements CloudStorageProvider {
    */
   private async initClient(): Promise<void> {
     try {
-      const webdavModule = await import('webdav');
-      
-      // webdav 模块直接导出 createClient 方法
-      const { createClient } = webdavModule as any;
-      
-      if (typeof createClient !== 'function') {
-        throw new Error(CONSTANTS.ERROR_MESSAGES.MODULE_EXPORT_ERROR);
-      }
+      const webdavModule = await runtimeImport<WebDAVModule>('webdav');
+      const createClient = getWebDAVCreateClient(webdavModule);
 
       this.client = createClient(this.config.url, {
         username: this.config.username,
         password: this.config.password,
       });
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.CLIENT_INIT_FAILED, error);
+      this.logOperationError(CONSTANTS.LOG_MESSAGES.CLIENT_INIT_FAILED, error);
       throw new Error(`${CONSTANTS.ERROR_MESSAGES.CLIENT_INIT_FAILED}: ${this.getErrorMessage(error)}`);
     }
   }
