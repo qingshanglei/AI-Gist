@@ -873,7 +873,7 @@ function normalizeForCompare(collection: string, value: any): any {
       continue;
     }
 
-    if (key === 'categoryId' && valueRecord.category?.uuid) {
+    if (key === 'categoryId' && (valueRecord.category?.uuid || valueRecord.categoryUuid)) {
       continue;
     }
 

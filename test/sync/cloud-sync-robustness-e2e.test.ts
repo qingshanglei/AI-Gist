@@ -510,6 +510,72 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     ]))
   })
 
+  it('新设备只有本地数字 ID 重建时不会误上传新 revision 或打断引用关系', async () => {
+    const storageId = 'robust-reinstall-regenerated-local-ids'
+    const client = createWebDAVSyncClient(storageId)
+    const remoteData = createRealisticDataSet()
+    const deviceADatabase = new MutableSyncDatabase(remoteData)
+    const deviceA = createSyncService(client, deviceADatabase, new MemoryStorage(), 'device-a')
+
+    const firstUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(firstUpload).toMatchObject({ success: true, action: 'uploaded' })
+    const manifestBeforeReinstall = await client.getCloudSyncManifest(storageId)
+    const snapshotsBeforeReinstall = await client.listCloudSyncSnapshots(storageId)
+
+    const regeneratedLocalData = regenerateLocalNumericIds(remoteData, 5000)
+    expect(createCloudSyncDataChecksum(regeneratedLocalData))
+      .not.toBe(createCloudSyncDataChecksum(remoteData))
+
+    const newInstallDatabase = new MutableSyncDatabase(regeneratedLocalData)
+    const newInstall = createSyncService(client, newInstallDatabase, new MemoryStorage(), 'device-new-install')
+    const result = await newInstall.syncNow(storageId, {
+      deviceName: 'Fresh Install',
+      platform: 'web',
+      reason: 'manual'
+    })
+
+    expect(result, JSON.stringify(result, null, 2)).toMatchObject({
+      success: true,
+      action: 'noop',
+      uploadedRemote: false,
+      appliedLocal: false
+    })
+    const manifestAfterReinstall = await client.getCloudSyncManifest(storageId)
+    const snapshotsAfterReinstall = await client.listCloudSyncSnapshots(storageId)
+    expect(manifestAfterReinstall.latestSnapshot?.revision)
+      .toBe(manifestBeforeReinstall.latestSnapshot?.revision)
+    expect(snapshotsAfterReinstall).toHaveLength(snapshotsBeforeReinstall.length)
+    expect(newInstallDatabase.replaceAllData).not.toHaveBeenCalled()
+    expect(newInstallDatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        id: 5031,
+        categoryId: 5011,
+        categoryUuid: 'real-category-product'
+      })
+    ]))
+    expect(newInstallDatabase.data.promptVariables).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-variable-tone',
+        id: 5041,
+        promptId: 5031,
+        promptUuid: 'real-prompt-launch'
+      })
+    ]))
+    expect(newInstallDatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-history-initial',
+        id: 5041,
+        promptId: 5031,
+        promptUuid: 'real-prompt-launch'
+      })
+    ]))
+  })
+
   it('保存 manifest 前另一端抢先更新时会自动重读并合并后成功', async () => {
     const storageId = 'robust-remote-changes-during-save'
     const baseClient = createWebDAVSyncClient(storageId)
@@ -1313,6 +1379,56 @@ function createTombstone(collectionName: string, uuid: string, deletedAt: string
     deletedAt,
     recordSnapshot: { uuid }
   }
+}
+
+function regenerateLocalNumericIds(data: CloudSyncDataSet, offset: number): CloudSyncDataSet {
+  const nextData = cloneData(data)
+  const categoryIdByUuid = new Map<string, number>()
+  const promptIdByUuid = new Map<string, number>()
+
+  nextData.categories = (nextData.categories || []).map(category => {
+    const nextId = Number(category.id || 0) + offset
+    categoryIdByUuid.set(category.uuid, nextId)
+    return { ...category, id: nextId }
+  })
+
+  nextData.prompts = (nextData.prompts || []).map(prompt => {
+    const nextId = Number(prompt.id || 0) + offset
+    promptIdByUuid.set(prompt.uuid, nextId)
+    return {
+      ...prompt,
+      id: nextId,
+      categoryId: prompt.categoryUuid
+        ? categoryIdByUuid.get(prompt.categoryUuid)
+        : Number(prompt.categoryId || 0) + offset
+    }
+  })
+
+  nextData.promptVariables = (nextData.promptVariables || []).map(variable => ({
+    ...variable,
+    id: Number(variable.id || 0) + offset,
+    promptId: variable.promptUuid
+      ? promptIdByUuid.get(variable.promptUuid)
+      : Number(variable.promptId || 0) + offset
+  }))
+
+  nextData.promptHistories = (nextData.promptHistories || []).map(history => ({
+    ...history,
+    id: Number(history.id || 0) + offset,
+    promptId: history.promptUuid
+      ? promptIdByUuid.get(history.promptUuid)
+      : Number(history.promptId || 0) + offset,
+    categoryId: history.categoryUuid
+      ? categoryIdByUuid.get(history.categoryUuid)
+      : history.categoryId
+  }))
+
+  nextData.settings = (nextData.settings || []).map(setting => ({
+    ...setting,
+    id: setting.id === undefined ? undefined : Number(setting.id || 0) + offset
+  }))
+
+  return nextData
 }
 
 function cloneData<T>(data: T): T {

@@ -126,6 +126,62 @@ describe('cloud sync engine', () => {
     )
   })
 
+  it('uses relation UUIDs instead of regenerated category ids for semantic equality', () => {
+    const firstDeviceData = {
+      categories: [
+        { id: 1, uuid: 'cat-1', name: 'Category', updatedAt: '2026-06-12T00:00:00.000Z' }
+      ],
+      prompts: [
+        {
+          id: 10,
+          uuid: 'prompt-1',
+          title: 'Prompt',
+          content: 'Hello',
+          categoryId: 1,
+          categoryUuid: 'cat-1',
+          updatedAt: '2026-06-12T00:00:00.000Z'
+        }
+      ],
+      promptVariables: [],
+      promptHistories: [
+        {
+          id: 100,
+          uuid: 'history-1',
+          promptId: 10,
+          promptUuid: 'prompt-1',
+          categoryId: 1,
+          categoryUuid: 'cat-1',
+          content: 'History'
+        }
+      ],
+      aiConfigs: [],
+      quickOptimizationConfigs: [],
+      aiHistory: [],
+      settings: [],
+      syncTombstones: []
+    }
+    const secondDeviceData = {
+      ...firstDeviceData,
+      categories: [
+        { ...firstDeviceData.categories[0], id: 501 }
+      ],
+      prompts: [
+        { ...firstDeviceData.prompts[0], id: 601, categoryId: 501 }
+      ],
+      promptHistories: [
+        { ...firstDeviceData.promptHistories[0], id: 701, promptId: 601, categoryId: 501 }
+      ]
+    }
+
+    expect(createCloudSyncDataChecksum(firstDeviceData)).not.toBe(
+      createCloudSyncDataChecksum(secondDeviceData)
+    )
+    expect(createCloudSyncSemanticChecksum(firstDeviceData)).toBe(
+      createCloudSyncSemanticChecksum(secondDeviceData)
+    )
+    expect(mergeCloudSyncData(firstDeviceData, secondDeviceData).hasConflicts).toBe(false)
+  })
+
   it('fails instead of silently overwriting duplicate sync keys', () => {
     expect(() => mergeCloudSyncData({
       prompts: [
