@@ -238,6 +238,15 @@ describe('DatabaseServiceManager', () => {
       expect(result.error).toContain('读取数据表失败: aiConfigs')
       expect(result.data).toBeUndefined()
     })
+
+    it('结构化导出失败不会默认写入 console.warn/error', async () => {
+      mockAIConfigService.getAllAIConfigs.mockRejectedValue(new Error('DB error'))
+
+      const result = await expectNoDefaultConsoleNoise(() => manager.exportAllData())
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('读取数据表失败: aiConfigs')
+    })
   })
 
   // ---- exportAllDataForBackup（图片序列化）----
@@ -335,6 +344,15 @@ describe('DatabaseServiceManager', () => {
       expect(result.error).toContain('读取同步删除标记失败')
       expect(result.data).toBeUndefined()
     })
+
+    it('删除标记读取失败不会默认写入 console.warn/error', async () => {
+      mockCategoryService.getSyncTombstones.mockRejectedValue(new Error('tombstone store failed'))
+
+      const result = await expectNoDefaultConsoleNoise(() => manager.exportAllDataForSync())
+
+      expect(result.success).toBe(false)
+      expect(result.error).toContain('读取同步删除标记失败')
+    })
   })
 
   // ---- importData ----
@@ -380,6 +398,15 @@ describe('DatabaseServiceManager', () => {
       expect(result.totalErrors).toBe(1)
       expect(result.error).toContain('导入过程中有 1 条记录失败')
       expect(result.message).toContain('未完全完成')
+    })
+
+    it('记录导入失败不会默认写入 console.warn/error', async () => {
+      mockAppSettingsService.updateSettingByKey.mockRejectedValueOnce(new Error('settings import failed'))
+
+      const result = await expectNoDefaultConsoleNoise(() => manager.importData(makeExportData()))
+
+      expect(result.success).toBe(false)
+      expect(result.totalErrors).toBe(1)
     })
 
     it('base64 imageBlobs 被反序列化为 Blob', async () => {
@@ -571,6 +598,16 @@ describe('DatabaseServiceManager', () => {
       expect(result.error).toContain('恢复过程中有 1 条记录失败')
     })
 
+    it('结构化恢复失败不会默认写入 console.warn/error', async () => {
+      vi.spyOn(manager, 'forceCleanAllTables').mockResolvedValue()
+      mockAppSettingsService.updateSettingByKey.mockRejectedValueOnce(new Error('settings write failed'))
+
+      const result = await expectNoDefaultConsoleNoise(() => manager.replaceAllData(makeExportData()))
+
+      expect(result.success).toBe(false)
+      expect(result.totalErrors).toBe(1)
+    })
+
     it('备份校验失败时不会先清空本地数据', async () => {
       const data = {
         ...makeExportData(),
@@ -609,8 +646,37 @@ describe('DatabaseServiceManager', () => {
       expect(result.error).toContain('同步导入过程中有 1 条记录失败')
       expect(result.errors?.[0]).toContain('prompt upsert failed')
     })
+
+    it('legacy 同步导入失败不会默认写入 console.warn/error', async () => {
+      mockPromptService.upsertPrompt.mockRejectedValueOnce(new Error('prompt upsert failed'))
+
+      const result = await expectNoDefaultConsoleNoise(() => manager.syncImportData({
+        categories: [mockCategory],
+        prompts: [mockPrompt],
+        aiConfigs: [mockAIConfig],
+        settings: [mockSetting]
+      }))
+
+      expect(result.success).toBe(false)
+      expect(result.totalErrors).toBe(1)
+    })
   })
 })
+
+async function expectNoDefaultConsoleNoise<T>(operation: () => Promise<T>): Promise<T> {
+  const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+  const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+
+  try {
+    const result = await operation()
+    expect(warnSpy).not.toHaveBeenCalled()
+    expect(errorSpy).not.toHaveBeenCalled()
+    return result
+  } finally {
+    warnSpy.mockRestore()
+    errorSpy.mockRestore()
+  }
+}
 
 function createMockDbWithSyncTombstones(restoredTombstones: any[]) {
   return {

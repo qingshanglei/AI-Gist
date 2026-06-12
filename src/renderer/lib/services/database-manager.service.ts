@@ -127,6 +127,20 @@ export class DatabaseServiceManager {
     console.debug(...args);
   }
 
+  private debugWarn(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return;
+    }
+    console.warn(...args);
+  }
+
+  private debugError(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return;
+    }
+    console.error(...args);
+  }
+
   private isDebugLoggingEnabled(): boolean {
     try {
       return typeof localStorage !== 'undefined' &&
@@ -190,7 +204,7 @@ export class DatabaseServiceManager {
         return repairResult;
       }
     } catch (error) {
-      console.error('DatabaseServiceManager: 数据库修复失败:', error);
+      this.debugError('DatabaseServiceManager: 数据库修复失败:', error);
       return {
         success: false,
         message: `数据库修复失败: ${error instanceof Error ? error.message : '未知错误'}`
@@ -244,7 +258,7 @@ export class DatabaseServiceManager {
         missingStores: healthStatus.missingStores
       };
     } catch (error) {
-      console.error('检查和修复数据库过程中出错:', error);
+      this.debugError('检查和修复数据库过程中出错:', error);
       return {
         healthy: false,
         repaired: false,
@@ -331,7 +345,7 @@ export class DatabaseServiceManager {
       const healthStatus = await this.getHealthStatus();
       
       if (!healthStatus.healthy) {
-        console.warn('检测到数据库异常，缺失的对象存储:', healthStatus.missingStores);
+        this.debugWarn('检测到数据库异常，缺失的对象存储:', healthStatus.missingStores);
         
         // 尝试修复数据库
         this.debugLog('正在尝试修复数据库...');
@@ -365,7 +379,7 @@ export class DatabaseServiceManager {
 
       if (failedTables.length > 0) {
         failedTables.forEach(failure => {
-          console.warn(`获取 ${failure.tableName} 数据失败:`, failure.reason);
+          this.debugWarn(`获取 ${failure.tableName} 数据失败:`, failure.reason);
         });
         throw new Error(`读取数据表失败: ${failedTables.map(failure => failure.tableName).join(', ')}`);
       }
@@ -412,7 +426,7 @@ export class DatabaseServiceManager {
       };
       
     } catch (error) {
-      console.error('渲染进程: 导出数据库数据失败:', error);
+      this.debugError('渲染进程: 导出数据库数据失败:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -438,7 +452,7 @@ export class DatabaseServiceManager {
         }
       };
     } catch (error) {
-      console.error('导出备份数据失败:', error);
+      this.debugError('导出备份数据失败:', error);
       return {
         success: false,
         message: '备份数据导出失败',
@@ -469,7 +483,7 @@ export class DatabaseServiceManager {
     try {
       syncTombstones = await this.category.getSyncTombstones();
     } catch (error) {
-      console.warn('获取同步删除标记失败:', error);
+      this.debugWarn('获取同步删除标记失败:', error);
       return {
         success: false,
         message: '同步数据导出失败',
@@ -534,7 +548,7 @@ export class DatabaseServiceManager {
               this.debugLog(`分类ID映射: ${oldId} -> ${newCategory.id}`);
             }
           } catch (err) {
-            console.warn('导入分类数据失败:', category.id, err);
+            this.debugWarn('导入分类数据失败:', category.id, err);
             totalErrors++;
           }
         }
@@ -561,7 +575,7 @@ export class DatabaseServiceManager {
               promptDataWithoutId.categoryId = newCategoryId;
               this.debugLog(`提示词分类ID映射: ${oldCategoryId} -> ${newCategoryId}`);
             } else {
-              console.warn(`未找到分类ID映射: ${oldCategoryId}，将提示词设为未分类`);
+              this.debugWarn(`未找到分类ID映射: ${oldCategoryId}，将提示词设为未分类`);
               promptDataWithoutId.categoryId = undefined;
             }
           }
@@ -576,7 +590,7 @@ export class DatabaseServiceManager {
               this.debugLog(`提示词ID映射: ${oldPromptId} -> ${newPrompt.id}`);
             }
           } catch (err) {
-            console.warn('导入提示词数据失败:', prompt.id, err);
+            this.debugWarn('导入提示词数据失败:', prompt.id, err);
             totalErrors++;
           }
         }
@@ -594,7 +608,7 @@ export class DatabaseServiceManager {
             if (newPromptId !== undefined) {
               variableDataWithoutId.promptId = newPromptId;
             } else {
-              console.warn(`未找到提示词变量的提示词ID映射: ${variableDataWithoutId.promptId}`);
+              this.debugWarn(`未找到提示词变量的提示词ID映射: ${variableDataWithoutId.promptId}`);
               totalErrors++;
               continue;
             }
@@ -603,7 +617,7 @@ export class DatabaseServiceManager {
           try {
             await this.prompt.createPromptVariableFromBackup(variableDataWithoutId);
           } catch (err) {
-            console.warn('导入提示词变量数据失败:', variable.id, err);
+            this.debugWarn('导入提示词变量数据失败:', variable.id, err);
             totalErrors++;
           }
         }
@@ -620,7 +634,7 @@ export class DatabaseServiceManager {
             if (newPromptId !== undefined) {
               historyDataWithoutId.promptId = newPromptId;
             } else {
-              console.warn(`未找到提示词历史的提示词ID映射: ${historyDataWithoutId.promptId}`);
+              this.debugWarn(`未找到提示词历史的提示词ID映射: ${historyDataWithoutId.promptId}`);
               totalErrors++;
               continue;
             }
@@ -630,7 +644,7 @@ export class DatabaseServiceManager {
             const historyToCreate = await this.deserializeImageBlobs(historyDataWithoutId);
             await this.prompt.createPromptHistoryFromBackup(historyToCreate);
           } catch (err) {
-            console.warn('导入提示词历史数据失败:', history.id, err);
+            this.debugWarn('导入提示词历史数据失败:', history.id, err);
             totalErrors++;
           }
         }
@@ -644,7 +658,7 @@ export class DatabaseServiceManager {
           try {
             await this.aiConfig.createAIConfig(configDataWithoutId);
           } catch (err) {
-            console.warn('导入AI配置数据失败:', config.id, err);
+            this.debugWarn('导入AI配置数据失败:', config.id, err);
             totalErrors++;
           }
         }
@@ -659,7 +673,7 @@ export class DatabaseServiceManager {
           try {
             await this.quickOptimization.createQuickOptimizationConfigFromBackup(configDataWithoutId);
           } catch (err) {
-            console.warn('导入快速优化配置数据失败:', config.id, err);
+            this.debugWarn('导入快速优化配置数据失败:', config.id, err);
             totalErrors++;
           }
         }
@@ -673,7 +687,7 @@ export class DatabaseServiceManager {
           try {
             await this.aiGenerationHistory.createAIGenerationHistory(historyDataWithoutId);
           } catch (err) {
-            console.warn('导入AI历史数据失败:', history.id, err);
+            this.debugWarn('导入AI历史数据失败:', history.id, err);
             totalErrors++;
           }
         }
@@ -686,7 +700,7 @@ export class DatabaseServiceManager {
           try {
             await this.appSettings.updateSettingByKey(setting.key, setting.value, setting.type, setting.description);
           } catch (err) {
-            console.warn('导入设置数据失败:', setting.key, err);
+            this.debugWarn('导入设置数据失败:', setting.key, err);
             totalErrors++;
           }
         }
@@ -728,7 +742,7 @@ export class DatabaseServiceManager {
       };
       
     } catch (error) {
-      console.error('渲染进程: 导入数据库数据失败:', error);
+      this.debugError('渲染进程: 导入数据库数据失败:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -790,7 +804,7 @@ export class DatabaseServiceManager {
               this.debugLog(`分类ID映射: ${oldId} -> ${newCategory.id}`);
             }
           } catch (err) {
-            console.warn('恢复分类数据失败:', category.id, err);
+            this.debugWarn('恢复分类数据失败:', category.id, err);
             totalErrors++;
           }
         }
@@ -817,7 +831,7 @@ export class DatabaseServiceManager {
               promptDataWithoutId.categoryId = newCategoryId;
               this.debugLog(`提示词分类ID映射: ${oldCategoryId} -> ${newCategoryId}`);
             } else {
-              console.warn(`未找到分类ID映射: ${oldCategoryId}，将提示词设为未分类`);
+              this.debugWarn(`未找到分类ID映射: ${oldCategoryId}，将提示词设为未分类`);
               promptDataWithoutId.categoryId = undefined;
             }
           }
@@ -832,7 +846,7 @@ export class DatabaseServiceManager {
               this.debugLog(`提示词ID映射: ${oldPromptId} -> ${newPrompt.id}`);
             }
           } catch (err) {
-            console.warn('恢复提示词数据失败:', prompt.id, err);
+            this.debugWarn('恢复提示词数据失败:', prompt.id, err);
             totalErrors++;
           }
         }
@@ -850,7 +864,7 @@ export class DatabaseServiceManager {
             if (newPromptId !== undefined) {
               variableDataWithoutId.promptId = newPromptId;
             } else {
-              console.warn(`未找到提示词变量的提示词ID映射: ${variableDataWithoutId.promptId}`);
+              this.debugWarn(`未找到提示词变量的提示词ID映射: ${variableDataWithoutId.promptId}`);
               totalErrors++;
               continue;
             }
@@ -859,7 +873,7 @@ export class DatabaseServiceManager {
           try {
             await this.prompt.createPromptVariableFromBackup(variableDataWithoutId);
           } catch (err) {
-            console.warn('恢复提示词变量数据失败:', variable.id, err);
+            this.debugWarn('恢复提示词变量数据失败:', variable.id, err);
             totalErrors++;
           }
         }
@@ -876,7 +890,7 @@ export class DatabaseServiceManager {
             if (newPromptId !== undefined) {
               historyDataWithoutId.promptId = newPromptId;
             } else {
-              console.warn(`未找到提示词历史的提示词ID映射: ${historyDataWithoutId.promptId}`);
+              this.debugWarn(`未找到提示词历史的提示词ID映射: ${historyDataWithoutId.promptId}`);
               totalErrors++;
               continue;
             }
@@ -886,7 +900,7 @@ export class DatabaseServiceManager {
             const historyToCreate = await this.deserializeImageBlobs(historyDataWithoutId);
             await this.prompt.createPromptHistoryFromBackup(historyToCreate);
           } catch (err) {
-            console.warn('恢复提示词历史数据失败:', history.id, err);
+            this.debugWarn('恢复提示词历史数据失败:', history.id, err);
             totalErrors++;
           }
         }
@@ -900,7 +914,7 @@ export class DatabaseServiceManager {
           try {
             await this.aiConfig.createAIConfig(configDataWithoutId);
           } catch (err) {
-            console.warn('恢复AI配置数据失败:', config.id, err);
+            this.debugWarn('恢复AI配置数据失败:', config.id, err);
             totalErrors++;
           }
         }
@@ -915,7 +929,7 @@ export class DatabaseServiceManager {
           try {
             await this.quickOptimization.createQuickOptimizationConfigFromBackup(configDataWithoutId);
           } catch (err) {
-            console.warn('恢复快速优化配置数据失败:', config.id, err);
+            this.debugWarn('恢复快速优化配置数据失败:', config.id, err);
             totalErrors++;
           }
         }
@@ -929,7 +943,7 @@ export class DatabaseServiceManager {
           try {
             await this.aiGenerationHistory.createAIGenerationHistory(historyDataWithoutId);
           } catch (err) {
-            console.warn('恢复AI历史数据失败:', history.id, err);
+            this.debugWarn('恢复AI历史数据失败:', history.id, err);
             totalErrors++;
           }
         }
@@ -942,7 +956,7 @@ export class DatabaseServiceManager {
           try {
             await this.appSettings.updateSettingByKey(setting.key, setting.value, setting.type, setting.description);
           } catch (err) {
-            console.warn('恢复设置数据失败:', setting.key, err);
+            this.debugWarn('恢复设置数据失败:', setting.key, err);
             totalErrors++;
           }
         }
@@ -988,7 +1002,7 @@ export class DatabaseServiceManager {
       };
       
     } catch (error) {
-      console.error('渲染进程: 恢复数据失败:', error);
+      this.debugError('渲染进程: 恢复数据失败:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -1012,7 +1026,7 @@ export class DatabaseServiceManager {
       // 然后恢复数据
       return await this.restoreData(dataToRestore, { skipClean: true });
     } catch (error) {
-      console.error('渲染进程: 完全替换数据失败:', error);
+      this.debugError('渲染进程: 完全替换数据失败:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -1064,7 +1078,7 @@ export class DatabaseServiceManager {
       
       this.debugLog('所有数据表清空完成');
     } catch (error) {
-      console.error('清空数据表失败:', error);
+      this.debugError('清空数据表失败:', error);
       throw error;
     }
   }
@@ -1078,7 +1092,7 @@ export class DatabaseServiceManager {
       // 使用基础服务的数据库连接
       return (this.category as any).db;
     } catch (error) {
-      console.error('获取数据库连接失败:', error);
+      this.debugError('获取数据库连接失败:', error);
       return null;
     }
   }
@@ -1237,7 +1251,7 @@ export class DatabaseServiceManager {
         lastBackupTime
       };
     } catch (error) {
-      console.error('获取数据统计失败:', error);
+      this.debugError('获取数据统计失败:', error);
       throw error;
     }
   }
@@ -1295,7 +1309,7 @@ export class DatabaseServiceManager {
       this.debugLog('数据统计获取成功:', stats);
       return { success: true, data: stats };
     } catch (error) {
-      console.error('获取数据统计失败:', error);
+      this.debugError('获取数据统计失败:', error);
       return { 
         success: false, 
         error: error instanceof Error ? error.message : '未知错误' 
@@ -1436,7 +1450,7 @@ export class DatabaseServiceManager {
         .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
         .map(result => result.reason instanceof Error ? result.reason.message : String(result.reason));
 
-      errors.forEach(error => console.warn('同步导入项目失败:', error));
+      errors.forEach(error => this.debugWarn('同步导入项目失败:', error));
       
       this.debugLog('渲染进程: 同步导入完成:', details);
       const totalImported = Object.values(details).reduce((sum, count) => sum + count, 0);
@@ -1455,7 +1469,7 @@ export class DatabaseServiceManager {
       };
       
     } catch (error) {
-      console.error('渲染进程: 同步导入数据库数据失败:', error);
+      this.debugError('渲染进程: 同步导入数据库数据失败:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
