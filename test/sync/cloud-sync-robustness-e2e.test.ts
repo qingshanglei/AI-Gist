@@ -1593,6 +1593,109 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     storageSetSpy.mockRestore()
   })
 
+  it('主 manifest 损坏但备份可用时会从备份继续同步并修复主文件', async () => {
+    const storageId = 'robust-primary-manifest-corrupt-backup-valid'
+    const client = createWebDAVSyncClient(storageId)
+    const deviceADatabase = new MutableSyncDatabase(createRealisticDataSet())
+    const deviceA = createSyncService(client, deviceADatabase, new MemoryStorage(), 'device-a')
+
+    const firstUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(firstUpload).toMatchObject({ success: true, action: 'uploaded' })
+    const manifestBeforeCorruption = await client.getCloudSyncManifest(storageId)
+    await corruptRemoteFile(storageId, getCloudSyncManifestPath(), '{"kind":')
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'device-b')
+    const fallbackDownload = await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })
+
+    expect(fallbackDownload, JSON.stringify(fallbackDownload, null, 2))
+      .toMatchObject({ success: true, action: 'downloaded' })
+    expect(fallbackDownload.remoteRevision)
+      .toBe(manifestBeforeCorruption.latestSnapshot?.revision)
+    expect(deviceBDatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '发布计划提示词',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(deviceBDatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] })
+    ]))
+    expect(deviceBDatabase.data.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'theme', value: 'dark' })
+    ]))
+
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.prompts![0].title = '备份 manifest 恢复后的桌面端更新'
+      data.prompts![0].imageBlobs = [INITIAL_IMAGE, UPDATED_IMAGE]
+      data.prompts![0].updatedAt = '2026-06-13T23:20:00.000Z'
+      data.promptHistories!.push({
+        id: 73,
+        uuid: 'real-history-after-backup-manifest-recovery',
+        promptId: 31,
+        promptUuid: 'real-prompt-launch',
+        title: '备份 manifest 恢复后的桌面端更新',
+        content: '主 manifest 损坏后继续生成',
+        result: 'Recovered from backup manifest',
+        version: 2,
+        imageBlobs: [UPDATED_IMAGE],
+        createdAt: '2026-06-13T23:21:00.000Z',
+        updatedAt: '2026-06-13T23:21:00.000Z'
+      })
+      data.settings = [{
+        key: 'theme',
+        value: 'backup-recovered-light',
+        type: 'string',
+        updatedAt: '2026-06-13T23:22:00.000Z'
+      }]
+    })
+    const recoveredUpload = await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })
+
+    expect(recoveredUpload, JSON.stringify(recoveredUpload, null, 2))
+      .toMatchObject({ success: true, action: 'uploaded' })
+    const primaryManifest = await readRemoteManifestFile(storageId, getCloudSyncManifestPath())
+    expect(primaryManifest.latestSnapshot?.revision).toBe(recoveredUpload.remoteRevision)
+    expect(primaryManifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '备份 manifest 恢复后的桌面端更新',
+        imageBlobs: [INITIAL_IMAGE, UPDATED_IMAGE]
+      })
+    ]))
+    expect(primaryManifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({
+        uuid: 'real-history-after-backup-manifest-recovery',
+        imageBlobs: [UPDATED_IMAGE]
+      })
+    ]))
+    expect(primaryManifest.latestSnapshot?.data.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'theme', value: 'backup-recovered-light' })
+    ]))
+    expect(primaryManifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(primaryManifest.latestSnapshot!.data))
+
+    const finalNoop = await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(finalNoop).toMatchObject({ success: true, action: 'noop' })
+  })
+
   it('manifest 可读时不会把残留的孤立快照误提升为云端最新数据', async () => {
     const storageId = 'robust-readable-manifest-ignores-loose-snapshot'
     const client = createWebDAVSyncClient(storageId)
@@ -2680,4 +2783,20 @@ async function corruptRemoteFile(storageId: string, cloudPath: string, content: 
     updatedAt: '2026-06-13T00:00:00.000Z'
   })
   await provider.writeFile(cloudPath, Buffer.from(content, 'utf-8'))
+}
+
+async function readRemoteManifestFile(storageId: string, cloudPath: string): Promise<CloudSyncManifest> {
+  const provider = new WebDAVProvider({
+    id: `${storageId}-reader`,
+    name: `WebDAV reader ${storageId}`,
+    type: 'webdav',
+    enabled: true,
+    url: `${server.baseUrl}/${storageId}`,
+    username: USERNAME,
+    password: PASSWORD,
+    createdAt: '2026-06-13T00:00:00.000Z',
+    updatedAt: '2026-06-13T00:00:00.000Z'
+  })
+  const data = await provider.readFile(cloudPath)
+  return assertValidCloudSyncManifest(JSON.parse(Buffer.from(data).toString('utf-8')))
 }
