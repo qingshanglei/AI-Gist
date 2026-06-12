@@ -225,6 +225,104 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     expect(deviceAStorage.getItem('ai_gist_cloud_sync_conflict_log')).toContain('prompt-main')
   })
 
+  it('图片提示词冲突时保留图片数据但冲突元数据只记录轻量摘要', async () => {
+    const storageId = 'robust-image-conflict-metadata'
+    const largeImage = `data:image/png;base64,${'x'.repeat(5000)}`
+    const client = createWebDAVSyncClient(storageId)
+    const initialData = mutateDataSet(createDataSet({
+      promptTitle: 'Image conflict base',
+      promptUpdatedAt: '2026-06-13T16:00:00.000Z'
+    }), data => {
+      data.prompts![0].imageBlobs = [largeImage]
+    })
+    const deviceAStorage = new MemoryStorage()
+    const deviceADatabase = new MutableSyncDatabase(initialData)
+    const deviceA = createSyncService(client, deviceADatabase, deviceAStorage, 'device-a')
+    expect(await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'uploaded' })
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'device-b')
+    expect(await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'downloaded' })
+
+    deviceADatabase.data = mutateDataSet(deviceADatabase.data, data => {
+      data.prompts![0].title = 'Local image prompt wins'
+      data.prompts![0].updatedAt = '2026-06-13T16:20:00.000Z'
+    })
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.prompts![0].title = 'Remote image prompt loses'
+      data.prompts![0].updatedAt = '2026-06-13T16:10:00.000Z'
+    })
+
+    expect(await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'uploaded' })
+
+    const result = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+
+    expect(result, JSON.stringify(result, null, 2)).toMatchObject({
+      success: true,
+      action: 'uploaded',
+      uploadedRemote: true,
+      conflicts: [
+        expect.objectContaining({
+          collection: 'prompts',
+          key: 'uuid:prompt-main',
+          reason: 'both_modified',
+          resolution: 'take-newer'
+        })
+      ]
+    })
+
+    const conflictLog = deviceA.getConflictLog(storageId)
+    expect(conflictLog[0].conflicts[0].local.imageBlobs).toEqual({
+      omitted: true,
+      type: 'imageBlobs',
+      itemCount: 1
+    })
+    expect(conflictLog[0].conflicts[0].remote.imageBlobs).toEqual({
+      omitted: true,
+      type: 'imageBlobs',
+      itemCount: 1
+    })
+    expect(JSON.stringify(conflictLog)).not.toContain(largeImage)
+
+    const manifest = await client.getCloudSyncManifest(storageId)
+    expect(manifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'prompt-main',
+        title: 'Local image prompt wins',
+        imageBlobs: [largeImage]
+      })
+    ]))
+    expect(manifest.conflicts?.[0].local.imageBlobs).toEqual({
+      omitted: true,
+      type: 'imageBlobs',
+      itemCount: 1
+    })
+    expect(manifest.conflicts?.[0].remote.imageBlobs).toEqual({
+      omitted: true,
+      type: 'imageBlobs',
+      itemCount: 1
+    })
+    expect(JSON.stringify(manifest.conflicts)).not.toContain(largeImage)
+    expect(manifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(manifest.latestSnapshot!.data))
+  })
+
   it('多端编辑同一提示词不同字段时会自动字段级合并且不记录冲突', async () => {
     const storageId = 'robust-same-record-field-merge'
     const client = createWebDAVSyncClient(storageId)
