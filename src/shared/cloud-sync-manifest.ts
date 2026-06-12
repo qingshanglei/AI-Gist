@@ -1,11 +1,17 @@
 import type {
+  CloudSyncDataSet,
   CloudSyncConflict,
   CloudSyncSnapshot
 } from './cloud-sync-engine';
-import { validateCloudSyncSnapshot } from './cloud-sync-engine';
+import {
+  createCloudSyncDataChecksum,
+  normalizeCloudSyncDataSet,
+  validateCloudSyncSnapshot
+} from './cloud-sync-engine';
 
 export const CLOUD_SYNC_MANIFEST_KIND = 'ai-gist-cloud-sync-manifest';
 export const CLOUD_SYNC_MANIFEST_SCHEMA_VERSION = 1;
+export const CLOUD_SYNC_MANIFEST_REPAIR_METADATA_KEY = '__cloudSyncManifestRepair';
 const MAX_CONFLICT_METADATA_STRING_LENGTH = 512;
 const MAX_CONFLICT_METADATA_ARRAY_ITEMS = 10;
 const MAX_CONFLICT_METADATA_OBJECT_KEYS = 40;
@@ -26,6 +32,12 @@ export interface CloudSyncManifest {
   baseSnapshot?: CloudSyncSnapshot;
   devices: Record<string, CloudSyncDeviceState>;
   conflicts: CloudSyncConflict[];
+  [CLOUD_SYNC_MANIFEST_REPAIR_METADATA_KEY]?: CloudSyncManifestRepairMetadata;
+}
+
+export interface CloudSyncManifestRepairMetadata {
+  reasons: string[];
+  repairedSnapshotFields: Array<'latestSnapshot' | 'baseSnapshot'>;
 }
 
 export interface CloudSyncManifestValidationResult {
@@ -56,6 +68,27 @@ export interface CloudSyncManifestSaveResult {
   error?: string;
   conflict?: boolean;
   currentRevision?: string | null;
+}
+
+export class CloudSyncManifestCorruptError extends Error {
+  readonly primaryError: unknown;
+  readonly backupError: unknown;
+  readonly primaryDescription: string;
+  readonly backupDescription: string;
+
+  constructor(primaryError: unknown, backupError: unknown, describeError = describeCloudSyncManifestError) {
+    const primaryDescription = describeError(primaryError);
+    const backupDescription = describeError(backupError);
+    super(
+      `云同步 manifest 已损坏且两个副本都不可用: ${primaryDescription}；` +
+      `备份副本错误: ${backupDescription}`
+    );
+    this.name = 'CloudSyncManifestCorruptError';
+    this.primaryError = primaryError;
+    this.backupError = backupError;
+    this.primaryDescription = primaryDescription;
+    this.backupDescription = backupDescription;
+  }
 }
 
 export function createEmptyCloudSyncManifest(now = new Date().toISOString()): CloudSyncManifest {
@@ -126,10 +159,16 @@ export function validateCloudSyncManifest(input: unknown): CloudSyncManifestVali
 
 export function assertValidCloudSyncManifest(input: unknown): CloudSyncManifest {
   const result = validateCloudSyncManifest(input);
-  if (!result.valid || !result.manifest) {
-    throw new Error(result.reason || 'cloud sync manifest is invalid');
+  if (result.valid && result.manifest) {
+    return result.manifest;
   }
-  return result.manifest;
+
+  const repairedManifest = repairCloudSyncManifest(input);
+  if (repairedManifest) {
+    return repairedManifest;
+  }
+
+  throw new Error(result.reason || 'cloud sync manifest is invalid');
 }
 
 export async function readCloudSyncManifestWithFallback(
@@ -152,6 +191,16 @@ export async function readCloudSyncManifestWithFallback(
     } catch (backupError) {
       if (isNotFoundError(primaryError) && isNotFoundError(backupError)) {
         return createEmptyCloudSyncManifest();
+      }
+
+      const primaryRecoverable = isNotFoundError(primaryError) || isCloudSyncManifestCorruptionError(primaryError);
+      const backupRecoverable = isNotFoundError(backupError) || isCloudSyncManifestCorruptionError(backupError);
+      if (
+        primaryRecoverable &&
+        backupRecoverable &&
+        (isCloudSyncManifestCorruptionError(primaryError) || isCloudSyncManifestCorruptionError(backupError))
+      ) {
+        throw new CloudSyncManifestCorruptError(primaryError, backupError, describeError);
       }
 
       throw new Error(
@@ -178,6 +227,12 @@ export function updateCloudSyncManifestDevice(
 
 export function getCloudSyncManifestRevision(manifest: CloudSyncManifest | null | undefined): string | null {
   return manifest?.latestSnapshot?.revision || null;
+}
+
+export function getCloudSyncManifestRepairMetadata(
+  manifest: CloudSyncManifest | null | undefined
+): CloudSyncManifestRepairMetadata | undefined {
+  return manifest?.[CLOUD_SYNC_MANIFEST_REPAIR_METADATA_KEY];
 }
 
 export function doesCloudSyncManifestMatchExpectedRevision(
@@ -241,8 +296,140 @@ export function isCloudSyncManifestNotFoundError(error: unknown): boolean {
   return /404|not\s*found|no such file|does not exist|ENOENT|不存在|未找到/i.test(message);
 }
 
+export function isCloudSyncManifestCorruptionError(error: unknown): boolean {
+  if (error instanceof CloudSyncManifestCorruptError) {
+    return true;
+  }
+
+  const message = describeCloudSyncManifestError(error);
+  return /manifest 内容无效|cloud sync manifest is invalid|manifest must be|snapshot data checksum mismatch|snapshot dataChecksum is invalid|Unexpected token|JSON/i
+    .test(message);
+}
+
 function describeCloudSyncManifestError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function repairCloudSyncManifest(input: unknown): CloudSyncManifest | null {
+  if (!input || typeof input !== 'object') {
+    return null;
+  }
+
+  const value = input as Partial<CloudSyncManifest>;
+  if (value.kind !== undefined && value.kind !== CLOUD_SYNC_MANIFEST_KIND) {
+    return null;
+  }
+
+  if (value.schemaVersion !== undefined && value.schemaVersion !== CLOUD_SYNC_MANIFEST_SCHEMA_VERSION) {
+    return null;
+  }
+
+  const latestSnapshotRepair = repairOptionalSnapshotChecksum('latestSnapshot', value.latestSnapshot);
+  if (!latestSnapshotRepair.valid) {
+    return null;
+  }
+
+  const baseSnapshotRepair = repairOptionalSnapshotChecksum('baseSnapshot', value.baseSnapshot);
+  if (!baseSnapshotRepair.valid) {
+    return null;
+  }
+
+  const reasons = [
+    ...latestSnapshotRepair.reasons,
+    ...baseSnapshotRepair.reasons
+  ];
+
+  if (reasons.length === 0) {
+    return null;
+  }
+
+  const manifest: CloudSyncManifest = {
+    kind: CLOUD_SYNC_MANIFEST_KIND,
+    schemaVersion: CLOUD_SYNC_MANIFEST_SCHEMA_VERSION,
+    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : new Date().toISOString(),
+    latestSnapshot: latestSnapshotRepair.snapshot,
+    baseSnapshot: baseSnapshotRepair.snapshot,
+    devices: normalizeDeviceStates(value.devices),
+    conflicts: sanitizeCloudSyncConflictsForMetadata(value.conflicts),
+    [CLOUD_SYNC_MANIFEST_REPAIR_METADATA_KEY]: {
+      reasons,
+      repairedSnapshotFields: [
+        ...latestSnapshotRepair.repairedFields,
+        ...baseSnapshotRepair.repairedFields
+      ]
+    }
+  };
+
+  return validateCloudSyncManifest(manifest).valid ? manifest : null;
+}
+
+function repairOptionalSnapshotChecksum(
+  fieldName: 'latestSnapshot' | 'baseSnapshot',
+  value: unknown
+): {
+  valid: boolean;
+  snapshot?: CloudSyncSnapshot;
+  reasons: string[];
+  repairedFields: Array<'latestSnapshot' | 'baseSnapshot'>;
+} {
+  if (value === undefined || value === null) {
+    return { valid: true, reasons: [], repairedFields: [] };
+  }
+
+  const validation = validateCloudSyncSnapshot(value);
+  if (validation.valid) {
+    return {
+      valid: true,
+      snapshot: value as CloudSyncSnapshot,
+      reasons: [],
+      repairedFields: []
+    };
+  }
+
+  if (validation.reason !== 'snapshot data checksum mismatch') {
+    return { valid: false, reasons: [], repairedFields: [] };
+  }
+
+  const snapshot = value as Partial<CloudSyncSnapshot>;
+  if (
+    snapshot.schemaVersion !== 1 ||
+    typeof snapshot.deviceId !== 'string' ||
+    !snapshot.deviceId ||
+    typeof snapshot.revision !== 'string' ||
+    !snapshot.revision ||
+    typeof snapshot.createdAt !== 'string' ||
+    !snapshot.createdAt ||
+    !snapshot.data ||
+    typeof snapshot.data !== 'object' ||
+    Array.isArray(snapshot.data)
+  ) {
+    return { valid: false, reasons: [], repairedFields: [] };
+  }
+
+  try {
+    const normalizedData = normalizeCloudSyncDataSet(snapshot.data as CloudSyncDataSet);
+    const repairedSnapshot: CloudSyncSnapshot = {
+      schemaVersion: 1,
+      deviceId: snapshot.deviceId,
+      revision: snapshot.revision,
+      createdAt: snapshot.createdAt,
+      data: normalizedData,
+      dataChecksum: createCloudSyncDataChecksum(normalizedData)
+    };
+
+    if (!validateCloudSyncSnapshot(repairedSnapshot).valid) {
+      return { valid: false, reasons: [], repairedFields: [] };
+    }
+
+    return {
+      valid: true,
+      snapshot: repairedSnapshot,
+      reasons: [`${fieldName} ${validation.reason}`],
+      repairedFields: [fieldName]
+    };
+  } catch {
+    return { valid: false, reasons: [], repairedFields: [] };
+  }
 }
 
 function isCloudSyncSnapshot(value: unknown): value is CloudSyncSnapshot {

@@ -812,6 +812,13 @@ export class CloudBackupManager {
       await provider.initializeDirectories();
     }
 
+    const content = Buffer.from(JSON.stringify(normalizedManifest, null, 2), 'utf-8');
+    if (options.expectedRevision === undefined) {
+      await provider.writeFile(backupPath, content);
+      await provider.writeFile(manifestPath, content);
+      return;
+    }
+
     const primaryInfo = await this.getCloudFileInfo(provider, manifestPath);
     const currentManifest = await readCloudSyncManifestWithFallback({
       readPrimary: () => this.readCloudSyncManifestFile(provider, manifestPath),
@@ -822,7 +829,6 @@ export class CloudBackupManager {
     this.assertExpectedCloudSyncRevision(currentManifest, options.expectedRevision);
 
     const writeOptions = this.createManifestWriteOptions(primaryInfo, currentManifest, options.expectedRevision);
-    const content = Buffer.from(JSON.stringify(normalizedManifest, null, 2), 'utf-8');
     try {
       await provider.writeFile(manifestPath, content, writeOptions);
     } catch (error) {

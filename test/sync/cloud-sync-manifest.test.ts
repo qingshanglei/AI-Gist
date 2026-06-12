@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
-import { createCloudSyncSnapshot } from '@shared/cloud-sync-engine'
 import {
+  createCloudSyncDataChecksum,
+  createCloudSyncSnapshot
+} from '@shared/cloud-sync-engine'
+import {
+  assertValidCloudSyncManifest,
   createEmptyCloudSyncManifest,
+  getCloudSyncManifestRepairMetadata,
   readCloudSyncManifestWithFallback
 } from '@shared/cloud-sync-manifest'
 
@@ -18,6 +23,26 @@ const baseData = {
 }
 
 describe('cloud sync manifest fallback', () => {
+  it('repairs snapshot checksum drift when the snapshot data is still readable', () => {
+    const snapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-checksum-drift')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z'),
+      latestSnapshot: {
+        ...snapshot,
+        dataChecksum: 'fnv1a32:00000000'
+      }
+    }
+
+    const repaired = assertValidCloudSyncManifest(manifest)
+
+    expect(repaired.latestSnapshot?.dataChecksum).toBe(
+      createCloudSyncDataChecksum(repaired.latestSnapshot!.data)
+    )
+    expect(getCloudSyncManifestRepairMetadata(repaired)).toMatchObject({
+      repairedSnapshotFields: ['latestSnapshot']
+    })
+  })
+
   it('returns the backup manifest when both copies are valid and backup is newer', async () => {
     const primaryManifest = {
       ...createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z'),

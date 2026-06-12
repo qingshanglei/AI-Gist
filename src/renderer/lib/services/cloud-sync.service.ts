@@ -21,7 +21,9 @@ import type {
 } from '@shared/cloud-sync-manifest';
 import {
   createEmptyCloudSyncManifest,
+  getCloudSyncManifestRepairMetadata,
   getCloudSyncManifestRevision,
+  isCloudSyncManifestCorruptionError,
   sanitizeCloudSyncConflictsForMetadata,
   updateCloudSyncManifestDevice
 } from '@shared/cloud-sync-manifest';
@@ -451,9 +453,15 @@ export class CloudSyncService {
       const deviceId = this.getOrCreateDeviceId();
       const now = new Date().toISOString();
       const localData = await this.exportLocalData();
-      const manifest = await this.getCloudClient().getCloudSyncManifest(storageId);
+      const manifestResult = await this.getManifestOrRecoverCorruption(storageId, localData, deviceId, now, options);
+      if (manifestResult.result) {
+        return manifestResult.result;
+      }
+
+      const manifest = manifestResult.manifest;
       const localState = this.getLocalState(storageId);
       const remoteSnapshot = manifest.latestSnapshot;
+      const manifestRepairMetadata = getCloudSyncManifestRepairMetadata(manifest);
       if (remoteSnapshot) {
         this.assertValidRemoteSnapshot(remoteSnapshot);
       }
@@ -501,6 +509,21 @@ export class CloudSyncService {
       const mergedEqualsRemote = dataSetsEqual(remoteData, mergedData);
 
       if (mergedEqualsLocal && mergedEqualsRemote) {
+        if (manifestRepairMetadata) {
+          try {
+            await this.saveManifest(
+              storageId,
+              this.buildManifest(manifest, remoteSnapshot, mergeResult.conflicts, deviceId, now, options),
+              getCloudSyncManifestRevision(manifest)
+            );
+          } catch (error) {
+            if (isCloudSyncRemoteChangedError(error)) {
+              return await this.retryWithLatestRemote(storageId, options, attempt);
+            }
+            throw error;
+          }
+        }
+
         this.recordConflictLog(storageId, mergeResult.conflicts, {
           detectedAt: now,
           localRevision: localState?.lastKnownRevision,
@@ -510,11 +533,11 @@ export class CloudSyncService {
         this.saveLocalState(storageId, deviceId, remoteSnapshot, now);
         return {
           success: true,
-          action: 'noop',
+          action: manifestRepairMetadata ? 'uploaded' : 'noop',
           localRevision: remoteSnapshot.revision,
           remoteRevision: remoteSnapshot.revision,
           appliedLocal: false,
-          uploadedRemote: false,
+          uploadedRemote: !!manifestRepairMetadata,
           conflicts: mergeResult.conflicts,
           summary: mergeResult.summary
         };
@@ -530,6 +553,8 @@ export class CloudSyncService {
 
         latestManifestForUpload = latestManifest;
         finalSnapshot = createCloudSyncSnapshot(mergedData, deviceId);
+      } else if (manifestRepairMetadata) {
+        latestManifestForUpload = manifest;
       }
 
       let appliedLocal = false;
@@ -613,6 +638,52 @@ export class CloudSyncService {
     return await this.performSync(storageId, options, attempt + 1);
   }
 
+  private async getManifestOrRecoverCorruption(
+    storageId: string,
+    localData: CloudSyncDataSet,
+    deviceId: string,
+    now: string,
+    options: CloudSyncOptions
+  ): Promise<{ manifest: CloudSyncManifest; result?: CloudSyncResult }> {
+    try {
+      return {
+        manifest: await this.getCloudClient().getCloudSyncManifest(storageId)
+      };
+    } catch (error) {
+      if (!isRecoverableCloudSyncManifestCorruption(error)) {
+        throw error;
+      }
+
+      console.warn('云同步 manifest 已损坏，正在使用本机数据自动重建:', error);
+      const snapshot = createCloudSyncSnapshot(localData, deviceId);
+      const rebuiltManifest = this.buildManifest(
+        createEmptyCloudSyncManifest(now),
+        snapshot,
+        [],
+        deviceId,
+        now,
+        options
+      );
+
+      await this.overwriteManifest(storageId, rebuiltManifest);
+      this.saveLocalState(storageId, deviceId, snapshot, now);
+
+      return {
+        manifest: rebuiltManifest,
+        result: {
+          success: true,
+          action: 'uploaded',
+          localRevision: snapshot.revision,
+          remoteRevision: snapshot.revision,
+          appliedLocal: false,
+          uploadedRemote: true,
+          conflicts: [],
+          summary: createEmptySummary()
+        }
+      };
+    }
+  }
+
   private buildManifest(
     manifest: CloudSyncManifest,
     snapshot: CloudSyncSnapshot,
@@ -655,6 +726,26 @@ export class CloudSyncService {
       throw new Error(result.error || '保存云同步 manifest 失败');
     }
 
+    await this.verifySavedManifest(storageId, manifest);
+  }
+
+  private async overwriteManifest(
+    storageId: string,
+    manifest: CloudSyncManifest
+  ): Promise<void> {
+    const result = await this.getCloudClient().saveCloudSyncManifest(storageId, manifest);
+    if (!result.success) {
+      throw new Error(result.error || '重建云同步 manifest 失败');
+    }
+
+    await this.verifySavedManifest(storageId, manifest);
+  }
+
+  private async verifySavedManifest(
+    storageId: string,
+    manifest: CloudSyncManifest
+  ): Promise<void> {
+    const cloudClient = this.getCloudClient();
     const expectedSnapshot = manifest.latestSnapshot;
     if (!expectedSnapshot) {
       return;
@@ -1285,12 +1376,11 @@ function minutesToMs(minutes: number): number {
   return normalizeCloudSyncIntervalMinutes(minutes) * 60 * 1000;
 }
 
-export function getCloudSyncResultMessage(action?: string, conflictCount = 0): string {
-  const suffix = conflictCount > 0 ? `，已自动处理 ${conflictCount} 个冲突` : '';
-  if (action === 'uploaded') return `同步完成，已上传本机数据${suffix}`;
-  if (action === 'downloaded') return `同步完成，已更新本机数据${suffix}`;
-  if (action === 'merged') return `同步完成，已合并本机和云端数据${suffix}`;
-  return `同步完成，数据已是最新${suffix}`;
+export function getCloudSyncResultMessage(action?: string, _conflictCount = 0): string {
+  if (action === 'uploaded') return '同步完成，已上传本机数据';
+  if (action === 'downloaded') return '同步完成，已更新本机数据';
+  if (action === 'merged') return '同步完成，已合并本机和云端数据';
+  return '同步完成，数据已是最新';
 }
 
 export function getFriendlyCloudSyncError(error?: string): string {
@@ -1338,6 +1428,20 @@ function isCloudSyncRemoteChangedError(error: unknown): error is CloudSyncRemote
 
 function isCloudSyncRevisionConflictMessage(message: string | undefined): boolean {
   return !!message && /manifest 已被其他设备更新|已被其他设备更新|Precondition|412|revision/i.test(message);
+}
+
+function isRecoverableCloudSyncManifestCorruption(error: unknown): boolean {
+  if (isCloudSyncManifestCorruptionError(error)) {
+    return true;
+  }
+
+  const message = error instanceof Error ? error.message : String(error);
+  if (/401|403|Unauthorized|Forbidden|ECONN|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|TLS connection|socket disconnected|Network|network/i.test(message)) {
+    return false;
+  }
+
+  return /读取云同步 manifest 失败.*内容无效|sync-manifest\.json.*checksum mismatch|sync-manifest\.backup\.json.*checksum mismatch|Unexpected token|JSON/i
+    .test(message);
 }
 
 function isBrowserOffline(): boolean {

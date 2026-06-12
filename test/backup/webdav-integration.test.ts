@@ -71,6 +71,7 @@ import { CloudSyncService } from '~/lib/services/cloud-sync.service'
 import { CapacitorHttp } from '@capacitor/core'
 import { Preferences } from '@capacitor/preferences'
 import { createEmptyCloudSyncManifest } from '@shared/cloud-sync-manifest'
+import { createCloudSyncDataChecksum, createCloudSyncSnapshot } from '@shared/cloud-sync-engine'
 
 const mockHttp = CapacitorHttp as unknown as { request: ReturnType<typeof vi.fn> }
 
@@ -786,6 +787,44 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
       expect(loaded.latestSnapshot?.data.quickOptimizationConfigs).toHaveLength(1)
     })
 
+    it('manifest checksum 漂移时会自动修复可读快照', async () => {
+      const service = MobileCloudBackupService.getInstance()
+      await saveConfig(service)
+
+      const snapshot = createCloudSyncSnapshot(mockExportData, 'ios-device', 'rev-checksum-drift')
+      const brokenManifest = {
+        ...createEmptyCloudSyncManifest('2026-03-15T00:00:00.000Z'),
+        latestSnapshot: {
+          ...snapshot,
+          dataChecksum: 'fnv1a32:00000000'
+        },
+        baseSnapshot: {
+          ...snapshot,
+          dataChecksum: 'fnv1a32:00000000'
+        }
+      }
+
+      expect((await service.saveCloudSyncManifest('cfg-real', {
+        ...createEmptyCloudSyncManifest('2026-03-15T00:00:00.000Z'),
+        latestSnapshot: snapshot,
+        baseSnapshot: snapshot
+      })).success).toBe(true)
+
+      const brokenContent = JSON.stringify(brokenManifest, null, 2)
+      await fsp.writeFile(path.join(server.rootDir, 'AI-Gist-Backup', 'sync-manifest.json'), brokenContent, 'utf-8')
+      await fsp.writeFile(path.join(server.rootDir, 'AI-Gist-Backup', 'sync-manifest.backup.json'), brokenContent, 'utf-8')
+
+      const loaded = await service.getCloudSyncManifest('cfg-real')
+
+      expect(loaded.latestSnapshot?.revision).toBe('rev-checksum-drift')
+      expect(loaded.latestSnapshot?.dataChecksum).toBe(
+        createCloudSyncDataChecksum(loaded.latestSnapshot!.data)
+      )
+      expect(loaded.baseSnapshot?.dataChecksum).toBe(
+        createCloudSyncDataChecksum(loaded.baseSnapshot!.data)
+      )
+    })
+
     it('保存 manifest 时 expectedRevision 不匹配会拒绝覆盖云端新版本', async () => {
       const service = MobileCloudBackupService.getInstance()
       await saveConfig(service)
@@ -1018,6 +1057,57 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
         )
       } finally {
         autoDevice.stopAutoSync()
+      }
+    })
+
+    it('两个 WebDAV manifest 副本损坏时会自动重建并完成同步', async () => {
+      const service = MobileCloudBackupService.getInstance()
+      await saveConfig(service)
+      await fsp.mkdir(path.join(server.rootDir, 'AI-Gist-Backup'), { recursive: true })
+      await fsp.writeFile(path.join(server.rootDir, 'AI-Gist-Backup', 'sync-manifest.json'), '{"kind":', 'utf-8')
+      await fsp.writeFile(path.join(server.rootDir, 'AI-Gist-Backup', 'sync-manifest.backup.json'), '{"kind":', 'utf-8')
+
+      const syncData = {
+        ...mockExportData,
+        promptHistories: [],
+        syncTombstones: []
+      }
+      const deviceDatabase = {
+        exportAllDataForSync: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'ok',
+          data: syncData
+        }),
+        replaceAllData: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'ok'
+        })
+      }
+      const device = new CloudSyncService({
+        cloudClient: service,
+        database: deviceDatabase,
+        storage: new MemoryStorage(),
+        createDeviceId: () => 'repair-device'
+      })
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+      try {
+        const result = await device.syncNow('cfg-real', {
+          deviceName: 'Repair Device',
+          platform: 'ios'
+        })
+
+        expect(result.success).toBe(true)
+        expect(result.action).toBe('uploaded')
+        expect(deviceDatabase.replaceAllData).not.toHaveBeenCalled()
+
+        const loaded = await service.getCloudSyncManifest('cfg-real')
+        expect(loaded.latestSnapshot?.deviceId).toBe('repair-device')
+        expect(loaded.latestSnapshot?.data.prompts).toEqual(
+          expect.arrayContaining([expect.objectContaining({ uuid: mockExportData.prompts[0].uuid })])
+        )
+      } finally {
+        warnSpy.mockRestore()
       }
     })
   })
