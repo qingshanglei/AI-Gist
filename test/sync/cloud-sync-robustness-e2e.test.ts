@@ -95,6 +95,8 @@ interface TestCloudClientHooks {
 const USERNAME = 'testuser'
 const PASSWORD = 'testpass'
 const PORT = 18767
+const INITIAL_IMAGE = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lZ2nNwAAAABJRU5ErkJggg=='
+const UPDATED_IMAGE = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADUlEQVR42mP8z8BQDwAFgwJ/lZ2nNwAAAABJRU5ErkJggg=='
 
 let server: TestWebDAVServer
 
@@ -221,6 +223,139 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
       expect.objectContaining({ uuid: 'prompt-main', title: 'Newer remote edit from B' })
     ]))
     expect(deviceAStorage.getItem('ai_gist_cloud_sync_conflict_log')).toContain('prompt-main')
+  })
+
+  it('真实创建含图片和历史的数据后跨端更新不会丢失元数据', async () => {
+    const storageId = 'robust-real-create-then-update'
+    const client = createWebDAVSyncClient(storageId)
+    const deviceADatabase = new MutableSyncDatabase(createRealisticDataSet())
+    const deviceAStorage = new MemoryStorage()
+    const deviceA = createSyncService(client, deviceADatabase, deviceAStorage, 'device-a')
+
+    const createUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(createUpload).toMatchObject({ success: true, action: 'uploaded' })
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'device-b')
+    const firstDownload = await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })
+    expect(firstDownload).toMatchObject({ success: true, action: 'downloaded' })
+    expect(deviceBDatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(deviceBDatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-history-initial',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.categories![0].name = '真实项目资料-移动端更新'
+      data.categories![0].updatedAt = '2026-06-13T14:00:00.000Z'
+      data.prompts![0].title = '发布计划提示词 - 移动端更新'
+      data.prompts![0].content = '请用 {{tone}} 语气生成移动端更新版发布计划'
+      data.prompts![0].tags = ['release', 'mobile', 'updated']
+      data.prompts![0].imageBlobs = [INITIAL_IMAGE, UPDATED_IMAGE]
+      data.prompts![0].updatedAt = '2026-06-13T14:00:00.000Z'
+      data.promptVariables![0].defaultValue = 'precise'
+      data.promptVariables![0].updatedAt = '2026-06-13T14:00:00.000Z'
+      data.promptHistories!.push({
+        id: 42,
+        uuid: 'real-history-mobile-update',
+        promptId: 31,
+        promptUuid: 'real-prompt-launch',
+        title: '发布计划提示词 - 移动端更新',
+        content: '移动端更新后再次生成发布计划',
+        result: 'Updated launch plan from mobile',
+        version: 2,
+        imageBlobs: [UPDATED_IMAGE],
+        createdAt: '2026-06-13T14:01:00.000Z',
+        updatedAt: '2026-06-13T14:01:00.000Z'
+      })
+      data.aiHistory!.push({
+        id: 51,
+        uuid: 'real-ai-history-mobile-update',
+        promptUuid: 'real-prompt-launch',
+        input: '生成移动端更新发布计划',
+        output: '移动端更新后的发布计划结果',
+        provider: 'openai',
+        model: 'gpt-4.1',
+        createdAt: '2026-06-13T14:02:00.000Z',
+        updatedAt: '2026-06-13T14:02:00.000Z'
+      })
+      data.settings = [
+        { key: 'theme', value: 'light', type: 'string', updatedAt: '2026-06-13T14:00:00.000Z' },
+        { key: 'cloud.sync.intervalMinutes', value: 5, type: 'number', updatedAt: '2026-06-13T14:00:00.000Z' }
+      ]
+      data.quickOptimizationConfigs![0].prompt = '请更精确地优化：{{content}}'
+      data.quickOptimizationConfigs![0].updatedAt = '2026-06-13T14:00:00.000Z'
+    })
+
+    const updateUpload = await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })
+    expect(updateUpload).toMatchObject({ success: true, action: 'uploaded' })
+
+    const backToA = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(backToA.success, JSON.stringify(backToA, null, 2)).toBe(true)
+    expect(backToA.error).toBeUndefined()
+    expect(deviceADatabase.data.categories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-category-product', name: '真实项目资料-移动端更新' })
+    ]))
+    expect(deviceADatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '发布计划提示词 - 移动端更新',
+        imageBlobs: [INITIAL_IMAGE, UPDATED_IMAGE]
+      })
+    ]))
+    expect(deviceADatabase.data.promptVariables).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-variable-tone', defaultValue: 'precise' })
+    ]))
+    expect(deviceADatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'real-history-mobile-update', imageBlobs: [UPDATED_IMAGE] })
+    ]))
+    expect(deviceADatabase.data.aiHistory).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-ai-history-mobile-update',
+        output: '移动端更新后的发布计划结果'
+      })
+    ]))
+    expect(deviceADatabase.data.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'theme', value: 'light' }),
+      expect.objectContaining({ key: 'cloud.sync.intervalMinutes', value: 5 })
+    ]))
+    expect(deviceADatabase.data.quickOptimizationConfigs).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'quick-real-cleanup', prompt: '请更精确地优化：{{content}}' })
+    ]))
+
+    const manifest = await client.getCloudSyncManifest(storageId)
+    expect(manifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(manifest.latestSnapshot!.data))
+    const finalNoop = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(finalNoop).toMatchObject({ success: true, action: 'noop' })
   })
 
   it('保存 manifest 前另一端抢先更新时会自动重读并合并后成功', async () => {
@@ -854,6 +989,103 @@ function createDataSet(input: {
     quickOptimizationConfigs: [],
     aiHistory: [],
     settings: [{ key: 'theme', value: input.settingValue || 'dark', type: 'string', updatedAt }],
+    syncTombstones: []
+  }
+}
+
+function createRealisticDataSet(): CloudSyncDataSet {
+  return {
+    categories: [{
+      id: 11,
+      uuid: 'real-category-product',
+      name: '真实项目资料',
+      isActive: true,
+      sortOrder: 1,
+      createdAt: '2026-06-13T13:00:00.000Z',
+      updatedAt: '2026-06-13T13:00:00.000Z'
+    }],
+    prompts: [{
+      id: 31,
+      uuid: 'real-prompt-launch',
+      title: '发布计划提示词',
+      content: '请用 {{tone}} 语气生成发布计划',
+      categoryId: 11,
+      categoryUuid: 'real-category-product',
+      tags: ['release', 'webdav', 'initial'],
+      isFavorite: true,
+      useCount: 3,
+      isActive: true,
+      imageBlobs: [INITIAL_IMAGE],
+      createdAt: '2026-06-13T13:00:00.000Z',
+      updatedAt: '2026-06-13T13:00:00.000Z'
+    }],
+    promptVariables: [{
+      id: 41,
+      uuid: 'real-variable-tone',
+      promptId: 31,
+      promptUuid: 'real-prompt-launch',
+      name: 'tone',
+      type: 'select',
+      defaultValue: 'friendly',
+      options: ['friendly', 'precise'],
+      required: true,
+      sortOrder: 1,
+      createdAt: '2026-06-13T13:00:00.000Z',
+      updatedAt: '2026-06-13T13:00:00.000Z'
+    }],
+    promptHistories: [{
+      id: 41,
+      uuid: 'real-history-initial',
+      promptId: 31,
+      promptUuid: 'real-prompt-launch',
+      title: '发布计划提示词',
+      content: '第一次生成发布计划',
+      result: 'Initial launch plan',
+      version: 1,
+      imageBlobs: [INITIAL_IMAGE],
+      createdAt: '2026-06-13T13:01:00.000Z',
+      updatedAt: '2026-06-13T13:01:00.000Z'
+    }],
+    aiConfigs: [{
+      id: 51,
+      uuid: 'ai-config-openai-real',
+      name: 'OpenAI Real',
+      provider: 'openai',
+      model: 'gpt-4.1',
+      baseUrl: 'https://api.openai.com/v1',
+      isDefault: true,
+      enabled: true,
+      createdAt: '2026-06-13T13:00:00.000Z',
+      updatedAt: '2026-06-13T13:00:00.000Z'
+    }],
+    quickOptimizationConfigs: [{
+      id: 61,
+      uuid: 'quick-real-cleanup',
+      name: '更清晰',
+      description: '优化表达',
+      prompt: '请优化：{{content}}',
+      enabled: true,
+      sortOrder: 1,
+      createdAt: '2026-06-13T13:00:00.000Z',
+      updatedAt: '2026-06-13T13:00:00.000Z'
+    }],
+    aiHistory: [{
+      id: 71,
+      uuid: 'real-ai-history-initial',
+      promptUuid: 'real-prompt-launch',
+      input: '生成发布计划',
+      output: '初始发布计划结果',
+      provider: 'openai',
+      model: 'gpt-4.1',
+      createdAt: '2026-06-13T13:02:00.000Z',
+      updatedAt: '2026-06-13T13:02:00.000Z'
+    }],
+    settings: [{
+      key: 'theme',
+      value: 'dark',
+      type: 'string',
+      updatedAt: '2026-06-13T13:00:00.000Z'
+    }],
     syncTombstones: []
   }
 }
