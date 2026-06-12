@@ -11,6 +11,7 @@ import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vites
 import { JSDOM } from 'jsdom'
 import fsp from 'fs/promises'
 import path from 'path'
+import type { AddressInfo } from 'net'
 import { TestWebDAVServer } from '../helpers/webdav-server'
 import { asyncTestHelpers, testDataGenerators } from '../helpers/test-utils'
 
@@ -66,6 +67,7 @@ vi.mock('@capacitor/core', () => ({
 }))
 
 import { MobileCloudBackupService } from '~/lib/services/mobile-cloud-backup.service'
+import { WebCloudBackupService } from '~/lib/services/web-cloud-backup.service'
 import { WebDAVProvider } from '../../src/main/cloud/webdav-provider'
 import { CloudSyncService } from '~/lib/services/cloud-sync.service'
 import { CapacitorHttp } from '@capacitor/core'
@@ -229,6 +231,58 @@ function createDesktopWebDAVSyncClient(config: any) {
         }
       } catch (error) {
         return { success: false, error: formatError(error) }
+      }
+    }
+  }
+}
+
+async function createWebBackendCloudSyncClient(config: any) {
+  const { default: http } = await import('http')
+  const webServerModule = await import('../../scripts/web-server.js')
+  const createWebRequestHandler = webServerModule.createWebRequestHandler ||
+    webServerModule.default.createWebRequestHandler
+  const apiServer = http.createServer(createWebRequestHandler({ serveStaticFiles: false }))
+  await new Promise<void>(resolve => apiServer.listen(0, '127.0.0.1', () => resolve()))
+  const address = apiServer.address() as AddressInfo
+  const baseUrl = `http://127.0.0.1:${address.port}`
+  const originalFetch = globalThis.fetch.bind(globalThis)
+  const hadLocalStorage = Object.prototype.hasOwnProperty.call(globalThis, 'localStorage')
+  const previousLocalStorage = (globalThis as any).localStorage
+  const previousFetch = globalThis.fetch
+  const storage = new MemoryStorage()
+  storage.setItem('ai-gist:web:cloud-storage-configs', JSON.stringify([config]))
+
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: storage
+  })
+  Object.defineProperty(globalThis, 'fetch', {
+    configurable: true,
+    value: (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === 'string' && input.startsWith('/')
+        ? `${baseUrl}${input}`
+        : input
+      return originalFetch(url, init)
+    }
+  })
+  ;(WebCloudBackupService as any).instance = undefined
+
+  return {
+    client: WebCloudBackupService.getInstance(),
+    async close() {
+      await new Promise<void>(resolve => apiServer.close(() => resolve()))
+      ;(WebCloudBackupService as any).instance = undefined
+      Object.defineProperty(globalThis, 'fetch', {
+        configurable: true,
+        value: previousFetch
+      })
+      if (hadLocalStorage) {
+        Object.defineProperty(globalThis, 'localStorage', {
+          configurable: true,
+          value: previousLocalStorage
+        })
+      } else {
+        delete (globalThis as any).localStorage
       }
     }
   }
@@ -1201,6 +1255,216 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
       expect(manifest.latestSnapshot?.dataChecksum).toBe(
         createCloudSyncDataChecksum(manifest.latestSnapshot!.data)
       )
+    })
+
+    it('移动端、Web 端、桌面端能通过同一 WebDAV 目录轮流同步图片、历史和设置元数据', async () => {
+      const storageId = 'cfg-cross-platform-webdav'
+      const cloudUrl = `${server.baseUrl}/cross-platform-${Date.now()}`
+      const config = {
+        id: storageId,
+        name: 'Cross Platform WebDAV',
+        type: 'webdav',
+        enabled: true,
+        url: cloudUrl,
+        username: USERNAME,
+        password: PASSWORD,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }
+      const imageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lZ2nNwAAAABJRU5ErkJggg=='
+      const mobileData = {
+        ...mockExportData,
+        prompts: [
+          {
+            ...mockExportData.prompts[0],
+            id: 1,
+            uuid: 'cross-platform-prompt',
+            title: 'Mobile prompt',
+            imageBlobs: [imageDataUrl],
+            updatedAt: '2026-06-12T00:00:00.000Z'
+          }
+        ],
+        promptHistories: [
+          {
+            id: 1,
+            uuid: 'cross-platform-history',
+            promptId: 1,
+            promptUuid: 'cross-platform-prompt',
+            content: 'Mobile history with image',
+            result: 'History result',
+            imageBlobs: [imageDataUrl],
+            createdAt: '2026-06-12T00:00:00.000Z',
+            updatedAt: '2026-06-12T00:00:00.000Z'
+          }
+        ],
+        settings: [
+          { key: 'theme', value: 'dark', type: 'string', description: 'theme setting' }
+        ],
+        syncTombstones: []
+      }
+      const emptyData = {
+        categories: [],
+        prompts: [],
+        promptVariables: [],
+        promptHistories: [],
+        aiConfigs: [],
+        quickOptimizationConfigs: [],
+        aiHistory: [],
+        settings: [],
+        syncTombstones: []
+      }
+
+      const mobileService = MobileCloudBackupService.getInstance()
+      await Preferences.set({
+        key: 'cloud_backup_configs',
+        value: JSON.stringify([config]),
+      })
+      const mobileDatabase = {
+        exportAllDataForSync: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'ok',
+          data: mobileData
+        }),
+        replaceAllData: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'ok'
+        })
+      }
+      const mobileDevice = new CloudSyncService({
+        cloudClient: mobileService,
+        database: mobileDatabase,
+        storage: new MemoryStorage(),
+        createDeviceId: () => 'mobile-device'
+      })
+
+      let webRuntime: Awaited<ReturnType<typeof createWebBackendCloudSyncClient>> | null = null
+      try {
+        webRuntime = await createWebBackendCloudSyncClient(config)
+        let webLocalData: any = emptyData
+        const webDatabase = {
+          exportAllDataForSync: vi.fn().mockImplementation(async () => ({
+            success: true,
+            message: 'ok',
+            data: webLocalData
+          })),
+          replaceAllData: vi.fn().mockImplementation(async (data: any) => {
+            webLocalData = data
+            return { success: true, message: 'ok' }
+          })
+        }
+        const webDevice = new CloudSyncService({
+          cloudClient: webRuntime.client,
+          database: webDatabase,
+          storage: new MemoryStorage(),
+          createDeviceId: () => 'web-device'
+        })
+        let desktopLocalData: any = emptyData
+        const desktopDatabase = {
+          exportAllDataForSync: vi.fn().mockImplementation(async () => ({
+            success: true,
+            message: 'ok',
+            data: desktopLocalData
+          })),
+          replaceAllData: vi.fn().mockImplementation(async (data: any) => {
+            desktopLocalData = data
+            return { success: true, message: 'ok' }
+          })
+        }
+        const desktopDevice = new CloudSyncService({
+          cloudClient: createDesktopWebDAVSyncClient(config),
+          database: desktopDatabase,
+          storage: new MemoryStorage(),
+          createDeviceId: () => 'desktop-device'
+        })
+
+        const mobileUpload = await mobileDevice.syncNow(storageId, {
+          deviceName: 'Mobile Device',
+          platform: 'ios',
+          reason: 'manual'
+        })
+        expect(mobileUpload).toMatchObject({ success: true, action: 'uploaded' })
+
+        const webDownload = await webDevice.syncNow(storageId, {
+          deviceName: 'Web Device',
+          platform: 'web',
+          reason: 'manual'
+        })
+        expect(webDownload).toMatchObject({ success: true, action: 'downloaded' })
+        expect(webDatabase.replaceAllData).toHaveBeenCalledWith(expect.objectContaining({
+          prompts: expect.arrayContaining([
+            expect.objectContaining({
+              uuid: 'cross-platform-prompt',
+              imageBlobs: [imageDataUrl]
+            })
+          ]),
+          promptHistories: expect.arrayContaining([
+            expect.objectContaining({
+              uuid: 'cross-platform-history',
+              imageBlobs: [imageDataUrl]
+            })
+          ])
+        }))
+
+        webLocalData = {
+          ...webLocalData,
+          prompts: webLocalData.prompts.map((prompt: any) =>
+            prompt.uuid === 'cross-platform-prompt'
+              ? {
+                  ...prompt,
+                  title: 'Web edited prompt',
+                  updatedAt: '2026-06-12T00:10:00.000Z'
+                }
+              : prompt
+          )
+        }
+        expect(webLocalData.prompts).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            uuid: 'cross-platform-prompt',
+            title: 'Web edited prompt'
+          })
+        ]))
+        const manifestBeforeWebUpload = await webRuntime.client.getCloudSyncManifest(storageId)
+        expect(createCloudSyncDataChecksum(webLocalData)).not.toBe(
+          createCloudSyncDataChecksum(manifestBeforeWebUpload.latestSnapshot!.data)
+        )
+        const webUpload = await webDevice.syncNow(storageId, {
+          deviceName: 'Web Device',
+          platform: 'web',
+          reason: 'manual'
+        })
+        expect(webUpload).toMatchObject({ success: true, action: 'uploaded' })
+
+        const desktopDownload = await desktopDevice.syncNow(storageId, {
+          deviceName: 'Desktop Device',
+          platform: 'electron',
+          reason: 'manual'
+        })
+        expect(desktopDownload).toMatchObject({ success: true, action: 'downloaded' })
+        expect(desktopLocalData.prompts).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            uuid: 'cross-platform-prompt',
+            title: 'Web edited prompt',
+            imageBlobs: [imageDataUrl]
+          })
+        ]))
+        expect(desktopLocalData.promptHistories).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            uuid: 'cross-platform-history',
+            imageBlobs: [imageDataUrl]
+          })
+        ]))
+        expect(desktopLocalData.settings).toEqual(expect.arrayContaining([
+          expect.objectContaining({ key: 'theme', value: 'dark' })
+        ]))
+
+        const manifest = await mobileService.getCloudSyncManifest(storageId)
+        expect(manifest.latestSnapshot?.deviceId).toBe('web-device')
+        expect(manifest.latestSnapshot?.dataChecksum).toBe(
+          createCloudSyncDataChecksum(manifest.latestSnapshot!.data)
+        )
+      } finally {
+        await webRuntime?.close()
+      }
     })
 
     it('设备 A 上传后，设备 B 作为新设备能从同一 WebDAV manifest 拉取完整数据', async () => {

@@ -58,6 +58,11 @@ import { Filesystem } from '@capacitor/filesystem'
 import { Preferences } from '@capacitor/preferences'
 import { CapacitorHttp, Capacitor } from '@capacitor/core'
 import { createEmptyCloudSyncManifest } from '@shared/cloud-sync-manifest'
+import { getCloudSyncSnapshotFileName } from '@shared/cloud-backup-paths'
+import {
+  createCloudSyncDataChecksum,
+  createCloudSyncSnapshot
+} from '@shared/cloud-sync-engine'
 
 const mockCapacitorHttp = CapacitorHttp as unknown as { request: ReturnType<typeof vi.fn> }
 
@@ -135,6 +140,67 @@ function makePropfindXml(files: { name: string; path: string }[]) {
 
 async function saveConfig(service: MobileCloudBackupService, config = webdavConfig) {
   await Preferences.set({ key: 'cloud_backup_configs', value: JSON.stringify([config]) })
+}
+
+function installICloudMemoryFilesystem() {
+  const files = new Map<string, string>()
+  const directories = new Set<string>([''])
+  const addParentDirectories = (filePath: string) => {
+    const parts = filePath.split('/').filter(Boolean)
+    parts.pop()
+    let current = ''
+    for (const part of parts) {
+      current = current ? `${current}/${part}` : part
+      directories.add(current)
+    }
+  }
+
+  ;(Filesystem.readdir as any).mockImplementation(async ({ path }: { path: string }) => {
+    const normalizedPath = (path || '').replace(/\/+$/, '')
+    if (normalizedPath === '') {
+      return { files: [] }
+    }
+
+    if (!directories.has(normalizedPath)) {
+      throw new Error('File does not exist')
+    }
+
+    const prefix = `${normalizedPath}/`
+    const childNames = [...files.keys()]
+      .filter(filePath => filePath.startsWith(prefix))
+      .map(filePath => filePath.slice(prefix.length))
+      .filter(name => name && !name.includes('/'))
+
+    return {
+      files: childNames.map(name => ({
+        name,
+        size: files.get(`${prefix}${name}`)?.length || 0
+      }))
+    }
+  })
+  ;(Filesystem.stat as any).mockImplementation(async ({ path }: { path: string }) => {
+    const normalizedPath = (path || '').replace(/\/+$/, '')
+    if (directories.has(normalizedPath) || files.has(normalizedPath)) {
+      return { type: files.has(normalizedPath) ? 'file' : 'directory' }
+    }
+    throw new Error('File does not exist')
+  })
+  ;(Filesystem.mkdir as any).mockImplementation(async ({ path }: { path: string }) => {
+    directories.add((path || '').replace(/\/+$/, ''))
+  })
+  ;(Filesystem.readFile as any).mockImplementation(async ({ path }: { path: string }) => {
+    const data = files.get(path)
+    if (data === undefined) {
+      throw new Error('File does not exist')
+    }
+    return { data }
+  })
+  ;(Filesystem.writeFile as any).mockImplementation(async ({ path, data }: { path: string; data: string }) => {
+    addParentDirectories(path)
+    files.set(path, data)
+  })
+
+  return files
 }
 
 describe('MobileCloudBackupService', () => {
@@ -510,6 +576,100 @@ describe('MobileCloudBackupService', () => {
         'AI-Gist-Backup/sync-manifest.json',
         'AI-Gist-Backup/sync-manifest.backup.json'
       ])
+    })
+
+    it('iCloud 快照文件使用统一包装格式并保留图片和历史元数据', async () => {
+      await saveConfig(service, {
+        ...webdavConfig,
+        id: 'cfg-icloud',
+        type: 'icloud',
+        path: 'AI-Gist-Backup'
+      } as any)
+      const files = installICloudMemoryFilesystem()
+      const imageDataUrl = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAFgwJ/lZ2nNwAAAABJRU5ErkJggg=='
+      const snapshot = createCloudSyncSnapshot({
+        ...mockExportData,
+        prompts: [
+          {
+            ...mockExportData.prompts[0],
+            uuid: 'icloud-prompt',
+            imageBlobs: [imageDataUrl]
+          }
+        ],
+        promptHistories: [
+          {
+            id: 1,
+            uuid: 'icloud-history',
+            promptId: 1,
+            promptUuid: 'icloud-prompt',
+            content: 'history with image',
+            imageBlobs: [imageDataUrl],
+            createdAt: '2026-06-12T00:00:00.000Z',
+            updatedAt: '2026-06-12T00:00:00.000Z'
+          }
+        ],
+        syncTombstones: []
+      }, 'ios-device', 'icloud-snapshot-rev')
+
+      const result = await service.saveCloudSyncSnapshot('cfg-icloud', snapshot)
+
+      expect(result.success).toBe(true)
+      const snapshotPath = `AI-Gist-Backup/sync/snapshots/${getCloudSyncSnapshotFileName('icloud-snapshot-rev')}`
+      const rawSnapshotFile = JSON.parse(files.get(snapshotPath)!)
+      expect(rawSnapshotFile.kind).toBe('ai-gist-cloud-sync-snapshot')
+      expect(rawSnapshotFile.snapshot.data.prompts[0].imageBlobs).toEqual([imageDataUrl])
+      expect(rawSnapshotFile.snapshot.data.promptHistories[0].imageBlobs).toEqual([imageDataUrl])
+
+      const snapshots = await service.listCloudSyncSnapshots('cfg-icloud')
+      expect(snapshots).toEqual([{
+        revision: 'icloud-snapshot-rev',
+        path: snapshotPath
+      }])
+
+      const loadedSnapshot = await service.readCloudSyncSnapshot('cfg-icloud', 'icloud-snapshot-rev')
+      expect(loadedSnapshot.data.prompts?.[0].imageBlobs).toEqual([imageDataUrl])
+      expect(loadedSnapshot.data.promptHistories?.[0].imageBlobs).toEqual([imageDataUrl])
+      expect(loadedSnapshot.dataChecksum).toBe(createCloudSyncDataChecksum(loadedSnapshot.data))
+    })
+
+    it('iCloud manifest expectedRevision 不匹配时拒绝覆盖已有远端版本', async () => {
+      await saveConfig(service, {
+        ...webdavConfig,
+        id: 'cfg-icloud',
+        type: 'icloud',
+        path: 'AI-Gist-Backup'
+      } as any)
+      const files = installICloudMemoryFilesystem()
+      const remoteSnapshot = createCloudSyncSnapshot(mockExportData, 'ios-device', 'icloud-remote-rev')
+      const remoteManifest = {
+        ...createEmptyCloudSyncManifest('2026-06-12T00:00:00.000Z'),
+        latestSnapshot: remoteSnapshot,
+        baseSnapshot: remoteSnapshot
+      }
+      files.set('AI-Gist-Backup/sync-manifest.json', JSON.stringify(remoteManifest))
+      files.set('AI-Gist-Backup/sync-manifest.backup.json', JSON.stringify(remoteManifest))
+
+      const nextSnapshot = createCloudSyncSnapshot({
+        ...mockExportData,
+        prompts: [
+          { ...mockExportData.prompts[0], title: 'stale overwrite' }
+        ]
+      }, 'ios-device', 'icloud-next-rev')
+      const result = await service.saveCloudSyncManifest('cfg-icloud', {
+        ...createEmptyCloudSyncManifest('2026-06-12T00:01:00.000Z'),
+        latestSnapshot: nextSnapshot,
+        baseSnapshot: nextSnapshot
+      }, {
+        expectedRevision: 'stale-rev'
+      })
+
+      expect(result).toMatchObject({
+        success: false,
+        conflict: true,
+        currentRevision: 'icloud-remote-rev'
+      })
+      expect(JSON.parse(files.get('AI-Gist-Backup/sync-manifest.json')!).latestSnapshot.revision)
+        .toBe('icloud-remote-rev')
     })
   })
 

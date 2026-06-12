@@ -610,10 +610,12 @@ async function saveWebDAVSyncManifest({ config, manifest, options = {} }) {
   assertExpectedCloudSyncRevision(currentManifest, options.expectedRevision);
 
   const headers = {};
-  if (primaryState?.etag) {
-    headers['If-Match'] = primaryState.etag;
-  } else if (!currentManifest.latestSnapshot) {
-    headers['If-None-Match'] = '*';
+  if (options.expectedRevision !== undefined) {
+    if (primaryState?.etag) {
+      headers['If-Match'] = primaryState.etag;
+    } else if (!currentManifest.latestSnapshot) {
+      headers['If-None-Match'] = '*';
+    }
   }
 
   try {

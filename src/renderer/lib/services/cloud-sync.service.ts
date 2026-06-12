@@ -10,6 +10,7 @@ import type {
 } from '@shared/cloud-sync-engine';
 import {
   applyCloudSyncTombstones,
+  createCloudSyncDataChecksum,
   createCloudSyncSnapshot,
   mergeCloudSyncData,
   normalizeCloudSyncDataSet,
@@ -512,7 +513,13 @@ export class CloudSyncService {
           );
         } catch (error) {
           if (isCloudSyncRemoteChangedError(error)) {
-            return await this.retryWithLatestRemote(storageId, options, attempt);
+            return await this.retryAfterManifestConflict(
+              storageId,
+              options,
+              attempt,
+              snapshot,
+              false
+            );
           }
           throw error;
         }
@@ -549,7 +556,13 @@ export class CloudSyncService {
             );
           } catch (error) {
             if (isCloudSyncRemoteChangedError(error)) {
-              return await this.retryWithLatestRemote(storageId, options, attempt);
+              return await this.retryAfterManifestConflict(
+                storageId,
+                options,
+                attempt,
+                remoteSnapshot,
+                false
+              );
             }
             throw error;
           }
@@ -615,7 +628,13 @@ export class CloudSyncService {
           );
         } catch (error) {
           if (isCloudSyncRemoteChangedError(error)) {
-            return await this.retryWithLatestRemote(storageId, options, attempt);
+            return await this.retryAfterManifestConflict(
+              storageId,
+              options,
+              attempt,
+              finalSnapshot,
+              appliedLocal
+            );
           }
           throw error;
         }
@@ -670,6 +689,32 @@ export class CloudSyncService {
     }
 
     return await this.performSync(storageId, options, attempt + 1);
+  }
+
+  private async retryAfterManifestConflict(
+    storageId: string,
+    options: CloudSyncOptions,
+    attempt: number,
+    submittedSnapshot: CloudSyncSnapshot,
+    appliedLocal: boolean
+  ): Promise<CloudSyncResult> {
+    const retryResult = await this.retryWithLatestRemote(storageId, options, attempt);
+    if (
+      retryResult.success &&
+      retryResult.remoteRevision === submittedSnapshot.revision
+    ) {
+      const finalAppliedLocal = appliedLocal || retryResult.appliedLocal;
+      return {
+        ...retryResult,
+        action: getSyncAction(finalAppliedLocal, true),
+        localRevision: submittedSnapshot.revision,
+        remoteRevision: submittedSnapshot.revision,
+        appliedLocal: finalAppliedLocal,
+        uploadedRemote: true
+      };
+    }
+
+    return retryResult;
   }
 
   private async getManifestOrRecoverCorruption(
@@ -1897,24 +1942,7 @@ function createEmptySummary(): CloudSyncMergeSummary {
 }
 
 function dataSetsEqual(left: CloudSyncDataSet, right: CloudSyncDataSet): boolean {
-  return stableSerialize(left) === stableSerialize(right);
-}
-
-function stableSerialize(value: any): string {
-  if (value === null || value === undefined) {
-    return JSON.stringify(value);
-  }
-
-  if (Array.isArray(value)) {
-    return `[${value.map(item => stableSerialize(item)).join(',')}]`;
-  }
-
-  if (typeof value !== 'object') {
-    return JSON.stringify(value);
-  }
-
-  const keys = Object.keys(value).sort();
-  return `{${keys.map(key => `${JSON.stringify(key)}:${stableSerialize(value[key])}`).join(',')}}`;
+  return createCloudSyncDataChecksum(left) === createCloudSyncDataChecksum(right);
 }
 
 export const cloudSyncService = CloudSyncService.getInstance();
