@@ -538,6 +538,107 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     expect(finalNoop).toMatchObject({ success: true, action: 'noop' })
   })
 
+  it('新设备离线先创建数据后首次连接云端会合并两边且不丢图片历史', async () => {
+    const storageId = 'robust-new-device-offline-create-first-sync'
+    const client = createWebDAVSyncClient(storageId)
+    const cloudData = createRealisticDataSet()
+    const deviceADatabase = new MutableSyncDatabase(cloudData)
+    const deviceA = createSyncService(client, deviceADatabase, new MemoryStorage(), 'device-a')
+
+    const cloudUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(cloudUpload).toMatchObject({ success: true, action: 'uploaded' })
+
+    const offlineData = createOfflineNewDeviceData()
+    const newDeviceDatabase = new MutableSyncDatabase(offlineData)
+    const newDevice = createSyncService(client, newDeviceDatabase, new MemoryStorage(), 'device-new-offline')
+
+    const firstSync = await newDevice.syncNow(storageId, {
+      deviceName: 'Phone Offline First',
+      platform: 'ios',
+      reason: 'manual'
+    })
+
+    expect(firstSync, JSON.stringify(firstSync, null, 2)).toMatchObject({
+      success: true,
+      action: 'merged',
+      appliedLocal: true,
+      uploadedRemote: true,
+      conflicts: []
+    })
+    expect(newDeviceDatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '发布计划提示词',
+        imageBlobs: [INITIAL_IMAGE]
+      }),
+      expect.objectContaining({
+        uuid: 'offline-prompt-roadmap',
+        title: '离线新建设计评审提示词',
+        imageBlobs: [UPDATED_IMAGE]
+      })
+    ]))
+    expect(newDeviceDatabase.data.promptVariables).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-variable-tone', promptUuid: 'real-prompt-launch' }),
+      expect.objectContaining({ uuid: 'offline-variable-scope', promptUuid: 'offline-prompt-roadmap' })
+    ]))
+    expect(newDeviceDatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'offline-history-draft', imageBlobs: [UPDATED_IMAGE] })
+    ]))
+    expect(newDeviceDatabase.data.aiHistory).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-ai-history-initial' }),
+      expect.objectContaining({ uuid: 'offline-ai-history-draft' })
+    ]))
+    expect(newDeviceDatabase.data.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'theme', value: 'dark' }),
+      expect.objectContaining({ key: 'offline.review.mode', value: 'strict' })
+    ]))
+
+    const manifest = await client.getCloudSyncManifest(storageId)
+    expect(manifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-prompt-launch', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'offline-prompt-roadmap', imageBlobs: [UPDATED_IMAGE] })
+    ]))
+    expect(manifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'offline-history-draft', imageBlobs: [UPDATED_IMAGE] })
+    ]))
+    expect(manifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(manifest.latestSnapshot!.data))
+
+    const deviceC = createSyncService(
+      client,
+      new MutableSyncDatabase(emptyDataSet()),
+      new MemoryStorage(),
+      'device-c'
+    )
+    const thirdDeviceDownload = await deviceC.syncNow(storageId, {
+      deviceName: 'Desktop C',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(thirdDeviceDownload).toMatchObject({ success: true, action: 'downloaded' })
+
+    const snapshotsBeforeRepeatedClicks = await client.listCloudSyncSnapshots(storageId)
+    const secondClick = await newDevice.syncNow(storageId, {
+      deviceName: 'Phone Offline First',
+      platform: 'ios',
+      reason: 'manual'
+    })
+    const thirdClick = await newDevice.syncNow(storageId, {
+      deviceName: 'Phone Offline First',
+      platform: 'ios',
+      reason: 'manual'
+    })
+    expect(secondClick).toMatchObject({ success: true, action: 'noop' })
+    expect(thirdClick).toMatchObject({ success: true, action: 'noop' })
+    expect(await client.listCloudSyncSnapshots(storageId)).toHaveLength(snapshotsBeforeRepeatedClicks.length)
+  })
+
   it('删除提示词后会通过 tombstone 跨端删除变量和历史且不会复活', async () => {
     const storageId = 'robust-delete-propagates-tombstones'
     const client = createWebDAVSyncClient(storageId)
@@ -1593,6 +1694,91 @@ function createRealisticDataSet(): CloudSyncDataSet {
       value: 'dark',
       type: 'string',
       updatedAt: '2026-06-13T13:00:00.000Z'
+    }],
+    syncTombstones: []
+  }
+}
+
+function createOfflineNewDeviceData(): CloudSyncDataSet {
+  return {
+    categories: [{
+      id: 211,
+      uuid: 'offline-category-design',
+      name: '离线设计资料',
+      isActive: true,
+      sortOrder: 1,
+      createdAt: '2026-06-13T14:30:00.000Z',
+      updatedAt: '2026-06-13T14:30:00.000Z'
+    }],
+    prompts: [{
+      id: 231,
+      uuid: 'offline-prompt-roadmap',
+      title: '离线新建设计评审提示词',
+      content: '请围绕 {{scope}} 生成设计评审清单',
+      categoryId: 211,
+      categoryUuid: 'offline-category-design',
+      tags: ['offline', 'design'],
+      isFavorite: false,
+      useCount: 1,
+      isActive: true,
+      imageBlobs: [UPDATED_IMAGE],
+      createdAt: '2026-06-13T14:30:00.000Z',
+      updatedAt: '2026-06-13T14:30:00.000Z'
+    }],
+    promptVariables: [{
+      id: 241,
+      uuid: 'offline-variable-scope',
+      promptId: 231,
+      promptUuid: 'offline-prompt-roadmap',
+      name: 'scope',
+      type: 'text',
+      defaultValue: 'mobile sync',
+      required: true,
+      sortOrder: 1,
+      createdAt: '2026-06-13T14:30:00.000Z',
+      updatedAt: '2026-06-13T14:30:00.000Z'
+    }],
+    promptHistories: [{
+      id: 242,
+      uuid: 'offline-history-draft',
+      promptId: 231,
+      promptUuid: 'offline-prompt-roadmap',
+      title: '离线新建设计评审提示词',
+      content: '离线第一次生成设计评审清单',
+      result: 'Offline design review checklist',
+      version: 1,
+      imageBlobs: [UPDATED_IMAGE],
+      createdAt: '2026-06-13T14:31:00.000Z',
+      updatedAt: '2026-06-13T14:31:00.000Z'
+    }],
+    aiConfigs: [],
+    quickOptimizationConfigs: [{
+      id: 261,
+      uuid: 'offline-quick-tighten',
+      name: '压缩表达',
+      description: '离线优化',
+      prompt: '请压缩：{{content}}',
+      enabled: true,
+      sortOrder: 1,
+      createdAt: '2026-06-13T14:30:00.000Z',
+      updatedAt: '2026-06-13T14:30:00.000Z'
+    }],
+    aiHistory: [{
+      id: 271,
+      uuid: 'offline-ai-history-draft',
+      promptUuid: 'offline-prompt-roadmap',
+      input: '生成离线设计评审清单',
+      output: '离线设计评审结果',
+      provider: 'openai',
+      model: 'gpt-4.1',
+      createdAt: '2026-06-13T14:32:00.000Z',
+      updatedAt: '2026-06-13T14:32:00.000Z'
+    }],
+    settings: [{
+      key: 'offline.review.mode',
+      value: 'strict',
+      type: 'string',
+      updatedAt: '2026-06-13T14:30:00.000Z'
     }],
     syncTombstones: []
   }
