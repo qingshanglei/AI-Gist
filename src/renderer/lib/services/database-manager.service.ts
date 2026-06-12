@@ -541,7 +541,7 @@ export class DatabaseServiceManager {
           const { id, ...categoryDataWithoutId } = category;
           
           try {
-            const newCategory = await this.category.createCategory(categoryDataWithoutId);
+            const newCategory = await this.addRestoredRecord('categories', categoryDataWithoutId);
             // 记录ID映射：旧ID -> 新ID
             if (oldId !== undefined) {
               idMapping[`category_${oldId}`] = newCategory.id!;
@@ -582,7 +582,7 @@ export class DatabaseServiceManager {
 
           try {
             const promptToCreate = await this.deserializeImageBlobs(promptDataWithoutId);
-            const newPrompt = await this.prompt.createPrompt(promptToCreate);
+            const newPrompt = await this.addRestoredRecord('prompts', promptToCreate);
 
             // 记录提示词ID映射：旧ID -> 新ID
             if (oldPromptId !== undefined) {
@@ -615,7 +615,7 @@ export class DatabaseServiceManager {
           }
 
           try {
-            await this.prompt.createPromptVariableFromBackup(variableDataWithoutId);
+            await this.addRestoredRecord('promptVariables', variableDataWithoutId);
           } catch (err) {
             this.debugWarn('导入提示词变量数据失败:', variable.id, err);
             totalErrors++;
@@ -642,7 +642,7 @@ export class DatabaseServiceManager {
 
           try {
             const historyToCreate = await this.deserializeImageBlobs(historyDataWithoutId);
-            await this.prompt.createPromptHistoryFromBackup(historyToCreate);
+            await this.addRestoredRecord('promptHistories', historyToCreate);
           } catch (err) {
             this.debugWarn('导入提示词历史数据失败:', history.id, err);
             totalErrors++;
@@ -656,7 +656,7 @@ export class DatabaseServiceManager {
         for (const config of data.aiConfigs) {
           const { id, ...configDataWithoutId } = config;
           try {
-            await this.aiConfig.createAIConfig(configDataWithoutId);
+            await this.addRestoredRecord('ai_configs', configDataWithoutId);
           } catch (err) {
             this.debugWarn('导入AI配置数据失败:', config.id, err);
             totalErrors++;
@@ -671,7 +671,7 @@ export class DatabaseServiceManager {
           const configDataWithoutId = { ...config };
           delete configDataWithoutId.id;
           try {
-            await this.quickOptimization.createQuickOptimizationConfigFromBackup(configDataWithoutId);
+            await this.addRestoredRecord('quick_optimization_configs', configDataWithoutId);
           } catch (err) {
             this.debugWarn('导入快速优化配置数据失败:', config.id, err);
             totalErrors++;
@@ -685,7 +685,7 @@ export class DatabaseServiceManager {
         for (const history of data.aiHistory) {
           const { id, ...historyDataWithoutId } = history;
           try {
-            await this.aiGenerationHistory.createAIGenerationHistory(historyDataWithoutId);
+            await this.addRestoredRecord('ai_generation_history', historyDataWithoutId);
           } catch (err) {
             this.debugWarn('导入AI历史数据失败:', history.id, err);
             totalErrors++;
@@ -697,8 +697,10 @@ export class DatabaseServiceManager {
       if (data.settings && data.settings.length > 0) {
         this.debugLog(`导入设置数据: ${data.settings.length} 条`);
         for (const setting of data.settings) {
+          const settingDataWithoutId = { ...setting };
+          delete settingDataWithoutId.id;
           try {
-            await this.appSettings.updateSettingByKey(setting.key, setting.value, setting.type, setting.description);
+            await this.addRestoredRecord('settings', settingDataWithoutId);
           } catch (err) {
             this.debugWarn('导入设置数据失败:', setting.key, err);
             totalErrors++;
@@ -797,7 +799,7 @@ export class DatabaseServiceManager {
           const { id, ...categoryDataWithoutId } = category;
           
           try {
-            const newCategory = await this.category.createCategory(categoryDataWithoutId);
+            const newCategory = await this.addRestoredRecord('categories', categoryDataWithoutId);
             // 记录ID映射：旧ID -> 新ID
             if (oldId !== undefined) {
               idMapping[`category_${oldId}`] = newCategory.id!;
@@ -838,7 +840,7 @@ export class DatabaseServiceManager {
 
           try {
             const promptToCreate = await this.deserializeImageBlobs(promptDataWithoutId);
-            const newPrompt = await this.prompt.createPrompt(promptToCreate);
+            const newPrompt = await this.addRestoredRecord('prompts', promptToCreate);
 
             // 记录提示词ID映射：旧ID -> 新ID
             if (oldPromptId !== undefined) {
@@ -871,7 +873,7 @@ export class DatabaseServiceManager {
           }
 
           try {
-            await this.prompt.createPromptVariableFromBackup(variableDataWithoutId);
+            await this.addRestoredRecord('promptVariables', variableDataWithoutId);
           } catch (err) {
             this.debugWarn('恢复提示词变量数据失败:', variable.id, err);
             totalErrors++;
@@ -898,7 +900,7 @@ export class DatabaseServiceManager {
 
           try {
             const historyToCreate = await this.deserializeImageBlobs(historyDataWithoutId);
-            await this.prompt.createPromptHistoryFromBackup(historyToCreate);
+            await this.addRestoredRecord('promptHistories', historyToCreate);
           } catch (err) {
             this.debugWarn('恢复提示词历史数据失败:', history.id, err);
             totalErrors++;
@@ -912,7 +914,7 @@ export class DatabaseServiceManager {
         for (const config of backupData.aiConfigs) {
           const { id, ...configDataWithoutId } = config;
           try {
-            await this.aiConfig.createAIConfig(configDataWithoutId);
+            await this.addRestoredRecord('ai_configs', configDataWithoutId);
           } catch (err) {
             this.debugWarn('恢复AI配置数据失败:', config.id, err);
             totalErrors++;
@@ -927,7 +929,7 @@ export class DatabaseServiceManager {
           const configDataWithoutId = { ...config };
           delete configDataWithoutId.id;
           try {
-            await this.quickOptimization.createQuickOptimizationConfigFromBackup(configDataWithoutId);
+            await this.addRestoredRecord('quick_optimization_configs', configDataWithoutId);
           } catch (err) {
             this.debugWarn('恢复快速优化配置数据失败:', config.id, err);
             totalErrors++;
@@ -941,7 +943,7 @@ export class DatabaseServiceManager {
         for (const history of backupData.aiHistory) {
           const { id, ...historyDataWithoutId } = history;
           try {
-            await this.aiGenerationHistory.createAIGenerationHistory(historyDataWithoutId);
+            await this.addRestoredRecord('ai_generation_history', historyDataWithoutId);
           } catch (err) {
             this.debugWarn('恢复AI历史数据失败:', history.id, err);
             totalErrors++;
@@ -953,8 +955,10 @@ export class DatabaseServiceManager {
       if (backupData.settings && backupData.settings.length > 0) {
         this.debugLog(`恢复设置数据: ${backupData.settings.length} 条`);
         for (const setting of backupData.settings) {
+          const settingDataWithoutId = { ...setting };
+          delete settingDataWithoutId.id;
           try {
-            await this.appSettings.updateSettingByKey(setting.key, setting.value, setting.type, setting.description);
+            await this.addRestoredRecord('settings', settingDataWithoutId);
           } catch (err) {
             this.debugWarn('恢复设置数据失败:', setting.key, err);
             totalErrors++;
@@ -1095,6 +1099,41 @@ export class DatabaseServiceManager {
       this.debugError('获取数据库连接失败:', error);
       return null;
     }
+  }
+
+  private async addRestoredRecord<T extends { id?: number } = any>(
+    storeName: string,
+    data: Omit<T, 'id'> & { id?: number }
+  ): Promise<T> {
+    const db = await this.getDatabase();
+    if (!db) {
+      throw new Error('无法获取数据库连接');
+    }
+
+    const recordToRestore = { ...(data as any) };
+    delete recordToRestore.id;
+
+    return await new Promise<T>((resolve, reject) => {
+      const transaction = db.transaction([storeName], 'readwrite');
+      const store = transaction.objectStore(storeName);
+      const request = store.add(recordToRestore);
+
+      request.onsuccess = () => {
+        const restoredRecord = {
+          ...recordToRestore,
+          id: request.result as number
+        } as T;
+        emitDataChange({
+          storeName: storeName as any,
+          action: 'create',
+          id: request.result
+        });
+        resolve(restoredRecord);
+      };
+      request.onerror = () => reject(request.error);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error(`恢复 ${storeName} 事务中止`));
+    });
   }
 
   private assertRestorableDataShape(data: any): void {

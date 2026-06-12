@@ -10,7 +10,7 @@ import type {
 } from '@shared/cloud-sync-engine';
 import {
   applyCloudSyncTombstones,
-  createCloudSyncDataChecksum,
+  createCloudSyncSemanticChecksum,
   createCloudSyncSnapshot,
   mergeCloudSyncData,
   normalizeCloudSyncDataSet,
@@ -1942,7 +1942,7 @@ function createEmptySummary(): CloudSyncMergeSummary {
 }
 
 function dataSetsEqual(left: CloudSyncDataSet, right: CloudSyncDataSet): boolean {
-  return createCloudSyncDataChecksum(left) === createCloudSyncDataChecksum(right);
+  return createCloudSyncSemanticChecksum(left) === createCloudSyncSemanticChecksum(right);
 }
 
 export const cloudSyncService = CloudSyncService.getInstance();

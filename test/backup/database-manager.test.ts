@@ -138,7 +138,29 @@ const mockQuickOptimizationConfig = {
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
 }
-const mockSetting = { key: 'theme', value: 'dark', type: 'string', description: '' }
+const mockAIHistory = {
+  id: 1,
+  uuid: 'ai-history-1',
+  historyId: 'ai-history-business-1',
+  configId: 'config-1',
+  topic: '同步可靠性',
+  generatedPrompt: '生成后的提示词',
+  model: 'test-model',
+  status: 'success' as const,
+  createdAt: '2026-06-12T00:00:00.000Z',
+  updatedAt: '2026-06-12T00:00:00.000Z'
+}
+const mockSetting = {
+  id: 1,
+  key: 'theme',
+  value: 'dark',
+  type: 'string',
+  description: '主题设置',
+  category: 'appearance',
+  isSystem: true,
+  createdAt: '2026-06-12T00:00:00.000Z',
+  updatedAt: '2026-06-12T00:00:00.000Z'
+}
 const mockSyncTombstone = {
   id: 1,
   storeName: 'prompts',
@@ -156,18 +178,48 @@ function makeExportData() {
     promptHistories: [mockPromptHistory],
     aiConfigs: [mockAIConfig],
     quickOptimizationConfigs: [mockQuickOptimizationConfig],
-    aiHistory: [],
+    aiHistory: [mockAIHistory],
     settings: [mockSetting],
   }
 }
 
 describe('DatabaseServiceManager', () => {
   let manager: DatabaseServiceManager
+  let restoredRecords: Record<string, any[]>
+  let failRestoredStoreName: string | null
+  let failRestoredStoreError: string
 
   beforeEach(() => {
     // 重置单例
     ;(DatabaseServiceManager as any).instance = undefined
     manager = DatabaseServiceManager.getInstance()
+    restoredRecords = {}
+    failRestoredStoreName = null
+    failRestoredStoreError = 'restored record write failed'
+
+    vi.spyOn(manager as any, 'addRestoredRecord').mockImplementation(async (storeName: string, data: any) => {
+      if (storeName === failRestoredStoreName) {
+        throw new Error(failRestoredStoreError)
+      }
+
+      const nextIds: Record<string, number> = {
+        categories: 10,
+        prompts: 20,
+        promptVariables: 30,
+        promptHistories: 40,
+        ai_configs: 30,
+        quick_optimization_configs: 50,
+        ai_generation_history: 60,
+        settings: 70
+      }
+      const restored = {
+        ...data,
+        id: nextIds[storeName] ?? 90
+      }
+      restoredRecords[storeName] = restoredRecords[storeName] || []
+      restoredRecords[storeName].push(restored)
+      return restored
+    })
 
     // clearMocks 会清除 mockReturnValue，需要在每个 beforeEach 重新设置
     mockCategoryService.checkObjectStoreExists.mockResolvedValue(true)
@@ -196,7 +248,7 @@ describe('DatabaseServiceManager', () => {
     mockPromptService.getAllPromptHistories.mockResolvedValue([mockPromptHistory])
     mockAIConfigService.getAllAIConfigs.mockResolvedValue([mockAIConfig])
     mockQuickOptService.getAllQuickOptimizationConfigs.mockResolvedValue([mockQuickOptimizationConfig])
-    mockAIHistoryService.getAllAIGenerationHistory.mockResolvedValue([])
+    mockAIHistoryService.getAllAIGenerationHistory.mockResolvedValue([mockAIHistory])
     mockAppSettingsService.getAllSettings.mockResolvedValue([mockSetting])
 
     mockCategoryService.createCategory.mockResolvedValue({ ...mockCategory, id: 10 })
@@ -362,26 +414,43 @@ describe('DatabaseServiceManager', () => {
       const result = await manager.importData(makeExportData())
 
       expect(result.success).toBe(true)
-      expect(mockCategoryService.createCategory).toHaveBeenCalledTimes(1)
-      expect(mockPromptService.createPrompt).toHaveBeenCalledTimes(1)
-      expect(mockPromptService.createPromptVariableFromBackup).toHaveBeenCalledTimes(1)
-      expect(mockPromptService.createPromptHistoryFromBackup).toHaveBeenCalledTimes(1)
-      expect(mockAIConfigService.createAIConfig).toHaveBeenCalledTimes(1)
-      expect(mockQuickOptService.createQuickOptimizationConfigFromBackup).toHaveBeenCalledTimes(1)
-      expect(mockAppSettingsService.updateSettingByKey).toHaveBeenCalledTimes(1)
+      expect(restoredRecords.categories).toHaveLength(1)
+      expect(restoredRecords.prompts).toHaveLength(1)
+      expect(restoredRecords.promptVariables).toHaveLength(1)
+      expect(restoredRecords.promptHistories).toHaveLength(1)
+      expect(restoredRecords.ai_configs).toHaveLength(1)
+      expect(restoredRecords.quick_optimization_configs).toHaveLength(1)
+      expect(restoredRecords.ai_generation_history).toHaveLength(1)
+      expect(restoredRecords.settings).toHaveLength(1)
     })
 
-    it('分类 ID 映射正确传递给提示词', async () => {
+    it('保留 UUID、设置元数据，并将本地 ID 映射正确传递给提示词和历史', async () => {
       const result = await manager.importData(makeExportData())
 
       expect(result.success).toBe(true)
-      // createPrompt 被调用时，categoryId 应该是新 ID (10)，而不是旧 ID (1)
-      const promptArg = mockPromptService.createPrompt.mock.calls[0][0]
+      expect(restoredRecords.categories[0].uuid).toBe(mockCategory.uuid)
+      expect(restoredRecords.prompts[0].uuid).toBe(mockPrompt.uuid)
+      // 恢复提示词时，categoryId 应该是新 ID (10)，而不是旧 ID (1)
+      const promptArg = restoredRecords.prompts[0]
       expect(promptArg.categoryId).toBe(10)
-      const variableArg = mockPromptService.createPromptVariableFromBackup.mock.calls[0][0]
+      const variableArg = restoredRecords.promptVariables[0]
       expect(variableArg.promptId).toBe(20)
-      const historyArg = mockPromptService.createPromptHistoryFromBackup.mock.calls[0][0]
+      const historyArg = restoredRecords.promptHistories[0]
       expect(historyArg.promptId).toBe(20)
+      expect(historyArg.uuid).toBe(mockPromptHistory.uuid)
+      expect(restoredRecords.ai_generation_history[0]).toMatchObject({
+        uuid: mockAIHistory.uuid,
+        historyId: mockAIHistory.historyId,
+        createdAt: mockAIHistory.createdAt
+      })
+      expect(restoredRecords.settings[0]).toMatchObject({
+        key: mockSetting.key,
+        value: mockSetting.value,
+        category: mockSetting.category,
+        isSystem: mockSetting.isSystem,
+        createdAt: mockSetting.createdAt,
+        updatedAt: mockSetting.updatedAt
+      })
     })
 
     it('数据格式无效时返回失败', async () => {
@@ -390,7 +459,8 @@ describe('DatabaseServiceManager', () => {
     })
 
     it('任一记录导入失败时返回失败', async () => {
-      mockAppSettingsService.updateSettingByKey.mockRejectedValueOnce(new Error('settings import failed'))
+      failRestoredStoreName = 'settings'
+      failRestoredStoreError = 'settings import failed'
 
       const result = await manager.importData(makeExportData())
 
@@ -401,7 +471,8 @@ describe('DatabaseServiceManager', () => {
     })
 
     it('记录导入失败不会默认写入 console.warn/error', async () => {
-      mockAppSettingsService.updateSettingByKey.mockRejectedValueOnce(new Error('settings import failed'))
+      failRestoredStoreName = 'settings'
+      failRestoredStoreError = 'settings import failed'
 
       const result = await expectNoDefaultConsoleNoise(() => manager.importData(makeExportData()))
 
@@ -418,8 +489,8 @@ describe('DatabaseServiceManager', () => {
       const result = await manager.importData(dataWithBase64)
       expect(result.success).toBe(true)
 
-      expect(mockPromptService.createPrompt).toHaveBeenCalledTimes(1)
-      const promptArg = mockPromptService.createPrompt.mock.calls[0][0]
+      expect(restoredRecords.prompts).toHaveLength(1)
+      const promptArg = restoredRecords.prompts[0]
       expect(promptArg.imageBlobs[0]).toBeInstanceOf(Blob)
     })
 
@@ -433,9 +504,9 @@ describe('DatabaseServiceManager', () => {
 
       expect(result.success).toBe(false)
       expect(result.totalErrors).toBe(3)
-      expect(mockPromptService.createPrompt).not.toHaveBeenCalled()
-      expect(mockPromptService.createPromptVariableFromBackup).not.toHaveBeenCalled()
-      expect(mockPromptService.createPromptHistoryFromBackup).not.toHaveBeenCalled()
+      expect(restoredRecords.prompts || []).toHaveLength(0)
+      expect(restoredRecords.promptVariables || []).toHaveLength(0)
+      expect(restoredRecords.promptHistories || []).toHaveLength(0)
     })
 
     it('base64 promptHistories.imageBlobs 被反序列化为 Blob', async () => {
@@ -447,7 +518,7 @@ describe('DatabaseServiceManager', () => {
       const result = await manager.importData(dataWithBase64History)
       expect(result.success).toBe(true)
 
-      const historyArg = mockPromptService.createPromptHistoryFromBackup.mock.calls[0][0]
+      const historyArg = restoredRecords.promptHistories[0]
       expect(historyArg.imageBlobs[0]).toBeInstanceOf(Blob)
     })
   })
@@ -501,6 +572,44 @@ describe('DatabaseServiceManager', () => {
 
       expect(cleanSpy).toHaveBeenCalledTimes(1)
       expect(result.success).toBe(true)
+    })
+
+    it('完整替换会保留云同步身份 UUID，同时重新映射本地数字 ID', async () => {
+      vi.spyOn(manager, 'forceCleanAllTables').mockResolvedValue()
+
+      const result = await manager.replaceAllData(makeExportData())
+
+      expect(result.success).toBe(true)
+      expect(restoredRecords.categories[0]).toMatchObject({
+        id: 10,
+        uuid: mockCategory.uuid
+      })
+      expect(restoredRecords.prompts[0]).toMatchObject({
+        id: 20,
+        uuid: mockPrompt.uuid,
+        categoryId: 10
+      })
+      expect(restoredRecords.promptVariables[0]).toMatchObject({
+        uuid: mockPromptVariable.uuid,
+        promptId: 20
+      })
+      expect(restoredRecords.promptHistories[0]).toMatchObject({
+        uuid: mockPromptHistory.uuid,
+        promptId: 20
+      })
+      expect(restoredRecords.ai_generation_history[0]).toMatchObject({
+        id: 60,
+        uuid: mockAIHistory.uuid,
+        historyId: mockAIHistory.historyId
+      })
+      expect(restoredRecords.settings[0]).toMatchObject({
+        id: 70,
+        key: mockSetting.key,
+        category: mockSetting.category,
+        isSystem: true,
+        createdAt: mockSetting.createdAt,
+        updatedAt: mockSetting.updatedAt
+      })
     })
 
     it('恢复数据格式无效时不会先清空本地数据', async () => {
@@ -589,7 +698,8 @@ describe('DatabaseServiceManager', () => {
 
     it('任一记录恢复失败时返回失败，避免同步状态误标为成功', async () => {
       vi.spyOn(manager, 'forceCleanAllTables').mockResolvedValue()
-      mockAppSettingsService.updateSettingByKey.mockRejectedValueOnce(new Error('settings write failed'))
+      failRestoredStoreName = 'settings'
+      failRestoredStoreError = 'settings write failed'
 
       const result = await manager.replaceAllData(makeExportData())
 
@@ -600,7 +710,8 @@ describe('DatabaseServiceManager', () => {
 
     it('结构化恢复失败不会默认写入 console.warn/error', async () => {
       vi.spyOn(manager, 'forceCleanAllTables').mockResolvedValue()
-      mockAppSettingsService.updateSettingByKey.mockRejectedValueOnce(new Error('settings write failed'))
+      failRestoredStoreName = 'settings'
+      failRestoredStoreError = 'settings write failed'
 
       const result = await expectNoDefaultConsoleNoise(() => manager.replaceAllData(makeExportData()))
 

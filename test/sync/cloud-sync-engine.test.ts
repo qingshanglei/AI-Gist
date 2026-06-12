@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import {
   createCloudSyncDataChecksum,
+  createCloudSyncSemanticChecksum,
   createCloudSyncSnapshot,
   getCloudSyncRecordKey,
   mergeCloudSyncData,
@@ -60,6 +61,69 @@ describe('cloud sync engine', () => {
     expect(getCloudSyncRecordKey('prompts', localPrompt)).toBe('uuid:prompt-1')
     expect(result.hasConflicts).toBe(false)
     expect(result.data.prompts).toHaveLength(1)
+  })
+
+  it('treats re-imported local ids and embedded prompt variables as semantic equivalents', () => {
+    const firstDeviceData = {
+      categories: [
+        { id: 1, uuid: 'cat-1', name: 'Category', updatedAt: '2026-06-12T00:00:00.000Z' }
+      ],
+      prompts: [
+        {
+          id: 10,
+          uuid: 'prompt-1',
+          title: 'Prompt',
+          content: 'Hello',
+          categoryId: 1,
+          category: { id: 1, uuid: 'cat-1', name: 'Category' },
+          variables: [
+            { id: 100, uuid: 'var-1', promptId: 10, name: 'tone', updatedAt: '2026-06-12T00:00:00.000Z' }
+          ],
+          updatedAt: '2026-06-12T00:00:00.000Z'
+        }
+      ],
+      promptVariables: [
+        { id: 100, uuid: 'var-1', promptId: 10, name: 'tone', updatedAt: '2026-06-12T00:00:00.000Z' }
+      ],
+      promptHistories: [
+        { id: 1000, uuid: 'history-1', promptId: 10, promptUuid: 'prompt-1', content: 'History' }
+      ],
+      aiConfigs: [],
+      quickOptimizationConfigs: [],
+      aiHistory: [],
+      settings: [],
+      syncTombstones: []
+    }
+    const secondDeviceData = {
+      ...firstDeviceData,
+      categories: [
+        { ...firstDeviceData.categories[0], id: 501 }
+      ],
+      prompts: [
+        {
+          ...firstDeviceData.prompts[0],
+          id: 601,
+          categoryId: 501,
+          category: { ...firstDeviceData.prompts[0].category, id: 501 },
+          variables: [
+            { ...firstDeviceData.prompts[0].variables[0], id: 701, promptId: 601 }
+          ]
+        }
+      ],
+      promptVariables: [
+        { ...firstDeviceData.promptVariables[0], id: 701, promptId: 601 }
+      ],
+      promptHistories: [
+        { ...firstDeviceData.promptHistories[0], id: 801, promptId: 601 }
+      ]
+    }
+
+    expect(createCloudSyncDataChecksum(firstDeviceData)).not.toBe(
+      createCloudSyncDataChecksum(secondDeviceData)
+    )
+    expect(createCloudSyncSemanticChecksum(firstDeviceData)).toBe(
+      createCloudSyncSemanticChecksum(secondDeviceData)
+    )
   })
 
   it('fails instead of silently overwriting duplicate sync keys', () => {

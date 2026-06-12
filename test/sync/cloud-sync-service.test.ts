@@ -158,6 +158,87 @@ describe('CloudSyncService', () => {
     expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
   })
 
+  it('does not upload when a new device has only regenerated local numeric ids', async () => {
+    const remoteData = {
+      categories: [
+        { id: 1, uuid: 'cat-real', name: 'Real', updatedAt: '2026-06-12T00:00:00.000Z' }
+      ],
+      prompts: [
+        {
+          id: 10,
+          uuid: 'prompt-real',
+          title: 'Real prompt',
+          content: 'Hello {{tone}}',
+          categoryId: 1,
+          category: { id: 1, uuid: 'cat-real', name: 'Real' },
+          variables: [
+            { id: 100, uuid: 'var-real', promptId: 10, name: 'tone', updatedAt: '2026-06-12T00:00:00.000Z' }
+          ],
+          updatedAt: '2026-06-12T00:00:00.000Z'
+        }
+      ],
+      promptVariables: [
+        { id: 100, uuid: 'var-real', promptId: 10, name: 'tone', updatedAt: '2026-06-12T00:00:00.000Z' }
+      ],
+      promptHistories: [
+        { id: 1000, uuid: 'history-real', promptId: 10, promptUuid: 'prompt-real', content: 'History' }
+      ],
+      aiConfigs: [],
+      quickOptimizationConfigs: [],
+      aiHistory: [],
+      settings: [{ id: 1, key: 'theme', value: 'dark', type: 'string' }],
+      syncTombstones: []
+    }
+    const localData = {
+      ...remoteData,
+      categories: [
+        { ...remoteData.categories[0], id: 501 }
+      ],
+      prompts: [
+        {
+          ...remoteData.prompts[0],
+          id: 601,
+          categoryId: 501,
+          category: { ...remoteData.prompts[0].category, id: 501 },
+          variables: [
+            { ...remoteData.prompts[0].variables[0], id: 701, promptId: 601 }
+          ]
+        }
+      ],
+      promptVariables: [
+        { ...remoteData.promptVariables[0], id: 701, promptId: 601 }
+      ],
+      promptHistories: [
+        { ...remoteData.promptHistories[0], id: 801, promptId: 601 }
+      ],
+      settings: [{ id: 901, key: 'theme', value: 'dark', type: 'string' }]
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(remoteData, 'device-a', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-06-12T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot: remoteSnapshot
+    }
+    const { service, cloudClient, database } = createService(localData, manifest, {
+      createDeviceId: () => 'device-b'
+    })
+
+    const result = await service.syncNow('cfg-1', {
+      deviceName: 'Web Device',
+      platform: 'web',
+      reason: 'manual'
+    })
+
+    expect(result).toMatchObject({
+      success: true,
+      action: 'noop',
+      uploadedRemote: false,
+      appliedLocal: false
+    })
+    expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+  })
+
   it('writes the immutable snapshot before updating the manifest pointer', async () => {
     const storage = new MemoryStorage()
     let cloudManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')

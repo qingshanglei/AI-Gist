@@ -288,6 +288,73 @@ async function createWebBackendCloudSyncClient(config: any) {
   }
 }
 
+function simulateImportedLocalData(data: any, idBase: number): any {
+  const categoryIdMap = new Map<number, number>()
+  const promptIdMap = new Map<number, number>()
+
+  const categories = (data.categories || []).map((category: any, index: number) => {
+    const nextId = idBase + index + 1
+    if (typeof category.id === 'number') {
+      categoryIdMap.set(category.id, nextId)
+    }
+    return { ...category, id: nextId }
+  })
+
+  const prompts = (data.prompts || []).map((prompt: any, index: number) => {
+    const nextId = idBase + 100 + index + 1
+    if (typeof prompt.id === 'number') {
+      promptIdMap.set(prompt.id, nextId)
+    }
+    const nextCategoryId = typeof prompt.categoryId === 'number'
+      ? categoryIdMap.get(prompt.categoryId)
+      : undefined
+    return {
+      ...prompt,
+      id: nextId,
+      categoryId: nextCategoryId ?? prompt.categoryId,
+      category: prompt.category
+        ? {
+            ...prompt.category,
+            id: typeof prompt.category.id === 'number'
+              ? categoryIdMap.get(prompt.category.id) ?? prompt.category.id
+              : prompt.category.id
+          }
+        : prompt.category,
+      variables: Array.isArray(prompt.variables)
+        ? prompt.variables.map((variable: any, variableIndex: number) => ({
+            ...variable,
+            id: idBase + 400 + index * 100 + variableIndex + 1,
+            promptId: nextId
+          }))
+        : prompt.variables
+    }
+  })
+
+  const promptVariables = (data.promptVariables || []).map((variable: any, index: number) => ({
+    ...variable,
+    id: idBase + 500 + index + 1,
+    promptId: typeof variable.promptId === 'number'
+      ? promptIdMap.get(variable.promptId) ?? variable.promptId
+      : variable.promptId
+  }))
+
+  const promptHistories = (data.promptHistories || []).map((history: any, index: number) => ({
+    ...history,
+    id: idBase + 700 + index + 1,
+    promptId: typeof history.promptId === 'number'
+      ? promptIdMap.get(history.promptId) ?? history.promptId
+      : history.promptId
+  }))
+
+  return {
+    ...data,
+    categories,
+    prompts,
+    promptVariables,
+    promptHistories
+  }
+}
+
 // ---- 服务器配置 ----
 
 const PORT     = 18766
@@ -1280,6 +1347,8 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
             id: 1,
             uuid: 'cross-platform-prompt',
             title: 'Mobile prompt',
+            category: mockExportData.categories[0],
+            variables: mockExportData.promptVariables,
             imageBlobs: [imageDataUrl],
             updatedAt: '2026-06-12T00:00:00.000Z'
           }
@@ -1348,7 +1417,7 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
             data: webLocalData
           })),
           replaceAllData: vi.fn().mockImplementation(async (data: any) => {
-            webLocalData = data
+            webLocalData = simulateImportedLocalData(data, 1000)
             return { success: true, message: 'ok' }
           })
         }
@@ -1366,7 +1435,7 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
             data: desktopLocalData
           })),
           replaceAllData: vi.fn().mockImplementation(async (data: any) => {
-            desktopLocalData = data
+            desktopLocalData = simulateImportedLocalData(data, 2000)
             return { success: true, message: 'ok' }
           })
         }
@@ -1404,6 +1473,30 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
             })
           ])
         }))
+        expect(webLocalData.prompts).toEqual(expect.arrayContaining([
+          expect.objectContaining({
+            uuid: 'cross-platform-prompt',
+            id: 1101,
+            categoryId: 1001,
+            variables: expect.arrayContaining([
+              expect.objectContaining({
+                uuid: 'prompt-variable-1',
+                promptId: 1101
+              })
+            ])
+          })
+        ]))
+
+        const webNoopAfterImport = await webDevice.syncNow(storageId, {
+          deviceName: 'Web Device',
+          platform: 'web',
+          reason: 'manual'
+        })
+        expect(webNoopAfterImport).toMatchObject({
+          success: true,
+          action: 'noop',
+          uploadedRemote: false
+        })
 
         webLocalData = {
           ...webLocalData,

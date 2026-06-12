@@ -167,6 +167,29 @@ export function createCloudSyncDataChecksum(data: CloudSyncDataSet): string {
   return createStableChecksum(data);
 }
 
+export function createCloudSyncSemanticChecksum(data: CloudSyncDataSet): string {
+  const normalizedData = normalizeCloudSyncDataSet(data);
+  const comparableData: Record<string, any[]> = {};
+
+  for (const collection of getAllCollectionNames(normalizedData)) {
+    comparableData[collection] = (normalizedData[collection] || [])
+      .map(record => ({
+        key: getCloudSyncRecordKey(collection, record),
+        value: normalizeForCompare(collection, record)
+      }))
+      .sort((left, right) => {
+        const keyOrder = left.key.localeCompare(right.key);
+        if (keyOrder !== 0) {
+          return keyOrder;
+        }
+        return stableSerialize(left.value).localeCompare(stableSerialize(right.value));
+      })
+      .map(entry => entry.value);
+  }
+
+  return createStableChecksum(comparableData);
+}
+
 export function validateCloudSyncSnapshot(value: unknown): CloudSyncSnapshotValidationResult {
   if (!value || typeof value !== 'object') {
     return { valid: false, reason: 'snapshot must be an object' };
@@ -702,6 +725,10 @@ function fieldValuesEqual(collection: string, field: string, left: any, right: a
     return stableSerialize(normalizeTags(left)) === stableSerialize(normalizeTags(right));
   }
 
+  if (collection === 'prompts' && field === 'variables') {
+    return true;
+  }
+
   return stableSerialize(normalizeForCompare(collection, left)) ===
     stableSerialize(normalizeForCompare(collection, right));
 }
@@ -847,6 +874,10 @@ function normalizeForCompare(collection: string, value: any): any {
     }
 
     if (key === 'categoryId' && valueRecord.category?.uuid) {
+      continue;
+    }
+
+    if (collection === 'prompts' && key === 'variables') {
       continue;
     }
 
