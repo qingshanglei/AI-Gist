@@ -549,6 +549,160 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     expect(finalNoop).toMatchObject({ success: true, action: 'noop' })
   })
 
+  it('多端离线同时新增生成历史时会合并两边历史和 AI 记录', async () => {
+    const storageId = 'robust-parallel-offline-history-generations'
+    const client = createWebDAVSyncClient(storageId)
+    const deviceADatabase = new MutableSyncDatabase(createRealisticDataSet())
+    const deviceA = createSyncService(client, deviceADatabase, new MemoryStorage(), 'device-a')
+
+    const firstUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(firstUpload).toMatchObject({ success: true, action: 'uploaded' })
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'device-b')
+    expect(await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'downloaded' })
+
+    deviceADatabase.data = mutateDataSet(deviceADatabase.data, data => {
+      data.promptHistories!.push({
+        id: 81,
+        uuid: 'real-history-offline-laptop-a',
+        promptId: 31,
+        promptUuid: 'real-prompt-launch',
+        title: '发布计划提示词 - Laptop A 离线生成',
+        content: 'Laptop A 离线生成发布计划',
+        result: 'Offline generation from Laptop A',
+        version: 2,
+        imageBlobs: [INITIAL_IMAGE],
+        createdAt: '2026-06-13T14:10:00.000Z',
+        updatedAt: '2026-06-13T14:10:00.000Z'
+      })
+      data.aiHistory!.push({
+        id: 91,
+        uuid: 'real-ai-history-offline-laptop-a',
+        promptUuid: 'real-prompt-launch',
+        input: 'Laptop A 离线生成发布计划',
+        output: 'Offline generation from Laptop A',
+        provider: 'openai',
+        model: 'gpt-4.1',
+        createdAt: '2026-06-13T14:11:00.000Z',
+        updatedAt: '2026-06-13T14:11:00.000Z'
+      })
+    })
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.promptHistories!.push({
+        id: 82,
+        uuid: 'real-history-offline-phone-b',
+        promptId: 31,
+        promptUuid: 'real-prompt-launch',
+        title: '发布计划提示词 - Phone B 离线生成',
+        content: 'Phone B 离线生成发布计划',
+        result: 'Offline generation from Phone B',
+        version: 2,
+        imageBlobs: [UPDATED_IMAGE],
+        createdAt: '2026-06-13T14:12:00.000Z',
+        updatedAt: '2026-06-13T14:12:00.000Z'
+      })
+      data.aiHistory!.push({
+        id: 92,
+        uuid: 'real-ai-history-offline-phone-b',
+        promptUuid: 'real-prompt-launch',
+        input: 'Phone B 离线生成发布计划',
+        output: 'Offline generation from Phone B',
+        provider: 'openai',
+        model: 'gpt-4.1',
+        createdAt: '2026-06-13T14:13:00.000Z',
+        updatedAt: '2026-06-13T14:13:00.000Z'
+      })
+    })
+
+    expect(await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'uploaded' })
+
+    const merged = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(merged, JSON.stringify(merged, null, 2)).toMatchObject({
+      success: true,
+      action: 'merged',
+      appliedLocal: true,
+      uploadedRemote: true,
+      conflicts: []
+    })
+    expect(deviceADatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'real-history-offline-laptop-a', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'real-history-offline-phone-b', imageBlobs: [UPDATED_IMAGE] })
+    ]))
+    expect(deviceADatabase.data.aiHistory).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-ai-history-initial',
+        output: '初始发布计划结果'
+      }),
+      expect.objectContaining({
+        uuid: 'real-ai-history-offline-laptop-a',
+        output: 'Offline generation from Laptop A'
+      }),
+      expect.objectContaining({
+        uuid: 'real-ai-history-offline-phone-b',
+        output: 'Offline generation from Phone B'
+      })
+    ]))
+
+    const manifest = await client.getCloudSyncManifest(storageId)
+    expect(manifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'real-history-offline-laptop-a', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'real-history-offline-phone-b', imageBlobs: [UPDATED_IMAGE] })
+    ]))
+    expect(manifest.latestSnapshot?.data.aiHistory).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-ai-history-initial' }),
+      expect.objectContaining({ uuid: 'real-ai-history-offline-laptop-a' }),
+      expect.objectContaining({ uuid: 'real-ai-history-offline-phone-b' })
+    ]))
+    expect(manifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(manifest.latestSnapshot!.data))
+
+    const deviceCDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceC = createSyncService(client, deviceCDatabase, new MemoryStorage(), 'device-c')
+    expect(await deviceC.syncNow(storageId, {
+      deviceName: 'Desktop C',
+      platform: 'electron',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'downloaded' })
+    expect(deviceCDatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'real-history-offline-laptop-a', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'real-history-offline-phone-b', imageBlobs: [UPDATED_IMAGE] })
+    ]))
+    expect(deviceCDatabase.data.aiHistory).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-ai-history-initial' }),
+      expect.objectContaining({ uuid: 'real-ai-history-offline-laptop-a' }),
+      expect.objectContaining({ uuid: 'real-ai-history-offline-phone-b' })
+    ]))
+
+    const snapshotsBeforeRepeatedClick = await client.listCloudSyncSnapshots(storageId)
+    const finalNoop = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(finalNoop).toMatchObject({ success: true, action: 'noop' })
+    expect(await client.listCloudSyncSnapshots(storageId)).toHaveLength(snapshotsBeforeRepeatedClick.length)
+  })
+
   it('新设备离线先创建数据后首次连接云端会合并两边且不丢图片历史', async () => {
     const storageId = 'robust-new-device-offline-create-first-sync'
     const client = createWebDAVSyncClient(storageId)
