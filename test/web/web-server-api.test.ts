@@ -200,6 +200,113 @@ describe('web server API handler', () => {
     expect(snapshotFile.kind).toBe('ai-gist-cloud-sync-snapshot')
     expect(snapshotFile.snapshot.data.prompts[0].imageBlobs).toEqual([WEB_IMAGE])
   })
+
+  it('uses the newer backup manifest in the WebDAV proxy before accepting writes', async () => {
+    webdavServer = new TestWebDAVServer({
+      port: 18769,
+      username: 'testuser',
+      password: 'testpass'
+    })
+    await webdavServer.start()
+    server = http.createServer(createWebRequestHandler({ serveStaticFiles: false }))
+    await new Promise<void>(resolve => server!.listen(0, '127.0.0.1', () => resolve()))
+    const address = server.address() as AddressInfo
+    const apiBaseUrl = `http://127.0.0.1:${address.port}`
+    const storageDir = path.join(webdavServer.rootDir, 'web-proxy-newer-backup')
+    const backupDir = path.join(storageDir, 'AI-Gist-Backup')
+    const config = {
+      id: 'web-proxy-newer-backup',
+      name: 'Web Proxy Newer Backup',
+      type: 'webdav',
+      url: `${webdavServer.baseUrl}/web-proxy-newer-backup`,
+      username: 'testuser',
+      password: 'testpass',
+      createdAt: '2026-06-13T21:00:00.000Z',
+      updatedAt: '2026-06-13T21:00:00.000Z'
+    }
+    const oldData = createWebSyncDataSet({
+      promptTitle: 'Web 端主 manifest 旧标题',
+      settingValue: 'old-primary'
+    })
+    const newerData = createWebSyncDataSet({
+      promptTitle: 'Web 端备份 manifest 较新标题',
+      settingValue: 'newer-backup'
+    })
+    const stalePrimarySnapshot = createCloudSyncSnapshot(oldData, 'web-device-a', 'web-proxy-primary-old')
+    const newerBackupSnapshot = {
+      ...createCloudSyncSnapshot(newerData, 'web-device-b', 'web-proxy-backup-newer'),
+      createdAt: '2026-06-13T21:10:00.000Z'
+    }
+    const stalePrimaryManifest = createWebManifest(stalePrimarySnapshot, {
+      updatedAt: '2026-06-13T21:00:00.000Z',
+      deviceId: 'web-device-a'
+    })
+    const newerBackupManifest = createWebManifest(newerBackupSnapshot, {
+      updatedAt: '2026-06-13T20:55:00.000Z',
+      deviceId: 'web-device-b'
+    })
+
+    await fsp.mkdir(backupDir, { recursive: true })
+    await fsp.writeFile(
+      path.join(backupDir, 'sync-manifest.json'),
+      JSON.stringify(stalePrimaryManifest, null, 2),
+      'utf-8'
+    )
+    await fsp.writeFile(
+      path.join(backupDir, 'sync-manifest.backup.json'),
+      JSON.stringify(newerBackupManifest, null, 2),
+      'utf-8'
+    )
+
+    const loadedManifest = await postApi(apiBaseUrl, '/api/cloud/webdav/get-sync-manifest', { config })
+    expect(loadedManifest.status).toBe(200)
+    expect(loadedManifest.payload.data.latestSnapshot).toMatchObject({
+      revision: newerBackupSnapshot.revision,
+      dataChecksum: createCloudSyncDataChecksum(newerData)
+    })
+    expect(loadedManifest.payload.data.latestSnapshot.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        title: 'Web 端备份 manifest 较新标题'
+      })
+    ]))
+    expect(loadedManifest.payload.data.latestSnapshot.data.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: 'theme',
+        value: 'newer-backup'
+      })
+    ]))
+
+    const attemptedOverwrite = await postApi(apiBaseUrl, '/api/cloud/webdav/save-sync-manifest', {
+      config,
+      manifest: createWebManifest(
+        createCloudSyncSnapshot(createWebSyncDataSet({
+          promptTitle: '错误覆盖旧主 manifest',
+          settingValue: 'bad-overwrite'
+        }), 'web-device-a', 'web-proxy-bad-overwrite'),
+        {
+          updatedAt: '2026-06-13T21:11:00.000Z',
+          deviceId: 'web-device-a'
+        }
+      ),
+      options: { expectedRevision: stalePrimarySnapshot.revision }
+    })
+    expect(attemptedOverwrite.status).toBe(500)
+    expect(attemptedOverwrite.payload).toMatchObject({
+      success: false
+    })
+    expect(attemptedOverwrite.payload.error).toContain('web-proxy-backup-newer')
+
+    const primaryAfterRejectedWrite = JSON.parse(await fsp.readFile(
+      path.join(backupDir, 'sync-manifest.json'),
+      'utf-8'
+    ))
+    const backupAfterRejectedWrite = JSON.parse(await fsp.readFile(
+      path.join(backupDir, 'sync-manifest.backup.json'),
+      'utf-8'
+    ))
+    expect(primaryAfterRejectedWrite.latestSnapshot.revision).toBe(stalePrimarySnapshot.revision)
+    expect(backupAfterRejectedWrite.latestSnapshot.revision).toBe(newerBackupSnapshot.revision)
+  })
 })
 
 const WEB_IMAGE = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAADUlEQVR42mP8z8BQDwAFgwJ/lZ2nNwAAAABJRU5ErkJggg=='
@@ -218,7 +325,33 @@ async function postApi(apiBaseUrl: string, pathname: string, body: unknown) {
   }
 }
 
-function createWebSyncDataSet(): CloudSyncDataSet {
+function createWebManifest(
+  snapshot: ReturnType<typeof createCloudSyncSnapshot>,
+  options: { updatedAt: string; deviceId: string }
+) {
+  return {
+    kind: 'ai-gist-cloud-sync-manifest',
+    schemaVersion: 1,
+    updatedAt: options.updatedAt,
+    latestSnapshot: snapshot,
+    baseSnapshot: snapshot,
+    devices: {
+      [options.deviceId]: {
+        deviceId: options.deviceId,
+        deviceName: 'Web Browser',
+        platform: 'web',
+        lastSyncAt: options.updatedAt,
+        lastKnownRevision: snapshot.revision
+      }
+    },
+    conflicts: []
+  }
+}
+
+function createWebSyncDataSet(input: {
+  promptTitle?: string
+  settingValue?: string
+} = {}): CloudSyncDataSet {
   return {
     categories: [{
       id: 1,
@@ -232,7 +365,7 @@ function createWebSyncDataSet(): CloudSyncDataSet {
     prompts: [{
       id: 10,
       uuid: 'web-prompt-main',
-      title: 'Web 端代理同步提示词',
+      title: input.promptTitle || 'Web 端代理同步提示词',
       content: '请用 {{topic}} 生成网页端同步验证内容',
       categoryId: 1,
       categoryUuid: 'web-category-main',
@@ -285,7 +418,7 @@ function createWebSyncDataSet(): CloudSyncDataSet {
     }],
     settings: [{
       key: 'theme',
-      value: 'dark',
+      value: input.settingValue || 'dark',
       type: 'string',
       updatedAt: '2026-06-13T20:00:00.000Z'
     }],

@@ -596,13 +596,12 @@ async function getWebDAVSyncManifest({ config }) {
   const manifestPath = normalizeRemotePath(CLOUD_BACKUP_DIR, CLOUD_SYNC_MANIFEST_FILE);
   const backupPath = normalizeRemotePath(CLOUD_BACKUP_DIR, CLOUD_SYNC_MANIFEST_BACKUP_FILE);
   try {
-    if (await client.exists(manifestPath)) {
-      return (await readWebDAVSyncManifestFileWithMeta(client, manifestPath)).manifest;
-    }
-    if (await client.exists(backupPath)) {
-      return (await readWebDAVSyncManifestFileWithMeta(client, backupPath)).manifest;
-    }
-    return createEmptyCloudSyncManifest();
+    const primaryState = await tryReadWebDAVSyncManifestFileWithMeta(client, manifestPath);
+    const backupState = await tryReadWebDAVSyncManifestFileWithMeta(client, backupPath);
+    return selectNewestWebDAVSyncManifest(
+      primaryState?.manifest,
+      backupState?.manifest
+    ) || createEmptyCloudSyncManifest();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     if (message.includes('404') || message.includes('not found')) {
@@ -654,11 +653,8 @@ async function saveWebDAVSyncManifest({ config, manifest, options = {} }) {
   const content = JSON.stringify(normalizedManifest, null, 2);
 
   const primaryState = await tryReadWebDAVSyncManifestFileWithMeta(client, manifestPath);
-  let currentManifest = primaryState?.manifest;
-  if (!currentManifest) {
-    const backupState = await tryReadWebDAVSyncManifestFileWithMeta(client, backupPath);
-    currentManifest = backupState?.manifest;
-  }
+  const backupState = await tryReadWebDAVSyncManifestFileWithMeta(client, backupPath);
+  let currentManifest = selectNewestWebDAVSyncManifest(primaryState?.manifest, backupState?.manifest);
   currentManifest = currentManifest || createEmptyCloudSyncManifest();
 
   assertExpectedCloudSyncRevision(currentManifest, options.expectedRevision);
@@ -787,6 +783,38 @@ async function tryReadWebDAVSyncManifestFileWithMeta(client, remotePath) {
 
 function getCloudSyncManifestRevision(manifest) {
   return manifest?.latestSnapshot?.revision || null;
+}
+
+function selectNewestWebDAVSyncManifest(primaryManifest, backupManifest) {
+  if (!primaryManifest) {
+    return backupManifest || null;
+  }
+
+  if (!backupManifest) {
+    return primaryManifest;
+  }
+
+  return getWebDAVSyncManifestTime(backupManifest) > getWebDAVSyncManifestTime(primaryManifest)
+    ? backupManifest
+    : primaryManifest;
+}
+
+function getWebDAVSyncManifestTime(manifest) {
+  const candidates = [
+    manifest.updatedAt,
+    manifest.latestSnapshot?.createdAt,
+    manifest.baseSnapshot?.createdAt
+  ];
+
+  let newestTime = 0;
+  for (const candidate of candidates) {
+    const time = new Date(candidate || '').getTime();
+    if (!Number.isNaN(time)) {
+      newestTime = Math.max(newestTime, time);
+    }
+  }
+
+  return newestTime;
 }
 
 function assertExpectedCloudSyncRevision(manifest, expectedRevision) {
