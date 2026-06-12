@@ -507,6 +507,121 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
       expect.objectContaining({ key: 'theme', value: 'remote-light' })
     ]))
   })
+
+  it('自动同步遇到临时服务端错误后会自动重试并成功上传', async () => {
+    const storageId = 'robust-auto-retry-after-server-error'
+    let firstRead = true
+    const client = createWebDAVSyncClient(storageId, {
+      getCloudSyncManifest: async () => {
+        if (firstRead) {
+          firstRead = false
+          throw new Error('HTTP 503 simulated transient manifest read failure')
+        }
+
+        return createWebDAVSyncClient(storageId).getCloudSyncManifest(storageId)
+      }
+    })
+    const database = new MutableSyncDatabase(createDataSet({
+      promptTitle: 'Auto retry prompt',
+      settingValue: 'auto'
+    }))
+    const storage = new MemoryStorage()
+    const service = createSyncService(client, database, storage, 'device-auto-retry')
+
+    service.startAutoSync({
+      enabled: true,
+      storageIds: [storageId],
+      debounceMs: 0,
+      retryMs: 10,
+      pollIntervalMs: 0,
+      startupDelayMs: 0,
+      syncOnStart: false
+    })
+
+    try {
+      service.scheduleSync('local-change', { storageId, delayMs: 0 })
+
+      await waitForCondition(() => {
+        const status = service.getStatus()
+        return status.status === 'error' &&
+          status.pending &&
+          status.failureCount === 1 &&
+          status.error?.includes('HTTP 503')
+      })
+
+      await waitForCondition(() => {
+        const status = service.getStatus()
+        return status.status === 'success' &&
+          !status.pending &&
+          status.lastResult?.success === true &&
+          status.lastResult.action === 'uploaded'
+      })
+
+      const manifest = await createWebDAVSyncClient(storageId).getCloudSyncManifest(storageId)
+      expect(manifest.latestSnapshot?.deviceId).toBe('device-auto-retry')
+      expect(manifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+        expect.objectContaining({ uuid: 'prompt-main', title: 'Auto retry prompt' })
+      ]))
+      expect(service.getStatus().failureCount).toBe(0)
+      expect(service.getStatus().error).toBeUndefined()
+    } finally {
+      service.stopAutoSync()
+    }
+  })
+
+  it('远端快照文件局部损坏时仍能使用 manifest 内联快照继续同步', async () => {
+    const storageId = 'robust-corrupt-snapshot-file-uses-manifest'
+    const client = createWebDAVSyncClient(storageId)
+    const deviceADatabase = new MutableSyncDatabase(createDataSet({
+      promptTitle: 'Snapshot file corruption base'
+    }))
+    const deviceAStorage = new MemoryStorage()
+    const deviceA = createSyncService(client, deviceADatabase, deviceAStorage, 'device-a')
+
+    const initial = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(initial).toMatchObject({ success: true, action: 'uploaded' })
+
+    const manifestBeforeCorruption = await client.getCloudSyncManifest(storageId)
+    expect(manifestBeforeCorruption.latestSnapshot?.revision).toBe(initial.remoteRevision)
+    await corruptRemoteFile(storageId, getCloudSyncSnapshotPath(initial.remoteRevision!), '{"kind":')
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'device-b')
+    const download = await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(download, JSON.stringify(download, null, 2))
+      .toMatchObject({ success: true, action: 'downloaded' })
+    expect(deviceBDatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'prompt-main', title: 'Snapshot file corruption base' })
+    ]))
+
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.prompts![0].title = 'Snapshot file corruption recovered'
+      data.prompts![0].updatedAt = '2026-06-13T13:00:00.000Z'
+    })
+    const uploaded = await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(uploaded, JSON.stringify(uploaded, null, 2))
+      .toMatchObject({ success: true, action: 'uploaded' })
+
+    const manifest = await client.getCloudSyncManifest(storageId)
+    expect(manifest.latestSnapshot?.revision).toBe(uploaded.remoteRevision)
+    expect(manifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'prompt-main', title: 'Snapshot file corruption recovered' })
+    ]))
+    expect(manifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(manifest.latestSnapshot!.data))
+  })
 })
 
 function createSyncService(
@@ -807,4 +922,34 @@ function mutateDataSet(data: CloudSyncDataSet, mutate: (data: CloudSyncDataSet) 
 
 function cloneData<T>(data: T): T {
   return JSON.parse(JSON.stringify(data))
+}
+
+async function waitForCondition(
+  predicate: () => boolean,
+  timeoutMs = 1000,
+  intervalMs = 10
+): Promise<void> {
+  const start = Date.now()
+  while (Date.now() - start < timeoutMs) {
+    if (predicate()) {
+      return
+    }
+    await new Promise(resolve => setTimeout(resolve, intervalMs))
+  }
+  throw new Error('Timed out waiting for condition')
+}
+
+async function corruptRemoteFile(storageId: string, cloudPath: string, content: string): Promise<void> {
+  const provider = new WebDAVProvider({
+    id: `${storageId}-corruptor`,
+    name: `WebDAV corruptor ${storageId}`,
+    type: 'webdav',
+    enabled: true,
+    url: `${server.baseUrl}/${storageId}`,
+    username: USERNAME,
+    password: PASSWORD,
+    createdAt: '2026-06-13T00:00:00.000Z',
+    updatedAt: '2026-06-13T00:00:00.000Z'
+  })
+  await provider.writeFile(cloudPath, Buffer.from(content, 'utf-8'))
 }
