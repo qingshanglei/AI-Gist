@@ -368,6 +368,139 @@ describe('Cloud sync robustness E2E over iCloud Drive local provider', () => {
     expect(repeatedClick).toMatchObject({ success: true, action: 'noop' })
     expect(await normalClient.listCloudSyncSnapshots(storageId)).toHaveLength(1)
   })
+
+  it('iCloud Drive manifest 可读时不会把残留孤立 snapshot 当作最新数据', async () => {
+    const storageId = 'icloud-readable-manifest-ignores-loose-snapshot'
+    const client = createICloudSyncClient(storageId)
+    const deviceADatabase = new MutableSyncDatabase(createRealisticDataSet())
+    const deviceA = createSyncService(client, deviceADatabase, new MemoryStorage(), 'icloud-device-a')
+
+    const uploaded = await deviceA.syncNow(storageId, {
+      deviceName: 'MacBook A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(uploaded).toMatchObject({ success: true, action: 'uploaded' })
+
+    const manifestBeforeLooseSnapshot = await client.getCloudSyncManifest(storageId)
+    expect(manifestBeforeLooseSnapshot.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'icloud-prompt-launch',
+        title: 'iCloud 发布计划提示词',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+
+    const looseData = mutateDataSet(manifestBeforeLooseSnapshot.latestSnapshot!.data, data => {
+      data.prompts![0].title = 'iCloud 孤立快照里的过期标题不应生效'
+      data.prompts![0].imageBlobs = []
+      data.prompts![0].updatedAt = '2026-06-13T19:30:00.000Z'
+      data.settings = [{
+        key: 'theme',
+        value: 'stale-from-icloud-loose-snapshot',
+        type: 'string',
+        updatedAt: '2026-06-13T19:30:00.000Z'
+      }]
+    })
+    const looseSnapshot = {
+      ...createCloudSyncSnapshot(looseData, 'icloud-abandoned-device', 'icloud-loose-snapshot-should-not-win'),
+      createdAt: '2026-06-13T19:30:00.000Z'
+    }
+    const looseSnapshotPath = getFakeICloudFilePath(storageId, getCloudSyncSnapshotPath(looseSnapshot.revision))
+    await fsp.mkdir(path.dirname(looseSnapshotPath), { recursive: true })
+    await fsp.writeFile(
+      looseSnapshotPath,
+      JSON.stringify(createCloudSyncSnapshotFile(looseSnapshot), null, 2),
+      'utf-8'
+    )
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'icloud-device-b')
+    const downloaded = await deviceB.syncNow(storageId, {
+      deviceName: 'MacBook B',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(downloaded).toMatchObject({ success: true, action: 'downloaded' })
+    expect(deviceBDatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'icloud-prompt-launch',
+        title: 'iCloud 发布计划提示词',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(deviceBDatabase.data.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'theme', value: 'dark' })
+    ]))
+    expect(deviceBDatabase.data.settings).not.toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'theme', value: 'stale-from-icloud-loose-snapshot' })
+    ]))
+
+    const manifestAfterDownload = await client.getCloudSyncManifest(storageId)
+    expect(manifestAfterDownload.latestSnapshot?.revision)
+      .toBe(manifestBeforeLooseSnapshot.latestSnapshot?.revision)
+    expect(manifestAfterDownload.latestSnapshot?.revision)
+      .not.toBe('icloud-loose-snapshot-should-not-win')
+
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.prompts![0].title = 'iCloud 可信 manifest 基础上的后续编辑'
+      data.prompts![0].imageBlobs = [INITIAL_IMAGE, UPDATED_IMAGE]
+      data.prompts![0].updatedAt = '2026-06-13T19:40:00.000Z'
+      data.promptHistories!.push({
+        id: 188,
+        uuid: 'icloud-history-after-loose-snapshot',
+        promptId: 131,
+        promptUuid: 'icloud-prompt-launch',
+        title: 'iCloud 可信 manifest 基础上的后续编辑',
+        content: '孤立快照未污染后继续生成',
+        result: 'Follow-up from trusted iCloud manifest',
+        version: 2,
+        imageBlobs: [UPDATED_IMAGE],
+        createdAt: '2026-06-13T19:41:00.000Z',
+        updatedAt: '2026-06-13T19:41:00.000Z'
+      })
+      data.settings = [{
+        key: 'theme',
+        value: 'trusted-after-icloud-loose-snapshot',
+        type: 'string',
+        updatedAt: '2026-06-13T19:40:00.000Z'
+      }]
+    })
+
+    const followUpUpload = await deviceB.syncNow(storageId, {
+      deviceName: 'MacBook B',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(followUpUpload, JSON.stringify(followUpUpload, null, 2))
+      .toMatchObject({ success: true, action: 'uploaded' })
+
+    const finalManifest = await client.getCloudSyncManifest(storageId)
+    expect(finalManifest.latestSnapshot?.revision).toBe(followUpUpload.remoteRevision)
+    expect(finalManifest.latestSnapshot?.revision).not.toBe('icloud-loose-snapshot-should-not-win')
+    expect(finalManifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'icloud-prompt-launch',
+        title: 'iCloud 可信 manifest 基础上的后续编辑',
+        imageBlobs: [INITIAL_IMAGE, UPDATED_IMAGE]
+      })
+    ]))
+    expect(finalManifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'icloud-history-after-loose-snapshot',
+        imageBlobs: [UPDATED_IMAGE]
+      })
+    ]))
+    expect(finalManifest.latestSnapshot?.data.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        key: 'theme',
+        value: 'trusted-after-icloud-loose-snapshot'
+      })
+    ]))
+    expect(finalManifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(finalManifest.latestSnapshot!.data))
+    expect(await client.listCloudSyncSnapshots(storageId)).toHaveLength(3)
+  })
 })
 
 function createSyncService(
