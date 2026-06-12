@@ -1696,6 +1696,129 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     expect(finalNoop).toMatchObject({ success: true, action: 'noop' })
   })
 
+  it('主 manifest 可读但落后备份时会选择较新备份并修复主文件', async () => {
+    const storageId = 'robust-primary-manifest-stale-backup-newer'
+    const client = createWebDAVSyncClient(storageId)
+    const deviceADatabase = new MutableSyncDatabase(createRealisticDataSet())
+    const deviceA = createSyncService(client, deviceADatabase, new MemoryStorage(), 'device-a')
+
+    const firstUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(firstUpload).toMatchObject({ success: true, action: 'uploaded' })
+    const stalePrimaryManifest = await client.getCloudSyncManifest(storageId)
+
+    await new Promise(resolve => setTimeout(resolve, 20))
+    deviceADatabase.data = mutateDataSet(deviceADatabase.data, data => {
+      data.prompts![0].title = '较新备份 manifest 中的标题'
+      data.prompts![0].imageBlobs = [INITIAL_IMAGE, UPDATED_IMAGE]
+      data.prompts![0].updatedAt = '2026-06-13T23:30:00.000Z'
+      data.promptHistories!.push({
+        id: 74,
+        uuid: 'real-history-newer-backup-manifest',
+        promptId: 31,
+        promptUuid: 'real-prompt-launch',
+        title: '较新备份 manifest 中的标题',
+        content: 'primary manifest 回滚后 backup 仍然较新',
+        result: 'Newer data from backup manifest',
+        version: 2,
+        imageBlobs: [UPDATED_IMAGE],
+        createdAt: '2026-06-13T23:31:00.000Z',
+        updatedAt: '2026-06-13T23:31:00.000Z'
+      })
+      data.settings = [{
+        key: 'theme',
+        value: 'backup-newer-theme',
+        type: 'string',
+        updatedAt: '2026-06-13T23:32:00.000Z'
+      }]
+    })
+    const newerUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(newerUpload).toMatchObject({ success: true, action: 'uploaded' })
+    const newerBackupManifest = await client.getCloudSyncManifest(storageId)
+    expect(newerBackupManifest.latestSnapshot?.revision).toBe(newerUpload.remoteRevision)
+
+    await corruptRemoteFile(
+      storageId,
+      getCloudSyncManifestPath(),
+      JSON.stringify(assertValidCloudSyncManifest(stalePrimaryManifest), null, 2)
+    )
+    expect((await readRemoteManifestFile(storageId, getCloudSyncManifestPath())).latestSnapshot?.revision)
+      .toBe(firstUpload.remoteRevision)
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'device-b')
+    const download = await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })
+
+    expect(download, JSON.stringify(download, null, 2))
+      .toMatchObject({ success: true, action: 'downloaded' })
+    expect(download.remoteRevision).toBe(newerUpload.remoteRevision)
+    expect(deviceBDatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '较新备份 manifest 中的标题',
+        imageBlobs: [INITIAL_IMAGE, UPDATED_IMAGE]
+      })
+    ]))
+    expect(deviceBDatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({
+        uuid: 'real-history-newer-backup-manifest',
+        imageBlobs: [UPDATED_IMAGE]
+      })
+    ]))
+    expect(deviceBDatabase.data.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'theme', value: 'backup-newer-theme' })
+    ]))
+
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.categories![0].name = '读取较新备份后的后续分类更新'
+      data.categories![0].updatedAt = '2026-06-13T23:33:00.000Z'
+    })
+    const repairedUpload = await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(repairedUpload, JSON.stringify(repairedUpload, null, 2))
+      .toMatchObject({ success: true, action: 'uploaded' })
+
+    const repairedPrimaryManifest = await readRemoteManifestFile(storageId, getCloudSyncManifestPath())
+    expect(repairedPrimaryManifest.latestSnapshot?.revision).toBe(repairedUpload.remoteRevision)
+    expect(repairedPrimaryManifest.latestSnapshot?.data.categories).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-category-product',
+        name: '读取较新备份后的后续分类更新'
+      })
+    ]))
+    expect(repairedPrimaryManifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '较新备份 manifest 中的标题',
+        imageBlobs: [INITIAL_IMAGE, UPDATED_IMAGE]
+      })
+    ]))
+    expect(repairedPrimaryManifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(repairedPrimaryManifest.latestSnapshot!.data))
+
+    const finalNoop = await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(finalNoop).toMatchObject({ success: true, action: 'noop' })
+  })
+
   it('manifest 可读时不会把残留的孤立快照误提升为云端最新数据', async () => {
     const storageId = 'robust-readable-manifest-ignores-loose-snapshot'
     const client = createWebDAVSyncClient(storageId)
