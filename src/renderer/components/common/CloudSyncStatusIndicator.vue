@@ -12,6 +12,10 @@ const status = ref<CloudSyncStatus>(cloudSyncService.getStatus());
 const tooltipVisible = ref(false);
 let unsubscribe: (() => void) | null = null;
 
+const emit = defineEmits<{
+  activate: [];
+}>();
+
 const conflictLogCount = computed(() => status.value.conflictLogCount ?? 0);
 const hasConflictLog = computed(() => conflictLogCount.value > 0);
 
@@ -79,7 +83,7 @@ const lastSyncText = computed(() => {
   return `最近同步 ${formatDateTime(status.value.lastSyncAt)}`;
 });
 
-const ariaLabel = computed(() => `${primaryText.value}，${detailText.value}`);
+const ariaLabel = computed(() => `${primaryText.value}，${detailText.value}。点击打开云备份设置`);
 
 const showTooltip = () => {
   tooltipVisible.value = true;
@@ -87,6 +91,10 @@ const showTooltip = () => {
 
 const hideTooltip = () => {
   tooltipVisible.value = false;
+};
+
+const handleActivate = () => {
+  emit('activate');
 };
 
 const formatDateTime = (dateString: string): string => {
@@ -124,6 +132,7 @@ onUnmounted(() => {
       :class="`is-${visualState}`"
       type="button"
       :aria-label="ariaLabel"
+      @click="handleActivate"
       @focus="showTooltip"
       @blur="hideTooltip"
     >
@@ -149,61 +158,55 @@ onUnmounted(() => {
 
 <style scoped>
 .cloud-sync-indicator {
-  position: fixed;
-  right: 18px;
-  bottom: 18px;
-  z-index: 3000;
+  position: relative;
+  z-index: 20;
+  display: inline-flex;
+  height: 100%;
+  align-items: center;
 }
 
 .cloud-sync-button {
   display: grid;
-  width: 42px;
-  height: 42px;
+  width: 24px;
+  height: 22px;
   place-items: center;
-  color: #3f4652;
-  background: rgb(255 255 255 / 94%);
-  border: 1px solid rgb(31 41 55 / 14%);
-  border-radius: 50%;
-  box-shadow: 0 8px 24px rgb(15 23 42 / 16%);
-  cursor: default;
-  transition: transform 160ms ease, box-shadow 160ms ease, color 160ms ease, border-color 160ms ease;
+  color: #5f6368;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: color 160ms ease, background-color 160ms ease;
 }
 
 .cloud-sync-button:hover,
 .cloud-sync-button:focus-visible {
-  transform: translateY(-1px);
-  box-shadow: 0 12px 28px rgb(15 23 42 / 20%);
+  background: rgb(15 23 42 / 8%);
   outline: none;
 }
 
 .cloud-sync-button.is-success {
   color: #12845f;
-  border-color: rgb(18 132 95 / 26%);
 }
 
 .cloud-sync-button.is-scheduled {
   color: #3267b1;
-  border-color: rgb(50 103 177 / 26%);
 }
 
 .cloud-sync-button.is-syncing {
   color: #7b5c00;
-  border-color: rgb(123 92 0 / 26%);
 }
 
 .cloud-sync-button.is-error {
   color: #c23934;
-  border-color: rgb(194 57 52 / 34%);
 }
 
 .cloud-sync-button.is-attention {
   color: #9a6700;
-  border-color: rgb(154 103 0 / 30%);
 }
 
 .cloud-sync-icon {
-  width: 22px;
-  height: 22px;
+  width: 15px;
+  height: 15px;
 }
 
 .cloud-sync-icon.is-spinning {
@@ -213,7 +216,7 @@ onUnmounted(() => {
 .cloud-sync-tooltip {
   position: absolute;
   right: 0;
-  bottom: 50px;
+  bottom: calc(100% + 8px);
   display: flex;
   width: max-content;
   max-width: min(320px, calc(100vw - 32px));
@@ -225,8 +228,9 @@ onUnmounted(() => {
   line-height: 1.45;
   overflow-wrap: anywhere;
   background: rgb(17 24 39 / 94%);
-  border-radius: 8px;
+  border-radius: 6px;
   box-shadow: 0 12px 30px rgb(15 23 42 / 22%);
+  pointer-events: none;
 }
 
 .cloud-sync-tooltip strong {
@@ -244,10 +248,14 @@ onUnmounted(() => {
   }
 }
 
-@media (max-width: 768px) {
-  .cloud-sync-indicator {
-    right: 16px;
-    bottom: calc(env(safe-area-inset-bottom, 0px) + 146px);
+@media (prefers-color-scheme: dark) {
+  .cloud-sync-button {
+    color: #c5c8d0;
+  }
+
+  .cloud-sync-button:hover,
+  .cloud-sync-button:focus-visible {
+    background: rgb(255 255 255 / 12%);
   }
 }
 </style>

@@ -25,7 +25,6 @@ import AppInitializer from '~/components/common/AppInitializer.vue'
 import I18nErrorBanner from '~/components/common/I18nErrorBanner.vue'
 import ShortcutListener from '~/components/common/ShortcutListener.vue'
 import NotificationHandler from '~/components/common/NotificationHandler.vue'
-import CloudSyncStatusIndicator from '~/components/common/CloudSyncStatusIndicator.vue'
 import MobileBackButtonHandler from '~/components/mobile/MobileBackButtonHandler.vue'
 
 // 检测运行壳：Web 桌面浏览器使用桌面壳，Web 手机浏览器和原生移动端使用移动壳
@@ -97,7 +96,6 @@ onMounted(async () => {
                     <!-- 通知处理器 -->
                     <NotificationHandler />
                     <MainPage />
-                    <CloudSyncStatusIndicator />
                 </AppInitializer>
             </NDialogProvider>
         </NMessageProvider>
@@ -107,6 +105,5 @@ onMounted(async () => {
     <ion-app v-else>
         <MobileBackButtonHandler v-if="isNativeMobile" />
         <ion-router-outlet />
-        <CloudSyncStatusIndicator />
     </ion-app>
 </template>

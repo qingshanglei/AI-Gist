@@ -7,7 +7,7 @@
 
       <!-- 右侧：状态指示器组 -->
       <NFlex class="status-bar-right" align="center" gap="8px">
-        <!-- 未来可以在这里添加其他指示器 -->
+        <CloudSyncStatusIndicator @activate="handleOpenSettings('cloud-backup')" />
       </NFlex>
     </NFlex>
   </div>
@@ -15,6 +15,7 @@
 
 <script setup lang="ts">
 import { NFlex } from 'naive-ui'
+import CloudSyncStatusIndicator from '~/components/common/CloudSyncStatusIndicator.vue'
 
 const emit = defineEmits<{
   openSettings: [targetSection?: string];
@@ -30,7 +31,7 @@ const handleOpenSettings = (targetSection?: string) => {
   height: 100%;
   background-color: var(--n-color);
   font-size: 12px;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .status-bar-content {
@@ -39,7 +40,7 @@ const handleOpenSettings = (targetSection?: string) => {
   display: flex;
   justify-content: space-between;
   align-items: center;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .status-bar-left {
@@ -53,6 +54,6 @@ const handleOpenSettings = (targetSection?: string) => {
   display: flex;
   align-items: center;
   height: 100%;
-  overflow: hidden;
+  overflow: visible;
 }
 </style>
