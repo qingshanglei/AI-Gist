@@ -1075,6 +1075,124 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     ]))
   })
 
+  it('manifest 可读时不会把残留的孤立快照误提升为云端最新数据', async () => {
+    const storageId = 'robust-readable-manifest-ignores-loose-snapshot'
+    const client = createWebDAVSyncClient(storageId)
+    const trustedData = createRealisticDataSet()
+    const deviceADatabase = new MutableSyncDatabase(trustedData)
+    const deviceA = createSyncService(client, deviceADatabase, new MemoryStorage(), 'device-a')
+
+    const firstUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(firstUpload).toMatchObject({ success: true, action: 'uploaded' })
+    const manifestBeforeLooseSnapshot = await client.getCloudSyncManifest(storageId)
+    expect(manifestBeforeLooseSnapshot.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '发布计划提示词',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+
+    const dangerousLooseData = mutateDataSet(trustedData, data => {
+      data.prompts![0].title = '孤立快照里的过期标题不应生效'
+      data.prompts![0].imageBlobs = []
+      data.prompts![0].updatedAt = '2026-06-13T23:00:00.000Z'
+      data.promptHistories = []
+      data.settings = [{
+        key: 'theme',
+        value: 'stale-from-loose-snapshot',
+        type: 'string',
+        updatedAt: '2026-06-13T23:00:00.000Z'
+      }]
+    })
+    const looseSnapshot = {
+      ...createCloudSyncSnapshot(dangerousLooseData, 'abandoned-device', 'loose-snapshot-should-not-win'),
+      createdAt: '2026-06-13T23:00:00.000Z'
+    }
+    expect(await client.saveCloudSyncSnapshot(storageId, looseSnapshot))
+      .toMatchObject({ success: true })
+    expect(await client.listCloudSyncSnapshots(storageId)).toHaveLength(2)
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'device-b')
+    const download = await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })
+
+    expect(download, JSON.stringify(download, null, 2))
+      .toMatchObject({ success: true, action: 'downloaded' })
+    expect(deviceBDatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '发布计划提示词',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(deviceBDatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] })
+    ]))
+    expect(deviceBDatabase.data.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'theme', value: 'dark' })
+    ]))
+
+    const manifestAfterDownload = await client.getCloudSyncManifest(storageId)
+    expect(manifestAfterDownload.latestSnapshot?.revision)
+      .toBe(manifestBeforeLooseSnapshot.latestSnapshot?.revision)
+    expect(manifestAfterDownload.latestSnapshot?.revision)
+      .not.toBe('loose-snapshot-should-not-win')
+    expect(manifestAfterDownload.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] })
+    ]))
+
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.prompts![0].title = '可信 manifest 基础上的后续编辑'
+      data.prompts![0].updatedAt = '2026-06-13T23:05:00.000Z'
+      data.promptHistories!.push({
+        id: 86,
+        uuid: 'real-history-after-loose-snapshot',
+        promptId: 31,
+        promptUuid: 'real-prompt-launch',
+        title: '可信 manifest 基础上的后续编辑',
+        content: '孤立快照未污染后继续生成',
+        result: 'Follow-up from trusted manifest',
+        version: 2,
+        imageBlobs: [UPDATED_IMAGE],
+        createdAt: '2026-06-13T23:06:00.000Z',
+        updatedAt: '2026-06-13T23:06:00.000Z'
+      })
+    })
+    const uploadAfterLooseSnapshot = await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(uploadAfterLooseSnapshot, JSON.stringify(uploadAfterLooseSnapshot, null, 2))
+      .toMatchObject({ success: true, action: 'uploaded' })
+
+    const finalManifest = await client.getCloudSyncManifest(storageId)
+    expect(finalManifest.latestSnapshot?.revision)
+      .toBe(uploadAfterLooseSnapshot.remoteRevision)
+    expect(finalManifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '可信 manifest 基础上的后续编辑',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(finalManifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'real-history-after-loose-snapshot', imageBlobs: [UPDATED_IMAGE] })
+    ]))
+    expect(finalManifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(finalManifest.latestSnapshot!.data))
+  })
+
   it('大量数据并发连续点击同步时只生成必要快照且不会反复报错', async () => {
     const storageId = 'robust-large-concurrent-clicks'
     const client = createWebDAVSyncClient(storageId)
