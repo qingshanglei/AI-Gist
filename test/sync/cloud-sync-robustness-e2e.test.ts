@@ -867,6 +867,155 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     ]))
   })
 
+  it('本地 baseSnapshot 损坏时会忽略旧状态并保留本机与云端更新', async () => {
+    const storageId = 'robust-corrupt-local-base-snapshot'
+    const client = createWebDAVSyncClient(storageId)
+    const baseData = createRealisticDataSet()
+    const deviceAStorage = new MemoryStorage()
+    const deviceADatabase = new MutableSyncDatabase(baseData)
+    const deviceA = createSyncService(client, deviceADatabase, deviceAStorage, 'device-a')
+
+    const firstUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(firstUpload).toMatchObject({ success: true, action: 'uploaded' })
+
+    const corruptBaseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', firstUpload.remoteRevision)
+    corruptBaseSnapshot.data.prompts![0].title = '损坏 baseSnapshot 里的旧标题'
+    deviceAStorage.setItem(`ai_gist_cloud_sync_state:${storageId}`, JSON.stringify({
+      storageId,
+      deviceId: 'device-a',
+      lastSyncAt: '2026-06-13T13:10:00.000Z',
+      lastKnownRevision: firstUpload.remoteRevision,
+      baseSnapshot: corruptBaseSnapshot
+    }))
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'device-b')
+    expect(await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'downloaded' })
+
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.prompts![0].title = '云端在本地状态损坏后更新'
+      data.prompts![0].imageBlobs = [INITIAL_IMAGE, UPDATED_IMAGE]
+      data.prompts![0].updatedAt = '2026-06-13T13:40:00.000Z'
+      data.promptHistories!.push({
+        id: 88,
+        uuid: 'real-history-after-local-state-corruption',
+        promptId: 31,
+        promptUuid: 'real-prompt-launch',
+        title: '云端在本地状态损坏后更新',
+        content: '本地同步状态损坏后云端继续生成',
+        result: 'Remote edit after local state corruption',
+        version: 2,
+        imageBlobs: [UPDATED_IMAGE],
+        createdAt: '2026-06-13T13:41:00.000Z',
+        updatedAt: '2026-06-13T13:41:00.000Z'
+      })
+      data.settings = [{
+        key: 'theme',
+        value: 'remote-light-after-corruption',
+        type: 'string',
+        updatedAt: '2026-06-13T13:42:00.000Z'
+      }]
+    })
+    expect(await deviceB.syncNow(storageId, {
+      deviceName: 'Desktop B',
+      platform: 'electron',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'uploaded' })
+
+    deviceADatabase.data = mutateDataSet(deviceADatabase.data, data => {
+      data.categories![0].name = '本机状态损坏后分类更新'
+      data.categories![0].updatedAt = '2026-06-13T13:45:00.000Z'
+      data.quickOptimizationConfigs![0].prompt = '本机状态损坏后优化：{{content}}'
+      data.quickOptimizationConfigs![0].updatedAt = '2026-06-13T13:45:00.000Z'
+    })
+
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    try {
+      const result = await deviceA.syncNow(storageId, {
+        deviceName: 'Laptop A',
+        platform: 'electron',
+        reason: 'manual'
+      })
+
+      expect(result, JSON.stringify(result, null, 2)).toMatchObject({
+        success: true,
+        action: 'merged',
+        appliedLocal: true,
+        uploadedRemote: true
+      })
+      expect(result.error).toBeUndefined()
+      expect(warnSpy).toHaveBeenCalledWith(
+        '本地同步状态已损坏，忽略本地 baseSnapshot:',
+        'snapshot data checksum mismatch'
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+
+    expect(deviceADatabase.data.categories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-category-product', name: '本机状态损坏后分类更新' })
+    ]))
+    expect(deviceADatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '云端在本地状态损坏后更新',
+        imageBlobs: [INITIAL_IMAGE, UPDATED_IMAGE]
+      })
+    ]))
+    expect(deviceADatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'real-history-after-local-state-corruption', imageBlobs: [UPDATED_IMAGE] })
+    ]))
+    expect(deviceADatabase.data.quickOptimizationConfigs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'quick-real-cleanup',
+        prompt: '本机状态损坏后优化：{{content}}'
+      })
+    ]))
+    expect(deviceADatabase.data.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'theme', value: 'remote-light-after-corruption' })
+    ]))
+
+    const manifest = await client.getCloudSyncManifest(storageId)
+    expect(manifest.latestSnapshot?.data.categories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-category-product', name: '本机状态损坏后分类更新' })
+    ]))
+    expect(manifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '云端在本地状态损坏后更新',
+        imageBlobs: [INITIAL_IMAGE, UPDATED_IMAGE]
+      })
+    ]))
+    expect(manifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'real-history-after-local-state-corruption', imageBlobs: [UPDATED_IMAGE] })
+    ]))
+    expect(manifest.latestSnapshot?.data.quickOptimizationConfigs).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'quick-real-cleanup',
+        prompt: '本机状态损坏后优化：{{content}}'
+      })
+    ]))
+    expect(manifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(manifest.latestSnapshot!.data))
+
+    const retryClick = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(retryClick).toMatchObject({ success: true, action: 'noop' })
+  })
+
   it('本机导出缺少历史表时不会上传部分数据覆盖云端', async () => {
     const storageId = 'robust-local-partial-export-rejected'
     const client = createWebDAVSyncClient(storageId)
