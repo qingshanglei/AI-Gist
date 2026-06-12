@@ -90,6 +90,11 @@ interface TestCloudClientHooks {
     },
     saveNormally: () => Promise<CloudSyncManifestSaveResult>
   ) => Promise<CloudSyncManifestSaveResult>
+  afterPrimaryManifestWrite?: (context: {
+    storageId: string
+    manifest: CloudSyncManifest
+    options: CloudSyncManifestSaveOptions
+  }) => Promise<void> | void
   getCloudSyncManifest?: (
     storageId: string,
     readNormally: () => Promise<CloudSyncManifest>
@@ -2382,6 +2387,165 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     expect(retryClick).toMatchObject({ success: true, action: 'noop' })
   })
 
+  it('主 manifest 已发布但备份写失败时会自证成功并支持真实更新同步', async () => {
+    const storageId = 'robust-primary-manifest-written-backup-fails'
+    let failBackupOnce = true
+    let primaryManifestWrites = 0
+    const client = createWebDAVSyncClient(storageId, {
+      afterPrimaryManifestWrite: () => {
+        primaryManifestWrites += 1
+        if (failBackupOnce) {
+          failBackupOnce = false
+          throw new Error('HTTP 507 while saving backup manifest')
+        }
+      }
+    })
+    const storage = new MemoryStorage()
+    const database = new MutableSyncDatabase(createRealisticDataSet())
+    const service = createSyncService(client, database, storage, 'device-partial-manifest')
+
+    const firstUpload = await service.syncNow(storageId, {
+      deviceName: 'MacBook Primary Manifest',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(firstUpload, JSON.stringify(firstUpload, null, 2)).toMatchObject({
+      success: true,
+      action: 'uploaded',
+      uploadedRemote: true
+    })
+    expect(firstUpload.error).toBeUndefined()
+    expect(primaryManifestWrites).toBe(1)
+    expect(storage.getItem(`ai_gist_cloud_sync_state:${storageId}`))
+      .toContain(firstUpload.remoteRevision)
+
+    const firstManifest = await createWebDAVSyncClient(storageId).getCloudSyncManifest(storageId)
+    expect(firstManifest.latestSnapshot?.revision).toBe(firstUpload.remoteRevision)
+    expect(firstManifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '发布计划提示词',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(firstManifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-history-initial',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+
+    database.data = mutateDataSet(database.data, data => {
+      data.prompts![0].title = '发布计划提示词 - 第二版'
+      data.prompts![0].tags = ['release', 'webdav', 'updated']
+      data.prompts![0].imageBlobs = [INITIAL_IMAGE, UPDATED_IMAGE]
+      data.prompts![0].useCount = 4
+      data.prompts![0].updatedAt = '2026-06-13T15:10:00.000Z'
+      data.promptHistories!.push({
+        id: 88,
+        uuid: 'real-history-after-partial-manifest',
+        promptId: 31,
+        promptUuid: 'real-prompt-launch',
+        title: '发布计划提示词 - 第二版',
+        content: '第二次生成发布计划',
+        result: 'Updated launch plan',
+        version: 2,
+        imageBlobs: [UPDATED_IMAGE],
+        createdAt: '2026-06-13T15:11:00.000Z',
+        updatedAt: '2026-06-13T15:11:00.000Z'
+      })
+      data.aiHistory!.push({
+        id: 89,
+        uuid: 'real-ai-history-after-partial-manifest',
+        promptUuid: 'real-prompt-launch',
+        input: '生成第二版发布计划',
+        output: '第二版发布计划结果',
+        provider: 'openai',
+        model: 'gpt-4.1',
+        createdAt: '2026-06-13T15:12:00.000Z',
+        updatedAt: '2026-06-13T15:12:00.000Z'
+      })
+      data.settings = [
+        ...data.settings!.filter(setting => setting.key !== 'theme'),
+        {
+          key: 'theme',
+          value: 'system',
+          type: 'string',
+          updatedAt: '2026-06-13T15:13:00.000Z'
+        }
+      ]
+    })
+
+    const secondUpload = await service.syncNow(storageId, {
+      deviceName: 'MacBook Primary Manifest',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(secondUpload, JSON.stringify(secondUpload, null, 2)).toMatchObject({
+      success: true,
+      action: 'uploaded',
+      uploadedRemote: true
+    })
+    expect(secondUpload.error).toBeUndefined()
+    expect(secondUpload.remoteRevision).not.toBe(firstUpload.remoteRevision)
+    expect(primaryManifestWrites).toBe(2)
+
+    const repeatedClick = await service.syncNow(storageId, {
+      deviceName: 'MacBook Primary Manifest',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(repeatedClick).toMatchObject({ success: true, action: 'noop' })
+    expect(repeatedClick.error).toBeUndefined()
+
+    const finalManifest = await createWebDAVSyncClient(storageId).getCloudSyncManifest(storageId)
+    expect(finalManifest.latestSnapshot?.revision).toBe(secondUpload.remoteRevision)
+    expect(finalManifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        title: '发布计划提示词 - 第二版',
+        imageBlobs: [INITIAL_IMAGE, UPDATED_IMAGE]
+      })
+    ]))
+    expect(finalManifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({ uuid: 'real-history-after-partial-manifest', imageBlobs: [UPDATED_IMAGE] })
+    ]))
+    expect(finalManifest.latestSnapshot?.data.aiHistory).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-ai-history-initial' }),
+      expect.objectContaining({ uuid: 'real-ai-history-after-partial-manifest' })
+    ]))
+    expect(finalManifest.latestSnapshot?.data.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'theme', value: 'system' })
+    ]))
+    expect(finalManifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(finalManifest.latestSnapshot!.data))
+
+    const snapshots = await client.listCloudSyncSnapshots(storageId)
+    expect(snapshots).toHaveLength(2)
+
+    const newDeviceDatabase = new MutableSyncDatabase(emptyDataSet())
+    const newDevice = createSyncService(
+      createWebDAVSyncClient(storageId),
+      newDeviceDatabase,
+      new MemoryStorage(),
+      'device-after-partial-manifest'
+    )
+    const downloaded = await newDevice.syncNow(storageId, {
+      deviceName: 'iPhone New Device',
+      platform: 'ios',
+      reason: 'manual'
+    })
+    expect(downloaded, JSON.stringify(downloaded, null, 2)).toMatchObject({
+      success: true,
+      action: 'downloaded',
+      appliedLocal: true
+    })
+    expect(newDeviceDatabase.data.prompts).toEqual(finalManifest.latestSnapshot?.data.prompts)
+    expect(newDeviceDatabase.data.promptHistories).toEqual(finalManifest.latestSnapshot?.data.promptHistories)
+    expect(newDeviceDatabase.data.aiHistory).toEqual(finalManifest.latestSnapshot?.data.aiHistory)
+  })
+
   it('应用远端数据中途失败时会回滚本机数据，下次同步能继续完整下载', async () => {
     const storageId = 'robust-local-apply-rollback'
     const client = createWebDAVSyncClient(storageId)
@@ -2700,6 +2864,11 @@ function createWebDAVSyncClient(
           await provider.writeFile(getCloudSyncManifestPath(), content, {
             ifMatch: primaryInfo?.etag,
             ifNoneMatch: !primaryInfo && !currentManifest.latestSnapshot
+          })
+          await hooks.afterPrimaryManifestWrite?.({
+            storageId: targetStorageId,
+            manifest,
+            options
           })
           await provider.writeFile(getCloudSyncManifestBackupPath(), content)
           return { success: true }

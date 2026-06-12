@@ -639,6 +639,32 @@ describe('CloudSyncService', () => {
     expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toBeNull()
   })
 
+  it('accepts a reported manifest save failure when the submitted manifest is already readable', async () => {
+    const emptyManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    const { service, cloudClient, storage } = createService(baseData, emptyManifest)
+    let savedManifest: any
+    cloudClient.getCloudSyncManifest
+      .mockReset()
+      .mockResolvedValueOnce(emptyManifest)
+      .mockResolvedValueOnce(emptyManifest)
+      .mockImplementation(async () => savedManifest || emptyManifest)
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (_storageId: string, manifest: any) => {
+      savedManifest = manifest
+      return {
+        success: false,
+        error: 'HTTP 507 while saving backup manifest'
+      }
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.action).toBe('uploaded')
+    expect(result.error).toBeUndefined()
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain(savedManifest.latestSnapshot.revision)
+  })
+
   it('waits out stale read-after-write responses instead of treating them as another device', async () => {
     const emptyManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
     const { service, cloudClient, storage } = createService(baseData, emptyManifest)

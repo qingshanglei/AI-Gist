@@ -952,14 +952,7 @@ export class CloudSyncService {
     const result = await cloudClient.saveCloudSyncManifest(storageId, manifest, {
       expectedRevision
     });
-    if (!result.success) {
-      if (result.conflict || isCloudSyncRevisionConflictMessage(result.error)) {
-        throw new CloudSyncRemoteChangedError(result.error || '云端同步文件已被其他设备更新');
-      }
-      throw new Error(result.error || '保存云同步 manifest 失败');
-    }
-
-    await this.verifySavedManifest(storageId, manifest);
+    await this.confirmManifestSaveResult(storageId, manifest, result, '保存云同步 manifest 失败');
   }
 
   private async overwriteManifest(
@@ -968,11 +961,54 @@ export class CloudSyncService {
   ): Promise<void> {
     await this.saveSnapshotFileIfSupported(storageId, manifest.latestSnapshot);
     const result = await this.getCloudClient().saveCloudSyncManifest(storageId, manifest);
+    await this.confirmManifestSaveResult(storageId, manifest, result, '重建云同步 manifest 失败');
+  }
+
+  private async confirmManifestSaveResult(
+    storageId: string,
+    manifest: CloudSyncManifest,
+    result: CloudSyncManifestSaveResult,
+    fallbackErrorMessage: string
+  ): Promise<void> {
     if (!result.success) {
-      throw new Error(result.error || '重建云同步 manifest 失败');
+      if (result.conflict || isCloudSyncRevisionConflictMessage(result.error)) {
+        throw new CloudSyncRemoteChangedError(result.error || '云端同步文件已被其他设备更新');
+      }
+
+      if (await this.isSavedManifestReadable(storageId, manifest)) {
+        return;
+      }
+
+      throw new Error(result.error || fallbackErrorMessage);
     }
 
     await this.verifySavedManifest(storageId, manifest);
+  }
+
+  private async isSavedManifestReadable(
+    storageId: string,
+    manifest: CloudSyncManifest
+  ): Promise<boolean> {
+    if (!manifest.latestSnapshot) {
+      return false;
+    }
+
+    for (let attempt = 0; attempt < READ_AFTER_WRITE_VERIFY_ATTEMPTS; attempt += 1) {
+      if (attempt > 0) {
+        await delay(READ_AFTER_WRITE_VERIFY_RETRY_MS * attempt);
+      }
+
+      try {
+        await this.verifySavedManifestContentOnce(storageId, manifest);
+        return true;
+      } catch {
+        // A failed save can still mean the primary manifest reached the server
+        // while a backup write or response failed. Keep probing the manifest,
+        // but only accept it when its published content fully matches.
+      }
+    }
+
+    return false;
   }
 
   private async saveSnapshotFileIfSupported(
@@ -1027,6 +1063,18 @@ export class CloudSyncService {
     const savedSnapshotFile = await this.readSnapshotFileIfSupported(storageId, expectedSnapshot.revision);
     if (savedSnapshotFile) {
       this.assertSavedSnapshotMatches(savedSnapshotFile, expectedSnapshot, '云同步快照文件');
+      return;
+    }
+
+    await this.verifySavedManifestContentOnce(storageId, manifest);
+  }
+
+  private async verifySavedManifestContentOnce(
+    storageId: string,
+    manifest: CloudSyncManifest
+  ): Promise<void> {
+    const expectedSnapshot = manifest.latestSnapshot;
+    if (!expectedSnapshot) {
       return;
     }
 
