@@ -125,6 +125,173 @@ describe('CloudSyncService', () => {
     expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain(savedManifest.latestSnapshot.revision)
   })
 
+  it('writes the immutable snapshot before updating the manifest pointer', async () => {
+    const storage = new MemoryStorage()
+    let cloudManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    const savedSnapshots = new Map<string, any>()
+    const callOrder: string[] = []
+    const cloudClient = {
+      getCloudSyncManifest: vi.fn().mockImplementation(async () => cloudManifest),
+      saveCloudSyncSnapshot: vi.fn().mockImplementation(async (_storageId: string, snapshot: any) => {
+        callOrder.push('snapshot')
+        savedSnapshots.set(snapshot.revision, snapshot)
+        return { success: true }
+      }),
+      readCloudSyncSnapshot: vi.fn().mockImplementation(async (_storageId: string, revision: string) => {
+        const snapshot = savedSnapshots.get(revision)
+        if (!snapshot) {
+          throw new Error('snapshot not found')
+        }
+        return snapshot
+      }),
+      listCloudSyncSnapshots: vi.fn().mockResolvedValue([]),
+      saveCloudSyncManifest: vi.fn().mockImplementation(async (_storageId: string, manifest: any) => {
+        callOrder.push('manifest')
+        cloudManifest = manifest
+        return { success: true }
+      })
+    }
+    const database = {
+      exportAllDataForSync: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok',
+        data: baseData
+      }),
+      replaceAllData: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok'
+      })
+    }
+    const service = new CloudSyncService({
+      cloudClient,
+      database,
+      storage,
+      createDeviceId: () => 'device-a'
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(callOrder).toEqual(['snapshot', 'manifest'])
+    expect(savedSnapshots.has(cloudManifest.latestSnapshot!.revision)).toBe(true)
+    expect(cloudClient.getCloudSyncManifest).toHaveBeenCalledTimes(2)
+  })
+
+  it('recovers a corrupt manifest from the newest remote snapshot file', async () => {
+    const storage = new MemoryStorage()
+    const remoteSnapshot = createCloudSyncSnapshot(baseData, 'device-b', 'rev-from-file')
+    const savedSnapshots: any[] = []
+    const savedManifests: any[] = []
+    const cloudClient = {
+      getCloudSyncManifest: vi.fn().mockRejectedValue(
+        new Error('读取云同步 manifest 失败，且备份副本不可用: sync-manifest.json snapshot data checksum mismatch')
+      ),
+      listCloudSyncSnapshots: vi.fn().mockResolvedValue([{
+        revision: remoteSnapshot.revision,
+        path: '/AI-Gist-Backup/sync/snapshots/rev-from-file.json',
+        modifiedAt: '2026-01-02T00:00:00.000Z'
+      }]),
+      readCloudSyncSnapshot: vi.fn().mockResolvedValue(remoteSnapshot),
+      saveCloudSyncSnapshot: vi.fn().mockImplementation(async (_storageId: string, snapshot: any) => {
+        savedSnapshots.push(snapshot)
+        return { success: true }
+      }),
+      saveCloudSyncManifest: vi.fn().mockImplementation(async (_storageId: string, manifest: any) => {
+        savedManifests.push(manifest)
+        return { success: true }
+      })
+    }
+    const database = {
+      exportAllDataForSync: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok',
+        data: baseData
+      }),
+      replaceAllData: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok'
+      })
+    }
+    const service = new CloudSyncService({
+      cloudClient,
+      database,
+      storage,
+      createDeviceId: () => 'device-a'
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.remoteRevision).toBe('rev-from-file')
+    expect(cloudClient.listCloudSyncSnapshots).toHaveBeenCalledTimes(1)
+    expect(savedSnapshots[0].revision).toBe('rev-from-file')
+    expect(savedManifests[0].latestSnapshot.revision).toBe('rev-from-file')
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+  })
+
+  it('repairs a stale manifest pointer to the newest snapshot file', async () => {
+    const oldSnapshot = {
+      ...createCloudSyncSnapshot(baseData, 'device-b', 'rev-old'),
+      createdAt: '2026-01-01T00:00:00.000Z'
+    }
+    const newerData = {
+      ...baseData,
+      prompts: [{ ...baseData.prompts[0], title: 'New file snapshot', updatedAt: '2026-01-02T00:00:00.000Z' }]
+    }
+    const newerSnapshot = {
+      ...createCloudSyncSnapshot(newerData, 'device-b', 'rev-new-file'),
+      createdAt: '2026-01-02T00:00:00.000Z'
+    }
+    let cloudManifest = {
+      ...createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z'),
+      latestSnapshot: oldSnapshot,
+      baseSnapshot: oldSnapshot
+    }
+    const savedManifests: any[] = []
+    const cloudClient = {
+      getCloudSyncManifest: vi.fn().mockImplementation(async () => cloudManifest),
+      listCloudSyncSnapshots: vi.fn().mockResolvedValue([{
+        revision: newerSnapshot.revision,
+        path: '/AI-Gist-Backup/sync/snapshots/rev-new-file.json',
+        modifiedAt: '2026-01-02T00:00:00.000Z'
+      }]),
+      readCloudSyncSnapshot: vi.fn().mockImplementation(async () => newerSnapshot),
+      saveCloudSyncSnapshot: vi.fn().mockResolvedValue({ success: true }),
+      saveCloudSyncManifest: vi.fn().mockImplementation(async (_storageId: string, manifest: any) => {
+        savedManifests.push(manifest)
+        cloudManifest = manifest
+        return { success: true }
+      })
+    }
+    const database = {
+      exportAllDataForSync: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok',
+        data: newerData
+      }),
+      replaceAllData: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok'
+      })
+    }
+    const service = new CloudSyncService({
+      cloudClient,
+      database,
+      storage: new MemoryStorage(),
+      createDeviceId: () => 'device-a'
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.remoteRevision).toBe('rev-new-file')
+    expect(savedManifests[0].latestSnapshot.revision).toBe('rev-new-file')
+    expect(cloudClient.saveCloudSyncSnapshot).toHaveBeenCalledWith('cfg-1', expect.objectContaining({
+      revision: 'rev-new-file'
+    }))
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+  })
+
   it('continues sync when noncritical local sync metadata cannot be stored', async () => {
     const storage = new MemoryStorage()
     const storageSetSpy = vi.spyOn(storage, 'setItem')

@@ -1060,6 +1060,92 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
       }
     })
 
+    it('两个 WebDAV manifest 副本损坏时会从快照文件恢复远端数据', async () => {
+      const storageId = 'cfg-snapshot-recover'
+      const service = MobileCloudBackupService.getInstance()
+      const remoteBaseUrl = `${server.baseUrl}/snapshot-recover-${Date.now()}`
+      await Preferences.set({
+        key: 'cloud_backup_configs',
+        value: JSON.stringify([{
+          id: storageId,
+          name: 'Snapshot Recover WebDAV',
+          type: 'webdav',
+          enabled: true,
+          url: remoteBaseUrl,
+          username: USERNAME,
+          password: PASSWORD,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }]),
+      })
+
+      const remoteData = {
+        ...mockExportData,
+        prompts: [
+          { ...mockExportData.prompts[0], title: 'Recovered from snapshot file' }
+        ],
+        promptHistories: [],
+        syncTombstones: []
+      }
+      const remoteSnapshot = {
+        ...createCloudSyncSnapshot(remoteData, 'remote-device', 'rev-webdav-file'),
+        createdAt: '2026-03-15T00:00:00.000Z'
+      }
+
+      expect((await service.saveCloudSyncSnapshot(storageId, remoteSnapshot)).success).toBe(true)
+      const remoteRoot = path.join(server.rootDir, new URL(remoteBaseUrl).pathname)
+      await expect(fsp.stat(
+        path.join(remoteRoot, 'AI-Gist-Backup', 'sync', 'snapshots', 'rev-webdav-file.json')
+      )).resolves.toBeTruthy()
+
+      await fsp.mkdir(path.join(remoteRoot, 'AI-Gist-Backup'), { recursive: true })
+      await fsp.writeFile(path.join(remoteRoot, 'AI-Gist-Backup', 'sync-manifest.json'), '{"kind":', 'utf-8')
+      await fsp.writeFile(path.join(remoteRoot, 'AI-Gist-Backup', 'sync-manifest.backup.json'), '{"kind":', 'utf-8')
+
+      const deviceDatabase = {
+        exportAllDataForSync: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'ok',
+          data: {
+            categories: [],
+            prompts: [],
+            promptVariables: [],
+            promptHistories: [],
+            aiConfigs: [],
+            quickOptimizationConfigs: [],
+            aiHistory: [],
+            settings: [],
+            syncTombstones: []
+          }
+        }),
+        replaceAllData: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'ok'
+        })
+      }
+      const device = new CloudSyncService({
+        cloudClient: service,
+        database: deviceDatabase,
+        storage: new MemoryStorage(),
+        createDeviceId: () => 'recovering-device'
+      })
+
+      const result = await device.syncNow(storageId, {
+        deviceName: 'Recovering Device',
+        platform: 'ios'
+      })
+
+      expect(result.success).toBe(true)
+      expect(result.remoteRevision).toBe('rev-webdav-file')
+      expect(result.action).toBe('downloaded')
+      expect(deviceDatabase.replaceAllData).toHaveBeenCalledWith(expect.objectContaining({
+        prompts: expect.arrayContaining([expect.objectContaining({ title: 'Recovered from snapshot file' })])
+      }))
+
+      const repairedManifest = await service.getCloudSyncManifest(storageId)
+      expect(repairedManifest.latestSnapshot?.revision).toBe('rev-webdav-file')
+    })
+
     it('两个 WebDAV manifest 副本损坏时会自动重建并完成同步', async () => {
       const service = MobileCloudBackupService.getInstance()
       await saveConfig(service)
