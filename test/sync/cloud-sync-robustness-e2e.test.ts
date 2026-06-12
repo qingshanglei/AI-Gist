@@ -804,6 +804,68 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
       ]))
   })
 
+  it('本机导出出现重复记录键时不会上传脏数据覆盖云端', async () => {
+    const storageId = 'robust-local-duplicate-export-rejected'
+    const client = createWebDAVSyncClient(storageId)
+    const completeData = createRealisticDataSet()
+    const deviceADatabase = new MutableSyncDatabase(completeData)
+    const deviceA = createSyncService(client, deviceADatabase, new MemoryStorage(), 'device-a')
+
+    const firstUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(firstUpload).toMatchObject({ success: true, action: 'uploaded' })
+    const manifestBeforeDuplicateExport = await client.getCloudSyncManifest(storageId)
+    const snapshotsBeforeDuplicateExport = await client.listCloudSyncSnapshots(storageId)
+    expect(manifestBeforeDuplicateExport.latestSnapshot?.data.prompts)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          uuid: 'real-prompt-launch',
+          title: '发布计划提示词',
+          imageBlobs: [INITIAL_IMAGE]
+        })
+      ]))
+
+    const duplicateData = mutateDataSet(completeData, data => {
+      data.prompts!.push({
+        ...data.prompts![0],
+        id: 999,
+        title: '重复 UUID 的脏数据不应覆盖云端',
+        imageBlobs: [UPDATED_IMAGE],
+        updatedAt: '2026-06-13T15:30:00.000Z'
+      })
+    })
+    const brokenDeviceDatabase = new MutableSyncDatabase(duplicateData)
+    const brokenDevice = createSyncService(client, brokenDeviceDatabase, new MemoryStorage(), 'device-broken')
+
+    const result = await brokenDevice.syncNow(storageId, {
+      deviceName: 'Broken Duplicate Export Device',
+      platform: 'web',
+      reason: 'manual'
+    })
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('本机同步数据导出不完整')
+    expect(result.error).toContain('snapshot data prompts has duplicate record key uuid:real-prompt-launch')
+    expect(brokenDeviceDatabase.replaceAllData).not.toHaveBeenCalled()
+
+    const manifestAfterDuplicateExport = await client.getCloudSyncManifest(storageId)
+    const snapshotsAfterDuplicateExport = await client.listCloudSyncSnapshots(storageId)
+    expect(manifestAfterDuplicateExport.latestSnapshot?.revision)
+      .toBe(manifestBeforeDuplicateExport.latestSnapshot?.revision)
+    expect(snapshotsAfterDuplicateExport).toHaveLength(snapshotsBeforeDuplicateExport.length)
+    expect(manifestAfterDuplicateExport.latestSnapshot?.data.prompts)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          uuid: 'real-prompt-launch',
+          title: '发布计划提示词',
+          imageBlobs: [INITIAL_IMAGE]
+        })
+      ]))
+  })
+
   it('保存 manifest 前另一端抢先更新时会自动重读并合并后成功', async () => {
     const storageId = 'robust-remote-changes-during-save'
     const baseClient = createWebDAVSyncClient(storageId)

@@ -144,6 +144,29 @@ describe('CloudSyncService', () => {
     expect(database.replaceAllData).not.toHaveBeenCalled()
   })
 
+  it('fails before upload when the local sync export contains duplicate record keys', async () => {
+    const duplicateLocalData = {
+      ...baseData,
+      prompts: [
+        baseData.prompts[0],
+        {
+          ...baseData.prompts[0],
+          id: 2,
+          title: 'Duplicate prompt should never overwrite cloud data'
+        }
+      ]
+    }
+    const { service, cloudClient, database } = createService(duplicateLocalData)
+
+    const result = await service.syncNow('cfg-1', { reason: 'manual' })
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('本机同步数据导出不完整')
+    expect(result.error).toContain('snapshot data prompts has duplicate record key uuid:prompt-1')
+    expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+  })
+
   it('does not create new revisions on repeated manual sync when local data only differs by JSON shape', async () => {
     const localDataWithJsonDrift = {
       ...baseData,
