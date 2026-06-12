@@ -11,6 +11,10 @@ const MAX_BODY_BYTES = 25 * 1024 * 1024;
 const CLOUD_BACKUP_DIR = 'AI-Gist-Backup';
 const CLOUD_SYNC_MANIFEST_FILE = 'sync-manifest.json';
 const CLOUD_SYNC_MANIFEST_BACKUP_FILE = 'sync-manifest.backup.json';
+const CLOUD_SYNC_DIR = 'sync';
+const CLOUD_SYNC_SNAPSHOTS_DIR = 'snapshots';
+const CLOUD_SYNC_SNAPSHOT_FILE_EXTENSION = '.json';
+const CLOUD_SYNC_SNAPSHOT_FILE_KIND = 'ai-gist-cloud-sync-snapshot';
 const CLOUD_BACKUP_FILE_PREFIX = 'backup-';
 const CLOUD_BACKUP_FILE_EXTENSION = '.json';
 const REQUIRED_SYNC_COLLECTIONS = [
@@ -162,6 +166,30 @@ async function ensureWebDAVDirectory(client) {
   }
 }
 
+async function ensureWebDAVNestedDirectory(client, remoteDir) {
+  const segments = remoteDir.split('/').filter(Boolean);
+  let currentPath = '';
+  for (const segment of segments) {
+    currentPath = normalizeRemotePath(currentPath, segment);
+    try {
+      if (await client.exists(currentPath)) {
+        continue;
+      }
+    } catch {
+      // Try to create it below.
+    }
+
+    try {
+      await client.createDirectory(currentPath);
+    } catch (error) {
+      const message = formatErrorMessage(error);
+      if (!/405|409|exists/i.test(message)) {
+        throw error;
+      }
+    }
+  }
+}
+
 async function readWebDAVText(client, remotePath) {
   const content = await client.getFileContents(remotePath, { format: 'text' });
   if (typeof content === 'string') {
@@ -171,6 +199,42 @@ async function readWebDAVText(client, remotePath) {
     return content.toString('utf8');
   }
   return String(content);
+}
+
+function encodeCloudSyncSnapshotRevision(revision) {
+  return encodeURIComponent(revision).replace(/%/g, '~');
+}
+
+function decodeCloudSyncSnapshotRevision(encodedRevision) {
+  return decodeURIComponent(encodedRevision.replace(/~/g, '%'));
+}
+
+function getCloudSyncSnapshotFileName(revision) {
+  return `${encodeCloudSyncSnapshotRevision(revision)}${CLOUD_SYNC_SNAPSHOT_FILE_EXTENSION}`;
+}
+
+function getCloudSyncSnapshotRevisionFromFileName(name) {
+  if (!name || !name.endsWith(CLOUD_SYNC_SNAPSHOT_FILE_EXTENSION)) {
+    return null;
+  }
+  try {
+    return decodeCloudSyncSnapshotRevision(name.slice(0, -CLOUD_SYNC_SNAPSHOT_FILE_EXTENSION.length));
+  } catch {
+    return null;
+  }
+}
+
+function getCloudSyncSnapshotsDirectoryPath() {
+  return normalizeRemotePath(CLOUD_BACKUP_DIR, CLOUD_SYNC_DIR, CLOUD_SYNC_SNAPSHOTS_DIR);
+}
+
+function getCloudSyncSnapshotPath(revision) {
+  return normalizeRemotePath(
+    CLOUD_BACKUP_DIR,
+    CLOUD_SYNC_DIR,
+    CLOUD_SYNC_SNAPSHOTS_DIR,
+    getCloudSyncSnapshotFileName(revision)
+  );
 }
 
 function createEmptyCloudSyncManifest() {
@@ -231,6 +295,44 @@ function assertOptionalCloudSyncSnapshot(snapshot, fieldName) {
 
 function isValidCloudSyncSnapshot(snapshot) {
   return validateCloudSyncSnapshot(snapshot).valid;
+}
+
+function createCloudSyncSnapshotFile(snapshot) {
+  return {
+    kind: CLOUD_SYNC_SNAPSHOT_FILE_KIND,
+    schemaVersion: 1,
+    snapshot: normalizeCloudSyncSnapshotForFile(snapshot)
+  };
+}
+
+function assertValidCloudSyncSnapshotFile(input) {
+  const snapshot = unwrapCloudSyncSnapshotFile(input);
+  const result = validateCloudSyncSnapshot(snapshot);
+  if (!result.valid) {
+    throw new Error(result.reason || 'cloud sync snapshot file is invalid');
+  }
+  return normalizeCloudSyncSnapshotForFile(snapshot);
+}
+
+function unwrapCloudSyncSnapshotFile(input) {
+  if (input && typeof input === 'object' && input.kind === CLOUD_SYNC_SNAPSHOT_FILE_KIND) {
+    if (input.schemaVersion !== 1) {
+      throw new Error('cloud sync snapshot file schema version is unsupported');
+    }
+    return input.snapshot;
+  }
+  return input;
+}
+
+function normalizeCloudSyncSnapshotForFile(snapshot) {
+  return {
+    schemaVersion: 1,
+    deviceId: snapshot.deviceId,
+    revision: snapshot.revision,
+    createdAt: snapshot.createdAt,
+    data: snapshot.data,
+    dataChecksum: snapshot.dataChecksum || createCloudSyncDataChecksum(snapshot.data)
+  };
 }
 
 function validateCloudSyncSnapshot(snapshot) {
@@ -533,6 +635,85 @@ async function saveWebDAVSyncManifest({ config, manifest, options = {} }) {
   return { ok: true };
 }
 
+async function listWebDAVSyncSnapshots({ config }) {
+  const client = await createWebDAVClient(config);
+  const snapshotsDir = getCloudSyncSnapshotsDirectoryPath();
+  try {
+    if (!(await client.exists(snapshotsDir))) {
+      return [];
+    }
+
+    const contents = await client.getDirectoryContents(snapshotsDir);
+    const files = Array.isArray(contents) ? contents : contents.data || [];
+    return files
+      .filter(file => file?.type !== 'directory')
+      .map(file => {
+        const fileName = file.basename || Path.basename(file.filename || file.path || '');
+        const revision = getCloudSyncSnapshotRevisionFromFileName(fileName);
+        if (!revision) {
+          return null;
+        }
+
+        return {
+          revision,
+          path: getCloudSyncSnapshotPath(revision),
+          modifiedAt: typeof file.lastmod === 'string' ? file.lastmod : undefined,
+          size: typeof file.size === 'number' ? file.size : undefined
+        };
+      })
+      .filter(Boolean);
+  } catch (error) {
+    if (/404|not\s*found/i.test(formatErrorMessage(error))) {
+      return [];
+    }
+    throw error;
+  }
+}
+
+async function readWebDAVSyncSnapshot({ config, snapshot }) {
+  const client = await createWebDAVClient(config);
+  const snapshotInfo = normalizeSnapshotReference(snapshot);
+  const text = await readWebDAVText(client, snapshotInfo.path);
+  return assertValidCloudSyncSnapshotFile(JSON.parse(text));
+}
+
+async function saveWebDAVSyncSnapshot({ config, snapshot }) {
+  const client = await createWebDAVClient(config);
+  const normalizedSnapshot = assertValidCloudSyncSnapshotFile(snapshot);
+  const snapshotsDir = getCloudSyncSnapshotsDirectoryPath();
+  const snapshotPath = getCloudSyncSnapshotPath(normalizedSnapshot.revision);
+  const content = JSON.stringify(createCloudSyncSnapshotFile(normalizedSnapshot), null, 2);
+
+  await ensureWebDAVNestedDirectory(client, snapshotsDir);
+  try {
+    await client.putFileContents(snapshotPath, content, {
+      overwrite: false,
+      headers: {
+        'If-None-Match': '*'
+      }
+    });
+  } catch (error) {
+    if (!isRevisionConflictError(error) && !/already exists|412/i.test(formatErrorMessage(error))) {
+      throw error;
+    }
+
+    const existingSnapshot = await readWebDAVSyncSnapshot({
+      config,
+      snapshot: {
+        revision: normalizedSnapshot.revision,
+        path: snapshotPath
+      }
+    });
+    if (isSameCloudSyncSnapshot(existingSnapshot, normalizedSnapshot)) {
+      return { ok: true };
+    }
+
+    throw new Error(`云同步快照 ${normalizedSnapshot.revision} 已存在但内容不一致`);
+  }
+
+  return { ok: true };
+}
+
 async function tryReadWebDAVSyncManifestFileWithMeta(client, remotePath) {
   try {
     if (!(await client.exists(remotePath))) {
@@ -561,6 +742,30 @@ function assertExpectedCloudSyncRevision(manifest, expectedRevision) {
   if (currentRevision !== expectedRevision) {
     throw createCloudSyncManifestRevisionConflictError(expectedRevision, currentRevision);
   }
+}
+
+function normalizeSnapshotReference(snapshot) {
+  if (typeof snapshot === 'string') {
+    return {
+      revision: snapshot,
+      path: getCloudSyncSnapshotPath(snapshot)
+    };
+  }
+
+  if (!snapshot || typeof snapshot !== 'object' || typeof snapshot.revision !== 'string') {
+    throw new Error('云同步快照引用无效');
+  }
+
+  return {
+    ...snapshot,
+    path: snapshot.path || getCloudSyncSnapshotPath(snapshot.revision)
+  };
+}
+
+function isSameCloudSyncSnapshot(left, right) {
+  return left.revision === right.revision &&
+    left.dataChecksum === right.dataChecksum &&
+    JSON.stringify(left.data) === JSON.stringify(right.data);
 }
 
 function createCloudSyncManifestRevisionConflictError(expectedRevision, currentRevision) {
@@ -1153,6 +1358,9 @@ const apiRoutes = {
   '/api/cloud/webdav/delete-backup': deleteWebDAVBackup,
   '/api/cloud/webdav/get-sync-manifest': getWebDAVSyncManifest,
   '/api/cloud/webdav/save-sync-manifest': saveWebDAVSyncManifest,
+  '/api/cloud/webdav/list-sync-snapshots': listWebDAVSyncSnapshots,
+  '/api/cloud/webdav/read-sync-snapshot': readWebDAVSyncSnapshot,
+  '/api/cloud/webdav/save-sync-snapshot': saveWebDAVSyncSnapshot,
   '/api/ai/test-config': testAIConfig,
   '/api/ai/test-model': testAIModel,
   '/api/ai/models': getAIModels,

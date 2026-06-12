@@ -13,10 +13,15 @@ import type {
   CloudSyncManifestSaveOptions,
   CloudSyncManifestSaveResult
 } from '@shared/cloud-sync-manifest';
+import type { CloudSyncSnapshot } from '@shared/cloud-sync-engine';
+import type { CloudSyncRemoteSnapshotInfo } from '@shared/cloud-sync-snapshots';
 import {
   assertValidCloudSyncManifest,
   createEmptyCloudSyncManifest
 } from '@shared/cloud-sync-manifest';
+import {
+  assertValidCloudSyncSnapshotFile
+} from '@shared/cloud-sync-snapshots';
 import { DatabaseServiceManager } from './database-manager.service';
 
 const STORAGE_CONFIGS_KEY = 'ai-gist:web:cloud-storage-configs';
@@ -267,6 +272,40 @@ export class WebCloudBackupService {
           error: this.formatError(error)
         };
       }
+      return { success: false, error: this.formatError(error) };
+    }
+  }
+
+  async listCloudSyncSnapshots(storageId: string): Promise<CloudSyncRemoteSnapshotInfo[]> {
+    const config = await this.getWebDAVConfig(storageId);
+    return this.request<CloudSyncRemoteSnapshotInfo[]>('/api/cloud/webdav/list-sync-snapshots', { config });
+  }
+
+  async readCloudSyncSnapshot(
+    storageId: string,
+    snapshot: CloudSyncRemoteSnapshotInfo | string
+  ): Promise<CloudSyncSnapshot> {
+    const config = await this.getWebDAVConfig(storageId);
+    return assertValidCloudSyncSnapshotFile(
+      await this.request<CloudSyncSnapshot>('/api/cloud/webdav/read-sync-snapshot', {
+        config,
+        snapshot
+      })
+    );
+  }
+
+  async saveCloudSyncSnapshot(
+    storageId: string,
+    snapshot: CloudSyncSnapshot
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      const config = await this.getWebDAVConfig(storageId);
+      await this.request('/api/cloud/webdav/save-sync-snapshot', {
+        config,
+        snapshot: assertValidCloudSyncSnapshotFile(snapshot)
+      });
+      return { success: true };
+    } catch (error) {
       return { success: false, error: this.formatError(error) };
     }
   }

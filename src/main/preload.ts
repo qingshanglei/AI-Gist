@@ -145,6 +145,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getSyncManifest: (storageId: string) => ipcRenderer.invoke('cloud:get-sync-manifest', storageId),
     saveSyncManifest: (storageId: string, manifest: any, options?: any) =>
       ipcRenderer.invoke('cloud:save-sync-manifest', storageId, manifest, options),
+    listSyncSnapshots: (storageId: string) => ipcRenderer.invoke('cloud:list-sync-snapshots', storageId),
+    readSyncSnapshot: (storageId: string, snapshot: any) =>
+      ipcRenderer.invoke('cloud:read-sync-snapshot', storageId, snapshot),
+    saveSyncSnapshot: (storageId: string, snapshot: any) =>
+      ipcRenderer.invoke('cloud:save-sync-snapshot', storageId, snapshot),
   },
   // 应用信息和更新
   app: {

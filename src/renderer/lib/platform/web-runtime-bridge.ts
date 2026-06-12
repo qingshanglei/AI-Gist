@@ -67,7 +67,15 @@ export function installWebRuntimeBridge(): void {
         webCloudBackupService.deleteCloudBackup(storageId, backupId),
       getSyncManifest: (storageId: string) => webCloudBackupService.getCloudSyncManifest(storageId),
       saveSyncManifest: (storageId: string, manifest: any, options?: any) =>
-        webCloudBackupService.saveCloudSyncManifest(storageId, manifest, options)
+        webCloudBackupService.saveCloudSyncManifest(storageId, manifest, options),
+      listSyncSnapshots: (storageId: string) => webCloudBackupService.listCloudSyncSnapshots(storageId)
+        .then(snapshots => ({ success: true, snapshots }))
+        .catch(error => ({ success: false, error: error instanceof Error ? error.message : String(error) })),
+      readSyncSnapshot: (storageId: string, snapshot: any) => webCloudBackupService.readCloudSyncSnapshot(storageId, snapshot)
+        .then(snapshotData => ({ success: true, snapshot: snapshotData }))
+        .catch(error => ({ success: false, error: error instanceof Error ? error.message : String(error) })),
+      saveSyncSnapshot: (storageId: string, snapshot: any) =>
+        webCloudBackupService.saveCloudSyncSnapshot(storageId, snapshot)
     }
   };
 }

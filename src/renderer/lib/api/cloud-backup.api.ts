@@ -9,6 +9,12 @@ import type {
   CloudSyncManifestSaveOptions,
   CloudSyncManifestSaveResult
 } from '@shared/cloud-sync-manifest';
+import type {
+  CloudSyncRemoteSnapshotInfo
+} from '@shared/cloud-sync-snapshots';
+import type {
+  CloudSyncSnapshot
+} from '@shared/cloud-sync-engine';
 import { PlatformDetector } from '@shared/platform';
 import { mobileCloudBackupService } from '../services/mobile-cloud-backup.service';
 import { webCloudBackupService } from '../services/web-cloud-backup.service';
@@ -250,5 +256,58 @@ export class CloudBackupAPI {
       throw new Error('Electron API not available');
     }
     return await window.electronAPI.cloud.saveSyncManifest(storageId, manifest, options);
+  }
+
+  static async listCloudSyncSnapshots(storageId: string): Promise<CloudSyncRemoteSnapshotInfo[]> {
+    const client = getCloudBackupClient();
+    if (client && typeof (client as any).listCloudSyncSnapshots === 'function') {
+      return await (client as any).listCloudSyncSnapshots(storageId);
+    }
+
+    if (!this.isElectronAvailable()) {
+      return [];
+    }
+
+    const response = await window.electronAPI.cloud.listSyncSnapshots(storageId);
+    if (response.success) {
+      return response.snapshots;
+    }
+    throw new Error(response.error || '列出云同步快照失败');
+  }
+
+  static async readCloudSyncSnapshot(
+    storageId: string,
+    snapshot: CloudSyncRemoteSnapshotInfo | string
+  ): Promise<CloudSyncSnapshot> {
+    const client = getCloudBackupClient();
+    if (client && typeof (client as any).readCloudSyncSnapshot === 'function') {
+      return await (client as any).readCloudSyncSnapshot(storageId, snapshot);
+    }
+
+    if (!this.isElectronAvailable()) {
+      throw new Error('Electron API not available');
+    }
+
+    const response = await window.electronAPI.cloud.readSyncSnapshot(storageId, snapshot);
+    if (response.success) {
+      return response.snapshot;
+    }
+    throw new Error(response.error || '读取云同步快照失败');
+  }
+
+  static async saveCloudSyncSnapshot(
+    storageId: string,
+    snapshot: CloudSyncSnapshot
+  ): Promise<{ success: boolean; error?: string }> {
+    const client = getCloudBackupClient();
+    if (client && typeof (client as any).saveCloudSyncSnapshot === 'function') {
+      return await (client as any).saveCloudSyncSnapshot(storageId, snapshot);
+    }
+
+    if (!this.isElectronAvailable()) {
+      return { success: false, error: 'Electron API not available' };
+    }
+
+    return await window.electronAPI.cloud.saveSyncSnapshot(storageId, snapshot);
   }
 }

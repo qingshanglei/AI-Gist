@@ -27,6 +27,9 @@ import {
   sanitizeCloudSyncConflictsForMetadata,
   updateCloudSyncManifestDevice
 } from '@shared/cloud-sync-manifest';
+import type {
+  CloudSyncRemoteSnapshotInfo
+} from '@shared/cloud-sync-snapshots';
 import { generateUUID } from '../utils/uuid';
 import { CloudBackupAPI } from '../api/cloud-backup.api';
 import { DatabaseServiceManager } from './database-manager.service';
@@ -53,6 +56,7 @@ const MAX_AUTO_SYNC_RETRY_MS = 60 * 60 * 1000;
 const MAX_REMOTE_RECHECK_ATTEMPTS = 3;
 const READ_AFTER_WRITE_VERIFY_ATTEMPTS = 4;
 const READ_AFTER_WRITE_VERIFY_RETRY_MS = 120;
+const MAX_REMOTE_SNAPSHOT_SCAN = 20;
 const SYNC_STORE_NAMES: DataStoreName[] = [
   'categories',
   'prompts',
@@ -102,6 +106,12 @@ export interface CloudSyncCloudClient {
     manifest: CloudSyncManifest,
     options?: CloudSyncManifestSaveOptions
   ): Promise<CloudSyncManifestSaveResult>;
+  listCloudSyncSnapshots?(storageId: string): Promise<CloudSyncRemoteSnapshotInfo[]>;
+  readCloudSyncSnapshot?(
+    storageId: string,
+    snapshot: CloudSyncRemoteSnapshotInfo | string
+  ): Promise<CloudSyncSnapshot>;
+  saveCloudSyncSnapshot?(storageId: string, snapshot: CloudSyncSnapshot): Promise<{ success: boolean; error?: string }>;
 }
 
 export interface CloudSyncDatabaseClient {
@@ -651,15 +661,22 @@ export class CloudSyncService {
     options: CloudSyncOptions
   ): Promise<{ manifest: CloudSyncManifest; result?: CloudSyncResult }> {
     try {
+      const manifest = await this.getCloudClient().getCloudSyncManifest(storageId);
       return {
-        manifest: await this.getCloudClient().getCloudSyncManifest(storageId)
+        manifest: await this.repairManifestFromSnapshotFiles(storageId, manifest, deviceId, now, options, {
+          required: !manifest.latestSnapshot
+        })
       };
     } catch (error) {
       if (!isRecoverableCloudSyncManifestCorruption(error)) {
         throw error;
       }
 
-      console.warn('云同步 manifest 已损坏，正在使用本机数据自动重建:', error);
+      const recoveredManifest = await this.recoverManifestFromSnapshotFiles(storageId, deviceId, now, options);
+      if (recoveredManifest) {
+        return { manifest: recoveredManifest };
+      }
+
       const snapshot = createCloudSyncSnapshot(localData, deviceId);
       const rebuiltManifest = this.buildManifest(
         createEmptyCloudSyncManifest(now),
@@ -687,6 +704,117 @@ export class CloudSyncService {
         }
       };
     }
+  }
+
+  private async repairManifestFromSnapshotFiles(
+    storageId: string,
+    manifest: CloudSyncManifest,
+    deviceId: string,
+    now: string,
+    options: CloudSyncOptions,
+    readOptions: { required: boolean }
+  ): Promise<CloudSyncManifest> {
+    const newestSnapshot = await this.getNewestRemoteSnapshot(storageId, readOptions);
+    if (!newestSnapshot) {
+      return manifest;
+    }
+
+    const manifestSnapshot = manifest.latestSnapshot;
+    if (
+      manifestSnapshot &&
+      !isCloudSyncSnapshotNewer(newestSnapshot, manifestSnapshot)
+    ) {
+      return manifest;
+    }
+
+    const repairedManifest = this.buildManifest(
+      manifest,
+      newestSnapshot,
+      manifest.conflicts || [],
+      deviceId,
+      now,
+      options
+    );
+
+    try {
+      await this.overwriteManifest(storageId, repairedManifest);
+    } catch (error) {
+      if (readOptions.required) {
+        throw error;
+      }
+    }
+
+    return repairedManifest;
+  }
+
+  private async recoverManifestFromSnapshotFiles(
+    storageId: string,
+    deviceId: string,
+    now: string,
+    options: CloudSyncOptions
+  ): Promise<CloudSyncManifest | null> {
+    const newestSnapshot = await this.getNewestRemoteSnapshot(storageId, { required: true });
+    if (!newestSnapshot) {
+      return null;
+    }
+
+    const recoveredManifest = this.buildManifest(
+      createEmptyCloudSyncManifest(now),
+      newestSnapshot,
+      [],
+      deviceId,
+      now,
+      options
+    );
+    await this.overwriteManifest(storageId, recoveredManifest);
+    return recoveredManifest;
+  }
+
+  private async getNewestRemoteSnapshot(
+    storageId: string,
+    options: { required: boolean }
+  ): Promise<CloudSyncSnapshot | null> {
+    const cloudClient = this.getCloudClient();
+    if (!cloudClient.listCloudSyncSnapshots || !cloudClient.readCloudSyncSnapshot) {
+      return null;
+    }
+
+    let snapshotInfos: CloudSyncRemoteSnapshotInfo[];
+    try {
+      snapshotInfos = await cloudClient.listCloudSyncSnapshots(storageId);
+    } catch (error) {
+      if (options.required) {
+        throw error;
+      }
+      return null;
+    }
+
+    let newestSnapshot: CloudSyncSnapshot | null = null;
+    const candidates = [...snapshotInfos]
+      .sort(compareRemoteSnapshotInfoDescending)
+      .slice(0, MAX_REMOTE_SNAPSHOT_SCAN);
+    let lastSnapshotError: unknown;
+
+    for (const snapshotInfo of candidates) {
+      try {
+        const snapshot = await cloudClient.readCloudSyncSnapshot(storageId, snapshotInfo);
+        this.assertValidRemoteSnapshot(snapshot);
+        if (!newestSnapshot || isCloudSyncSnapshotNewer(snapshot, newestSnapshot)) {
+          newestSnapshot = snapshot;
+        }
+      } catch (error) {
+        lastSnapshotError = error;
+        if (options.required && snapshotInfos.length === 1) {
+          throw error;
+        }
+      }
+    }
+
+    if (options.required && snapshotInfos.length > 0 && !newestSnapshot && lastSnapshotError) {
+      throw lastSnapshotError;
+    }
+
+    return newestSnapshot;
   }
 
   private buildManifest(
@@ -721,6 +849,7 @@ export class CloudSyncService {
     expectedRevision: string | null
   ): Promise<void> {
     const cloudClient = this.getCloudClient();
+    await this.saveSnapshotFileIfSupported(storageId, manifest.latestSnapshot);
     const result = await cloudClient.saveCloudSyncManifest(storageId, manifest, {
       expectedRevision
     });
@@ -738,12 +867,32 @@ export class CloudSyncService {
     storageId: string,
     manifest: CloudSyncManifest
   ): Promise<void> {
+    await this.saveSnapshotFileIfSupported(storageId, manifest.latestSnapshot);
     const result = await this.getCloudClient().saveCloudSyncManifest(storageId, manifest);
     if (!result.success) {
       throw new Error(result.error || '重建云同步 manifest 失败');
     }
 
     await this.verifySavedManifest(storageId, manifest);
+  }
+
+  private async saveSnapshotFileIfSupported(
+    storageId: string,
+    snapshot?: CloudSyncSnapshot
+  ): Promise<void> {
+    if (!snapshot) {
+      return;
+    }
+
+    const cloudClient = this.getCloudClient();
+    if (!cloudClient.saveCloudSyncSnapshot) {
+      return;
+    }
+
+    const result = await cloudClient.saveCloudSyncSnapshot(storageId, snapshot);
+    if (!result.success) {
+      throw new Error(result.error || '保存云同步快照失败');
+    }
   }
 
   private async verifySavedManifest(
@@ -776,6 +925,12 @@ export class CloudSyncService {
       return;
     }
 
+    const savedSnapshotFile = await this.readSnapshotFileIfSupported(storageId, expectedSnapshot.revision);
+    if (savedSnapshotFile) {
+      this.assertSavedSnapshotMatches(savedSnapshotFile, expectedSnapshot, '云同步快照文件');
+      return;
+    }
+
     const savedManifest = await this.getCloudClient().getCloudSyncManifest(storageId);
     const savedSnapshot = savedManifest.latestSnapshot;
     if (!savedSnapshot) {
@@ -784,11 +939,35 @@ export class CloudSyncService {
       );
     }
 
+    this.assertSavedSnapshotMatches(savedSnapshot, expectedSnapshot, '云同步 manifest');
+  }
+
+  private async readSnapshotFileIfSupported(
+    storageId: string,
+    revision: string
+  ): Promise<CloudSyncSnapshot | null> {
+    const cloudClient = this.getCloudClient();
+    if (!cloudClient.readCloudSyncSnapshot) {
+      return null;
+    }
+
+    try {
+      return await cloudClient.readCloudSyncSnapshot(storageId, revision);
+    } catch {
+      return null;
+    }
+  }
+
+  private assertSavedSnapshotMatches(
+    savedSnapshot: CloudSyncSnapshot,
+    expectedSnapshot: CloudSyncSnapshot,
+    sourceName: string
+  ): void {
     this.assertValidSavedSnapshot(savedSnapshot);
 
     if (savedSnapshot.revision !== expectedSnapshot.revision) {
       throw new Error(
-        `云同步 manifest 保存后校验失败：期望 revision ${expectedSnapshot.revision}，实际 ${savedSnapshot.revision}`
+        `${sourceName} 保存后校验失败：期望 revision ${expectedSnapshot.revision}，实际 ${savedSnapshot.revision}`
       );
     }
 
@@ -797,13 +976,13 @@ export class CloudSyncService {
       savedSnapshot.dataChecksum !== expectedSnapshot.dataChecksum
     ) {
       throw new Error(
-        `云同步 manifest 保存后数据校验失败：期望 checksum ${expectedSnapshot.dataChecksum}，` +
+        `${sourceName} 保存后数据校验失败：期望 checksum ${expectedSnapshot.dataChecksum}，` +
         `实际 ${savedSnapshot.dataChecksum || '空'}`
       );
     }
 
     if (!dataSetsEqual(savedSnapshot.data, expectedSnapshot.data)) {
-      throw new Error('云同步 manifest 保存后数据校验失败：云端快照内容与本地提交不一致');
+      throw new Error(`${sourceName} 保存后数据校验失败：云端快照内容与本地提交不一致`);
     }
   }
 
@@ -838,7 +1017,10 @@ export class CloudSyncService {
       return {
         getCloudSyncManifest: storageId => CloudBackupAPI.getCloudSyncManifest(storageId),
         saveCloudSyncManifest: (storageId, manifest, options) =>
-          CloudBackupAPI.saveCloudSyncManifest(storageId, manifest, options)
+          CloudBackupAPI.saveCloudSyncManifest(storageId, manifest, options),
+        listCloudSyncSnapshots: storageId => CloudBackupAPI.listCloudSyncSnapshots(storageId),
+        readCloudSyncSnapshot: (storageId, snapshot) => CloudBackupAPI.readCloudSyncSnapshot(storageId, snapshot),
+        saveCloudSyncSnapshot: (storageId, snapshot) => CloudBackupAPI.saveCloudSyncSnapshot(storageId, snapshot)
       };
     }
 
@@ -846,14 +1028,20 @@ export class CloudSyncService {
       return {
         getCloudSyncManifest: storageId => webCloudBackupService.getCloudSyncManifest(storageId),
         saveCloudSyncManifest: (storageId, manifest, options) =>
-          webCloudBackupService.saveCloudSyncManifest(storageId, manifest, options)
+          webCloudBackupService.saveCloudSyncManifest(storageId, manifest, options),
+        listCloudSyncSnapshots: storageId => webCloudBackupService.listCloudSyncSnapshots(storageId),
+        readCloudSyncSnapshot: (storageId, snapshot) => webCloudBackupService.readCloudSyncSnapshot(storageId, snapshot),
+        saveCloudSyncSnapshot: (storageId, snapshot) => webCloudBackupService.saveCloudSyncSnapshot(storageId, snapshot)
       };
     }
 
     return {
       getCloudSyncManifest: storageId => mobileCloudBackupService.getCloudSyncManifest(storageId),
       saveCloudSyncManifest: (storageId, manifest, options) =>
-        mobileCloudBackupService.saveCloudSyncManifest(storageId, manifest, options)
+        mobileCloudBackupService.saveCloudSyncManifest(storageId, manifest, options),
+      listCloudSyncSnapshots: storageId => mobileCloudBackupService.listCloudSyncSnapshots(storageId),
+      readCloudSyncSnapshot: (storageId, snapshot) => mobileCloudBackupService.readCloudSyncSnapshot(storageId, snapshot),
+      saveCloudSyncSnapshot: (storageId, snapshot) => mobileCloudBackupService.saveCloudSyncSnapshot(storageId, snapshot)
     };
   }
 
@@ -1412,7 +1600,8 @@ export function getFriendlyCloudSyncError(error?: string): string {
   if (!error) return '同步失败，请稍后重试';
   if (
     error.includes('云端同步文件状态持续变化') ||
-    error.includes('云同步 manifest 保存后校验失败')
+    error.includes('云同步 manifest 保存后校验失败') ||
+    error.includes('云同步快照文件 保存后')
   ) {
     return '云端同步状态暂时不稳定，应用会自动重试';
   }
@@ -1454,6 +1643,38 @@ function hasRemoteDataChanged(
   }
 
   return !dataSetsEqual(previousRemoteData, applyCloudSyncTombstones(latestSnapshot.data));
+}
+
+function compareRemoteSnapshotInfoDescending(
+  left: CloudSyncRemoteSnapshotInfo,
+  right: CloudSyncRemoteSnapshotInfo
+): number {
+  const timeDiff = getRemoteSnapshotInfoTime(right) - getRemoteSnapshotInfoTime(left);
+  if (timeDiff !== 0) {
+    return timeDiff;
+  }
+
+  return right.revision.localeCompare(left.revision);
+}
+
+function isCloudSyncSnapshotNewer(left: CloudSyncSnapshot, right: CloudSyncSnapshot): boolean {
+  const leftTime = getCloudSyncSnapshotTime(left);
+  const rightTime = getCloudSyncSnapshotTime(right);
+  if (leftTime !== rightTime) {
+    return leftTime > rightTime;
+  }
+
+  return left.revision.localeCompare(right.revision) > 0;
+}
+
+function getRemoteSnapshotInfoTime(info: CloudSyncRemoteSnapshotInfo): number {
+  const modifiedAtTime = info.modifiedAt ? new Date(info.modifiedAt).getTime() : Number.NaN;
+  return Number.isNaN(modifiedAtTime) ? 0 : modifiedAtTime;
+}
+
+function getCloudSyncSnapshotTime(snapshot: CloudSyncSnapshot): number {
+  const createdAtTime = new Date(snapshot.createdAt).getTime();
+  return Number.isNaN(createdAtTime) ? 0 : createdAtTime;
 }
 
 class CloudSyncRemoteChangedError extends Error {

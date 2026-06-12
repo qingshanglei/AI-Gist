@@ -21,6 +21,12 @@ import type {
   CloudSyncManifestSaveOptions,
   CloudSyncManifestSaveResult
 } from '../cloud-sync-manifest';
+import type {
+  CloudSyncRemoteSnapshotInfo
+} from '../cloud-sync-snapshots';
+import type {
+  CloudSyncSnapshot
+} from '../cloud-sync-engine';
 
 /**
  * Electron API 接口定义
@@ -115,6 +121,21 @@ export default interface ElectronApi {
       manifest: CloudSyncManifest,
       options?: CloudSyncManifestSaveOptions
     ) => Promise<CloudSyncManifestSaveResult>
+    listSyncSnapshots: (storageId: string) => Promise<
+      { success: true; snapshots: CloudSyncRemoteSnapshotInfo[] } |
+      { success: false; error?: string }
+    >
+    readSyncSnapshot: (
+      storageId: string,
+      snapshot: CloudSyncRemoteSnapshotInfo | string
+    ) => Promise<
+      { success: true; snapshot: CloudSyncSnapshot } |
+      { success: false; error?: string }
+    >
+    saveSyncSnapshot: (
+      storageId: string,
+      snapshot: CloudSyncSnapshot
+    ) => Promise<{ success: boolean; error?: string }>
   }
 
   // 应用信息和更新

@@ -26,8 +26,13 @@ import {
   CLOUD_BACKUP_FILE_PREFIX,
   getCloudBackupDirectoryPath,
   getCloudBackupFilePath,
-  isCloudBackupFileName
+  getCloudSyncSnapshotFileName,
+  getCloudSyncSnapshotRevisionFromFileName,
+  getCloudSyncSnapshotsDirectoryRelativePath,
+  isCloudBackupFileName,
+  joinCloudPath
 } from '@shared/cloud-backup-paths';
+import type { CloudSyncSnapshot } from '@shared/cloud-sync-engine';
 import type {
   CloudSyncManifest,
   CloudSyncManifestSaveOptions
@@ -39,6 +44,13 @@ import {
   getCloudSyncManifestRevision,
   readCloudSyncManifestWithFallback
 } from '@shared/cloud-sync-manifest';
+import type {
+  CloudSyncRemoteSnapshotInfo
+} from '@shared/cloud-sync-snapshots';
+import {
+  assertValidCloudSyncSnapshotFile,
+  createCloudSyncSnapshotFile
+} from '@shared/cloud-sync-snapshots';
 import { WebDAVProvider } from './webdav-provider';
 import { ICloudProvider } from './icloud-provider';
 import { DataManagementService } from '../data/data-management-service';
@@ -425,6 +437,54 @@ export class CloudBackupManager {
           };
         }
 
+        return {
+          success: false,
+          error: this.getErrorMessage(error)
+        };
+      }
+    });
+
+    ipcMain.handle('cloud:list-sync-snapshots', async (_, storageId: string) => {
+      try {
+        return {
+          success: true,
+          snapshots: await this.listCloudSyncSnapshots(storageId)
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: this.getErrorMessage(error)
+        };
+      }
+    });
+
+    ipcMain.handle('cloud:read-sync-snapshot', async (
+      _,
+      storageId: string,
+      snapshot: CloudSyncRemoteSnapshotInfo | string
+    ) => {
+      try {
+        return {
+          success: true,
+          snapshot: await this.readCloudSyncSnapshot(storageId, snapshot)
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: this.getErrorMessage(error)
+        };
+      }
+    });
+
+    ipcMain.handle('cloud:save-sync-snapshot', async (
+      _,
+      storageId: string,
+      snapshot: CloudSyncSnapshot
+    ) => {
+      try {
+        await this.writeCloudSyncSnapshot(storageId, snapshot);
+        return { success: true };
+      } catch (error) {
         return {
           success: false,
           error: this.getErrorMessage(error)
@@ -844,6 +904,78 @@ export class CloudBackupManager {
     await provider.writeFile(backupPath, content);
   }
 
+  private async listCloudSyncSnapshots(storageId: string): Promise<CloudSyncRemoteSnapshotInfo[]> {
+    await this.loadConfigs();
+    const config = this.getStorageConfig(storageId);
+    const provider = this.createProvider(config);
+    const snapshotsDir = this.getSyncSnapshotsDirectoryCloudPath(config);
+
+    try {
+      const files = await provider.listFiles(snapshotsDir);
+      return files
+        .filter(file => !file.isDirectory)
+        .map(file => this.createRemoteSnapshotInfo(config, file))
+        .filter((info): info is CloudSyncRemoteSnapshotInfo => !!info)
+        .sort((a, b) => (b.createdAt || b.modifiedAt || '').localeCompare(a.createdAt || a.modifiedAt || ''));
+    } catch (error) {
+      if (this.isNotFoundError(error)) {
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  private async readCloudSyncSnapshot(
+    storageId: string,
+    snapshot: CloudSyncRemoteSnapshotInfo | string
+  ): Promise<CloudSyncSnapshot> {
+    await this.loadConfigs();
+    const config = this.getStorageConfig(storageId);
+    const provider = this.createProvider(config);
+    const snapshotInfo = this.normalizeSnapshotInfo(config, snapshot);
+    const data = await provider.readFile(snapshotInfo.path);
+
+    try {
+      return assertValidCloudSyncSnapshotFile(JSON.parse(Buffer.from(data).toString('utf-8')));
+    } catch (error) {
+      throw new Error(`云同步快照内容无效（${snapshotInfo.path}）: ${this.formatErrorMessage(error)}`);
+    }
+  }
+
+  private async writeCloudSyncSnapshot(storageId: string, snapshot: CloudSyncSnapshot): Promise<void> {
+    await this.loadConfigs();
+    const config = this.getStorageConfig(storageId);
+    const provider = this.createProvider(config);
+    const normalizedSnapshot = assertValidCloudSyncSnapshotFile(snapshot);
+    const snapshotPath = this.getSyncSnapshotCloudPath(config, normalizedSnapshot.revision);
+    const content = Buffer.from(
+      JSON.stringify(createCloudSyncSnapshotFile(normalizedSnapshot), null, 2),
+      'utf-8'
+    );
+
+    if (config.type === 'webdav' && provider.initializeDirectories) {
+      await provider.initializeDirectories();
+    }
+
+    try {
+      await provider.writeFile(snapshotPath, content, { ifNoneMatch: true });
+    } catch (error) {
+      if (!this.isCloudSyncRevisionConflictError(error)) {
+        throw error;
+      }
+
+      const existingSnapshot = await this.readCloudSyncSnapshot(storageId, {
+        revision: normalizedSnapshot.revision,
+        path: snapshotPath
+      });
+      if (this.isSameCloudSyncSnapshot(existingSnapshot, normalizedSnapshot)) {
+        return;
+      }
+
+      throw new Error(`云同步快照 ${normalizedSnapshot.revision} 已存在但内容不一致`);
+    }
+  }
+
   // ==================== 存储提供者管理 ====================
 
   /**
@@ -892,6 +1024,18 @@ export class CloudBackupManager {
 
   private getSyncManifestBackupCloudPath(config: CloudStorageConfig): string {
     return this.getSyncManifestCloudPath(config, CLOUD_SYNC_MANIFEST_BACKUP_FILE);
+  }
+
+  private getSyncSnapshotsDirectoryCloudPath(config: CloudStorageConfig): string {
+    return this.getSyncManifestCloudPath(config, getCloudSyncSnapshotsDirectoryRelativePath());
+  }
+
+  private getSyncSnapshotCloudPath(config: CloudStorageConfig, revision: string): string {
+    return this.getSyncManifestCloudPath(
+      config,
+      joinCloudPath(getCloudSyncSnapshotsDirectoryRelativePath(), getCloudSyncSnapshotFileName(revision))
+        .replace(/^\/+/, '')
+    );
   }
 
   // ==================== 配置文件管理 ====================
@@ -1026,6 +1170,47 @@ export class CloudBackupManager {
     }
 
     return {};
+  }
+
+  private createRemoteSnapshotInfo(
+    config: CloudStorageConfig,
+    file: CloudFileInfo
+  ): CloudSyncRemoteSnapshotInfo | null {
+    const fileName = file.name || path.basename(file.path || '');
+    const revision = getCloudSyncSnapshotRevisionFromFileName(fileName);
+    if (!revision) {
+      return null;
+    }
+
+    return {
+      revision,
+      path: this.getSyncSnapshotCloudPath(config, revision),
+      modifiedAt: file.modifiedAt,
+      size: file.size
+    };
+  }
+
+  private normalizeSnapshotInfo(
+    config: CloudStorageConfig,
+    snapshot: CloudSyncRemoteSnapshotInfo | string
+  ): CloudSyncRemoteSnapshotInfo {
+    if (typeof snapshot === 'string') {
+      return {
+        revision: snapshot,
+        path: this.getSyncSnapshotCloudPath(config, snapshot)
+      };
+    }
+
+    return {
+      ...snapshot,
+      path: snapshot.path || this.getSyncSnapshotCloudPath(config, snapshot.revision)
+    };
+  }
+
+  private isSameCloudSyncSnapshot(left: CloudSyncSnapshot, right: CloudSyncSnapshot): boolean {
+    return left.revision === right.revision &&
+      left.dataChecksum === right.dataChecksum &&
+      JSON.stringify(left.data) === JSON.stringify(right.data);
   }
 
   private isCloudSyncRevisionConflictError(error: unknown): boolean {
