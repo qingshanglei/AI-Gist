@@ -275,6 +275,14 @@ function validateSnapshotRecords(data: CloudSyncDataSet): CloudSyncSnapshotValid
         return { valid: false, reason: `snapshot data ${collection}[${index}] must be an object` };
       }
 
+      const blobPath = findRawBlobPath(record);
+      if (blobPath) {
+        return {
+          valid: false,
+          reason: `snapshot data ${collection}[${index}] contains unserialized Blob at ${blobPath}`
+        };
+      }
+
       const key = getCloudSyncRecordKey(collection, record);
       if (seenKeys.has(key)) {
         return { valid: false, reason: `snapshot data ${collection} has duplicate record key ${key}` };
@@ -548,19 +556,22 @@ function mergeWithBase(
     return;
   }
 
-  const chosen = chooseRecord(localRecord, remoteRecord, options);
-  records.push(cloneValue(chosen.record));
-  addConflict(conflicts, summary, {
-    collection,
-    key,
-    reason: 'both_modified',
-    resolution: chosen.resolution,
-    local: localRecord,
-    remote: remoteRecord,
-    base: baseRecord
-  });
+  const mergedRecord = mergeChangedRecordFields(collection, localRecord, remoteRecord, baseRecord, options);
+  records.push(cloneValue(mergedRecord.record));
 
-  if (chosen.record === remoteRecord) {
+  if (mergedRecord.hasFieldConflict) {
+    addConflict(conflicts, summary, {
+      collection,
+      key,
+      reason: 'both_modified',
+      resolution: mergedRecord.resolution,
+      local: localRecord,
+      remote: remoteRecord,
+      base: baseRecord
+    });
+  }
+
+  if (!recordsEqual(collection, mergedRecord.record, localRecord)) {
     summary.updated++;
   } else {
     summary.kept++;
@@ -613,6 +624,168 @@ function chooseRecord(
   }
 
   return { record: localRecord, resolution: options.prefer === 'newer' ? 'take-newer' : 'keep-local' };
+}
+
+function mergeChangedRecordFields(
+  collection: string,
+  localRecord: any,
+  remoteRecord: any,
+  baseRecord: any,
+  options: CloudSyncMergeOptions
+): { record: any; hasFieldConflict: boolean; resolution: CloudSyncResolution } {
+  const chosen = chooseRecord(localRecord, remoteRecord, options);
+  const merged: Record<string, any> = {};
+  let hasFieldConflict = false;
+  const keys = new Set([
+    ...Object.keys(baseRecord || {}),
+    ...Object.keys(localRecord || {}),
+    ...Object.keys(remoteRecord || {})
+  ]);
+
+  for (const field of keys) {
+    const baseValue = baseRecord?.[field];
+    const localValue = localRecord?.[field];
+    const remoteValue = remoteRecord?.[field];
+
+    if (fieldValuesEqual(collection, field, localValue, remoteValue)) {
+      merged[field] = cloneValue(localValue);
+      continue;
+    }
+
+    if (isLocalIdentityField(field)) {
+      merged[field] = cloneValue(localValue !== undefined ? localValue : remoteValue);
+      continue;
+    }
+
+    if (isMergeTimestampField(field)) {
+      merged[field] = cloneValue(chooseNewestTimestampValue(localValue, remoteValue, baseValue));
+      continue;
+    }
+
+    const mergedSpecialValue = mergeSpecialFieldValue(field, localValue, remoteValue);
+    if (mergedSpecialValue.merged) {
+      merged[field] = mergedSpecialValue.value;
+      continue;
+    }
+
+    const localChanged = !fieldValuesEqual(collection, field, localValue, baseValue);
+    const remoteChanged = !fieldValuesEqual(collection, field, remoteValue, baseValue);
+
+    if (localChanged && !remoteChanged) {
+      merged[field] = cloneValue(localValue);
+      continue;
+    }
+
+    if (!localChanged && remoteChanged) {
+      merged[field] = cloneValue(remoteValue);
+      continue;
+    }
+
+    if (!localChanged && !remoteChanged) {
+      merged[field] = cloneValue(localValue);
+      continue;
+    }
+
+    hasFieldConflict = true;
+    merged[field] = cloneValue(chosen.record?.[field]);
+  }
+
+  return {
+    record: merged,
+    hasFieldConflict,
+    resolution: chosen.resolution
+  };
+}
+
+function fieldValuesEqual(collection: string, field: string, left: any, right: any): boolean {
+  if (field === 'tags') {
+    return stableSerialize(normalizeTags(left)) === stableSerialize(normalizeTags(right));
+  }
+
+  return stableSerialize(normalizeForCompare(collection, left)) ===
+    stableSerialize(normalizeForCompare(collection, right));
+}
+
+function isLocalIdentityField(field: string): boolean {
+  return field === 'id';
+}
+
+function isMergeTimestampField(field: string): boolean {
+  return field === 'updatedAt' ||
+    field === 'modifiedAt' ||
+    field === 'lastModified';
+}
+
+function chooseNewestTimestampValue(...values: any[]): any {
+  let newestValue = values[0];
+  let newestTime = getTimestampValueTime(newestValue);
+
+  for (const value of values.slice(1)) {
+    const time = getTimestampValueTime(value);
+    if (time > newestTime) {
+      newestTime = time;
+      newestValue = value;
+    }
+  }
+
+  return newestValue;
+}
+
+function getTimestampValueTime(value: any): number {
+  const time = new Date(value).getTime();
+  return Number.isNaN(time) ? 0 : time;
+}
+
+function findRawBlobPath(value: any, path = '$', seen = new WeakSet<object>()): string | null {
+  if (value === null || value === undefined || typeof value !== 'object') {
+    return null;
+  }
+
+  if (isBlob(value)) {
+    return path;
+  }
+
+  if (seen.has(value)) {
+    return null;
+  }
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    for (const [index, item] of value.entries()) {
+      const found = findRawBlobPath(item, `${path}[${index}]`, seen);
+      if (found) {
+        return found;
+      }
+    }
+    return null;
+  }
+
+  for (const [key, fieldValue] of Object.entries(value)) {
+    const found = findRawBlobPath(fieldValue, `${path}.${key}`, seen);
+    if (found) {
+      return found;
+    }
+  }
+
+  return null;
+}
+
+function mergeSpecialFieldValue(
+  field: string,
+  localValue: any,
+  remoteValue: any
+): { merged: boolean; value?: any } {
+  if (field === 'tags') {
+    return {
+      merged: true,
+      value: Array.from(new Set([
+        ...normalizeTags(localValue),
+        ...normalizeTags(remoteValue)
+      ])).sort()
+    };
+  }
+
+  return { merged: false };
 }
 
 function isPresent(record: any | undefined): boolean {

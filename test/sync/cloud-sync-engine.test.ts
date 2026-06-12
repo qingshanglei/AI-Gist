@@ -185,6 +185,84 @@ describe('cloud sync engine', () => {
     expect(result.data.prompts?.[0].title).toBe('Remote')
   })
 
+  it('auto-merges different fields changed on the same record', () => {
+    const base = {
+      prompts: [
+        {
+          id: 1,
+          uuid: 'prompt-1',
+          title: 'Base title',
+          content: 'Base content',
+          tags: ['base'],
+          updatedAt: '2026-01-01T00:00:00.000Z'
+        }
+      ]
+    }
+    const local = {
+      prompts: [
+        {
+          id: 2,
+          uuid: 'prompt-1',
+          title: 'Local title',
+          content: 'Base content',
+          tags: ['base', 'local'],
+          updatedAt: '2026-01-02T00:00:00.000Z'
+        }
+      ]
+    }
+    const remote = {
+      prompts: [
+        {
+          id: 3,
+          uuid: 'prompt-1',
+          title: 'Base title',
+          content: 'Remote content',
+          tags: ['base', 'remote'],
+          updatedAt: '2026-01-03T00:00:00.000Z'
+        }
+      ]
+    }
+
+    const result = mergeCloudSyncData(local, remote, base)
+
+    expect(result.hasConflicts).toBe(false)
+    expect(result.data.prompts?.[0]).toMatchObject({
+      uuid: 'prompt-1',
+      title: 'Local title',
+      content: 'Remote content',
+      tags: ['base', 'local', 'remote'],
+      updatedAt: '2026-01-03T00:00:00.000Z'
+    })
+  })
+
+  it('still records conflicts when both devices change the same field', () => {
+    const base = {
+      prompts: [
+        { id: 1, uuid: 'prompt-1', title: 'Base', content: 'A', updatedAt: '2026-01-01T00:00:00.000Z' }
+      ]
+    }
+    const local = {
+      prompts: [
+        { id: 2, uuid: 'prompt-1', title: 'Local', content: 'A', updatedAt: '2026-01-02T00:00:00.000Z' }
+      ]
+    }
+    const remote = {
+      prompts: [
+        { id: 3, uuid: 'prompt-1', title: 'Remote', content: 'A', updatedAt: '2026-01-03T00:00:00.000Z' }
+      ]
+    }
+
+    const result = mergeCloudSyncData(local, remote, base)
+
+    expect(result.hasConflicts).toBe(true)
+    expect(result.conflicts[0]).toMatchObject({
+      collection: 'prompts',
+      reason: 'both_modified',
+      resolution: 'take-newer'
+    })
+    expect(result.data.prompts?.[0].title).toBe('Remote')
+  })
+
   it('creates sync snapshots without mutating input data', () => {
     const data = {
       aiConfigs: [
@@ -265,6 +343,19 @@ describe('cloud sync engine', () => {
     expect(() => createCloudSyncSnapshot({
       prompts: ['bad-record'] as any[]
     }, 'device-a', 'rev-1')).toThrow('snapshot data prompts[0] must be an object')
+  })
+
+  it('rejects snapshots that still contain raw image Blob values', () => {
+    expect(() => createCloudSyncSnapshot({
+      prompts: [
+        {
+          uuid: 'prompt-1',
+          title: 'Prompt with raw image',
+          imageBlobs: [new Blob(['image-bytes'], { type: 'image/png' })],
+          updatedAt: '2026-01-01T00:00:00.000Z'
+        }
+      ]
+    }, 'device-a', 'rev-1')).toThrow('contains unserialized Blob')
   })
 
   it('rejects snapshots with invalid tombstones', () => {
