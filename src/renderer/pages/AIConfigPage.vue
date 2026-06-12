@@ -588,6 +588,7 @@ import { useWindowSize } from "~/composables/useWindowSize";
 import CommonModal from "~/components/common/CommonModal.vue";
 import QuickOptimizationConfigModal from "~/components/ai/QuickOptimizationConfigModal.vue";
 import { getDefaultBaseURL, getProviderMetadata } from "@shared/ai-provider-metadata";
+import { openExternalUrl } from "~/lib/platform/shell";
 
 const { t } = useI18n();
 const message = useMessage();
@@ -1475,7 +1476,7 @@ const handleQuickOptimizationConfigsUpdated = () => {
 const openApiKeyUrl = () => {
     const info = getApiKeyInfo.value;
     if (info.apiKeyUrl) {
-        window.electronAPI.shell.openExternal(info.apiKeyUrl);
+        openExternalUrl(info.apiKeyUrl);
     }
 };
 
@@ -1483,7 +1484,7 @@ const openApiKeyUrl = () => {
 const openDocumentationUrl = () => {
     const info = getApiKeyInfo.value;
     if (info.docUrl) {
-        window.electronAPI.shell.openExternal(info.docUrl);
+        openExternalUrl(info.docUrl);
     }
 };
 

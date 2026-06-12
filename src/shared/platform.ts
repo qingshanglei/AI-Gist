@@ -4,6 +4,34 @@
  */
 
 export type Platform = 'electron' | 'ios' | 'android' | 'web';
+export type RuntimeShell = 'desktop' | 'mobile';
+export type BuildPlatform = 'electron' | 'mobile' | 'web' | 'unknown';
+
+export interface PlatformCapabilities {
+  desktopShell: boolean;
+  mobileShell: boolean;
+  localDatabase: boolean;
+  preferences: boolean;
+  fileImport: boolean;
+  fileExport: boolean;
+  localBackupDirectory: boolean;
+  externalLinks: boolean;
+  globalShortcuts: boolean;
+  tray: boolean;
+  startup: boolean;
+  systemProxy: boolean;
+  electronUpdates: boolean;
+  cloudBackup: boolean;
+  webdavSync: boolean;
+  icloud: boolean;
+  aiGeneration: boolean;
+  aiProxy: boolean;
+  nativeAI: boolean;
+  webBackend: boolean;
+}
+
+declare const __APP_PLATFORM__: BuildPlatform | undefined;
+declare const __PLATFORM__: BuildPlatform | undefined;
 
 export class PlatformDetector {
   private static _platform: Platform | null = null;
@@ -16,8 +44,18 @@ export class PlatformDetector {
       return this._platform;
     }
 
+    const buildPlatform = this.getBuildPlatform();
+    if (buildPlatform === 'web') {
+      this._platform = 'web';
+      return this._platform;
+    }
+
     // 检测 Electron 环境
-    if (typeof window !== 'undefined' && (window as any).electronAPI) {
+    if (
+      (buildPlatform === 'electron' || buildPlatform === 'unknown') &&
+      typeof window !== 'undefined' &&
+      (window as any).electronAPI
+    ) {
       this._platform = 'electron';
       return this._platform;
     }
@@ -41,6 +79,35 @@ export class PlatformDetector {
     // 默认为 Web 环境
     this._platform = 'web';
     return this._platform;
+  }
+
+  static getBuildPlatform(): BuildPlatform {
+    if (typeof __APP_PLATFORM__ !== 'undefined') {
+      return __APP_PLATFORM__;
+    }
+
+    if (typeof __PLATFORM__ !== 'undefined') {
+      return __PLATFORM__;
+    }
+
+    return 'unknown';
+  }
+
+  static getShell(): RuntimeShell {
+    if (this.getBuildPlatform() === 'mobile') {
+      return 'mobile';
+    }
+
+    const platform = this.getPlatform();
+    if (platform === 'ios' || platform === 'android') {
+      return 'mobile';
+    }
+
+    if (platform === 'web' && this.isWebMobileShell()) {
+      return 'mobile';
+    }
+
+    return 'desktop';
   }
 
   /**
@@ -84,5 +151,115 @@ export class PlatformDetector {
    */
   static isDesktop(): boolean {
     return this.isElectron();
+  }
+
+  static isDesktopShell(): boolean {
+    return this.getShell() === 'desktop';
+  }
+
+  static isMobileShell(): boolean {
+    return this.getShell() === 'mobile';
+  }
+
+  private static isWebMobileShell(): boolean {
+    if (typeof window === 'undefined' || typeof navigator === 'undefined') {
+      return false;
+    }
+
+    const userAgent = navigator.userAgent || '';
+    const isMobileUserAgent = /Android|iPhone|iPad|iPod|Mobile|IEMobile|BlackBerry|Opera Mini/i.test(userAgent);
+    const isIPadDesktopMode = /Macintosh/i.test(userAgent) && (navigator.maxTouchPoints || 0) > 1;
+
+    if (isMobileUserAgent || isIPadDesktopMode) {
+      return true;
+    }
+
+    const isSmallViewport = typeof window.matchMedia === 'function'
+      ? window.matchMedia('(max-width: 768px)').matches
+      : window.innerWidth <= 768;
+    const hasCoarsePointer = typeof window.matchMedia === 'function'
+      ? window.matchMedia('(pointer: coarse)').matches || window.matchMedia('(hover: none)').matches
+      : false;
+
+    return isSmallViewport && hasCoarsePointer;
+  }
+
+  static getCapabilities(): PlatformCapabilities {
+    const platform = this.getPlatform();
+
+    if (platform === 'electron') {
+      return {
+        desktopShell: true,
+        mobileShell: false,
+        localDatabase: true,
+        preferences: true,
+        fileImport: true,
+        fileExport: true,
+        localBackupDirectory: true,
+        externalLinks: true,
+        globalShortcuts: true,
+        tray: true,
+        startup: true,
+        systemProxy: true,
+        electronUpdates: true,
+        cloudBackup: true,
+        webdavSync: true,
+        icloud: true,
+        aiGeneration: true,
+        aiProxy: false,
+        nativeAI: true,
+        webBackend: false
+      };
+    }
+
+    if (platform === 'ios' || platform === 'android') {
+      return {
+        desktopShell: false,
+        mobileShell: true,
+        localDatabase: true,
+        preferences: true,
+        fileImport: true,
+        fileExport: true,
+        localBackupDirectory: false,
+        externalLinks: true,
+        globalShortcuts: false,
+        tray: false,
+        startup: false,
+        systemProxy: false,
+        electronUpdates: false,
+        cloudBackup: true,
+        webdavSync: true,
+        icloud: platform === 'ios',
+        aiGeneration: true,
+        aiProxy: false,
+        nativeAI: false,
+        webBackend: false
+      };
+    }
+
+    const shell = this.getShell();
+
+    return {
+      desktopShell: shell === 'desktop',
+      mobileShell: shell === 'mobile',
+      localDatabase: true,
+      preferences: true,
+      fileImport: true,
+      fileExport: true,
+      localBackupDirectory: false,
+      externalLinks: true,
+      globalShortcuts: false,
+      tray: false,
+      startup: false,
+      systemProxy: false,
+      electronUpdates: false,
+      cloudBackup: true,
+      webdavSync: true,
+      icloud: false,
+      aiGeneration: true,
+      aiProxy: true,
+      nativeAI: false,
+      webBackend: true
+    };
   }
 }

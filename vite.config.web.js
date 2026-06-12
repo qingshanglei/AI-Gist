@@ -5,9 +5,6 @@ const { version } = require('./package.json');
 
 const { defineConfig } = require('vite');
 
-/**
- * https://vitejs.dev/config
- */
 const config = defineConfig({
     root: Path.join(__dirname, 'src', 'renderer'),
     publicDir: 'public',
@@ -16,13 +13,13 @@ const config = defineConfig({
     },
     open: false,
     build: {
-        outDir: Path.join(__dirname, 'build', 'renderer'),
+        outDir: Path.join(__dirname, 'build', 'web'),
         emptyOutDir: true,
     },
     plugins: [vuePlugin()],
     define: {
-        '__PLATFORM__': JSON.stringify('electron'),
-        '__APP_PLATFORM__': JSON.stringify('electron'),
+        '__PLATFORM__': JSON.stringify('web'),
+        '__APP_PLATFORM__': JSON.stringify('web'),
         '__APP_VERSION__': JSON.stringify(version)
     },
     resolve: {
@@ -38,3 +35,4 @@ const config = defineConfig({
 });
 
 module.exports = config;
+

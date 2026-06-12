@@ -4,6 +4,7 @@
  */
 
 import { ref, computed, readonly } from 'vue';
+import { openExternalUrl } from '~/lib/platform/shell';
 
 export interface UpdateInfo {
   currentVersion: string;
@@ -187,15 +188,14 @@ export function useUpdate() {
    * 打开下载页面
    */
   const openDownloadPage = async (url: string): Promise<{ success: boolean; error: string | null }> => {
-    if (!isElectronAvailable()) {
-      return {
-        success: false,
-        error: 'Electron API 不可用'
-      };
-    }
-
     try {
-      await window.electronAPI.app.openDownloadPage(url);
+      const result = await openExternalUrl(url);
+      if (!result.success) {
+        return {
+          success: false,
+          error: result.error || '打开下载页面失败'
+        };
+      }
       return { success: true, error: null };
     } catch (error: any) {
       console.error('打开下载页面失败:', error);
@@ -270,4 +270,4 @@ export function useUpdate() {
     initVersion,
     formatDate
   };
-} 
+}

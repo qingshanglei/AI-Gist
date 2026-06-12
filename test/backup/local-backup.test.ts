@@ -5,6 +5,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { testDataGenerators } from '../helpers/test-utils'
+import { PlatformDetector } from '../../src/shared/platform'
 import { createBackupPayload } from '../../src/shared/backup-integrity'
 
 // DataManagementAPI 通过 window.electronAPI 和 window.databaseAPI 操作
@@ -45,6 +46,7 @@ import { DataManagementAPI } from '../../src/renderer/lib/api/data-management.ap
 
 describe('DataManagementAPI - 本地备份/恢复', () => {
   beforeEach(() => {
+    ;(PlatformDetector as any)._platform = null
     setupWindowMocks()
   })
 

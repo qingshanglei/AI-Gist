@@ -25,6 +25,7 @@ import { CloudBackupAPI } from '../api/cloud-backup.api';
 import { DatabaseServiceManager } from './database-manager.service';
 import { AppSettingsService } from './app-settings.service';
 import { mobileCloudBackupService } from './mobile-cloud-backup.service';
+import { webCloudBackupService } from './web-cloud-backup.service';
 import type { DataChangeEventPayload, DataStoreName } from './data-change-events';
 import { onDataChange } from './data-change-events';
 
@@ -690,6 +691,13 @@ export class CloudSyncService {
       };
     }
 
+    if (PlatformDetector.isWeb()) {
+      return {
+        getCloudSyncManifest: storageId => webCloudBackupService.getCloudSyncManifest(storageId),
+        saveCloudSyncManifest: (storageId, manifest) => webCloudBackupService.saveCloudSyncManifest(storageId, manifest)
+      };
+    }
+
     return {
       getCloudSyncManifest: storageId => mobileCloudBackupService.getCloudSyncManifest(storageId),
       saveCloudSyncManifest: (storageId, manifest) => mobileCloudBackupService.saveCloudSyncManifest(storageId, manifest)
@@ -704,6 +712,12 @@ export class CloudSyncService {
     if (PlatformDetector.isElectron()) {
       return {
         getStorageConfigs: () => CloudBackupAPI.getStorageConfigs()
+      };
+    }
+
+    if (PlatformDetector.isWeb()) {
+      return {
+        getStorageConfigs: () => webCloudBackupService.getStorageConfigs()
       };
     }
 

@@ -24,7 +24,7 @@
                                 </template>
                                 {{ t('dataManagement.refreshBackupList') }}
                             </NButton>
-                            <NButton @click="handleOpenBackupDirectory">
+                            <NButton v-if="capabilities.localBackupDirectory" @click="handleOpenBackupDirectory">
                                 <template #icon>
                                     <NIcon>
                                         <Folder />
@@ -327,8 +327,10 @@ import {
 import { ref, computed, onMounted, watch } from "vue";
 import { useI18n } from 'vue-i18n';
 import { useDataManagement } from '@renderer/composables/useDataManagement';
+import { PlatformDetector } from '@shared/platform';
 
 const { t } = useI18n();
+const capabilities = PlatformDetector.getCapabilities();
 
 // 使用数据管理 composable
 const {

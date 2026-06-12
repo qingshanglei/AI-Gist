@@ -3,12 +3,15 @@
  * 所有业务逻辑都在前端，主进程只负责文件操作
  */
 
+import { PlatformDetector } from '@shared/platform';
 import {
   createBackupPayload,
   unwrapBackupData
 } from '@shared/backup-integrity';
 
 export class DataManagementAPI {
+  private static webImportFiles = new Map<string, File>();
+
   private static createBackupId(): string {
     if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
       return crypto.randomUUID();
@@ -21,7 +24,54 @@ export class DataManagementAPI {
    * 检查 Electron API 是否可用
    */
   private static isElectronAvailable(): boolean {
-    return typeof window !== 'undefined' && !!(window as any).electronAPI;
+    return PlatformDetector.isElectron() && typeof window !== 'undefined' && !!(window as any).electronAPI;
+  }
+
+  private static isWebFileToken(path: string): boolean {
+    return path.startsWith('web-import:') || path.startsWith('web-download:');
+  }
+
+  private static async selectWebImportFile(format: string): Promise<string | null> {
+    if (typeof document === 'undefined') {
+      return null;
+    }
+
+    return new Promise(resolve => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = format === 'json' ? '.json,application/json' : '.csv,text/csv';
+
+      input.onchange = () => {
+        const file = input.files?.[0];
+        if (!file) {
+          resolve(null);
+          return;
+        }
+
+        const token = `web-import:${crypto.randomUUID()}`;
+        this.webImportFiles.set(token, file);
+        resolve(token);
+      };
+
+      input.click();
+    });
+  }
+
+  private static downloadWebFile(defaultName: string, content: string): boolean {
+    if (typeof document === 'undefined') {
+      return false;
+    }
+
+    const blob = new Blob([content], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = defaultName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    return true;
   }
 
   /**
@@ -29,7 +79,7 @@ export class DataManagementAPI {
    */
   static async selectImportFile(format: string): Promise<string | null> {
     if (!this.isElectronAvailable()) {
-      throw new Error('Electron API not available');
+      return this.selectWebImportFile(format);
     }
     
     try {
@@ -45,7 +95,7 @@ export class DataManagementAPI {
    */
   static async selectExportPath(defaultName: string): Promise<string | null> {
     if (!this.isElectronAvailable()) {
-      throw new Error('Electron API not available');
+      return `web-download:${defaultName}`;
     }
     
     try {
@@ -61,7 +111,10 @@ export class DataManagementAPI {
    */
   static async writeFile(filePath: string, content: string): Promise<boolean> {
     if (!this.isElectronAvailable()) {
-      throw new Error('Electron API not available');
+      if (filePath.startsWith('web-download:')) {
+        return this.downloadWebFile(filePath.replace('web-download:', ''), content);
+      }
+      throw new Error('当前平台不支持写入该文件路径');
     }
     
     try {
@@ -78,7 +131,12 @@ export class DataManagementAPI {
    */
   static async readFile(filePath: string): Promise<string | null> {
     if (!this.isElectronAvailable()) {
-      throw new Error('Electron API not available');
+      if (filePath.startsWith('web-import:')) {
+        const file = this.webImportFiles.get(filePath);
+        this.webImportFiles.delete(filePath);
+        return file ? await file.text() : null;
+      }
+      throw new Error('当前平台不支持读取该文件路径');
     }
     
     try {
