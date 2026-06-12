@@ -101,9 +101,15 @@ interface PreservedPromptDeleteContext {
   promptIds: Set<string>;
 }
 
+interface PreservedCategoryDeleteContext {
+  categoryUuids: Set<string>;
+  categoryIds: Set<string>;
+}
+
 interface CloudSyncTombstoneMergeContext {
   tombstones: CloudSyncTombstone[];
   preservedPromptDeletes: PreservedPromptDeleteContext;
+  preservedCategoryDeletes: PreservedCategoryDeleteContext;
 }
 
 export interface CloudSyncSnapshotValidationResult {
@@ -411,6 +417,7 @@ export function applyCloudSyncTombstones<TData extends CloudSyncDataSet>(data: T
   const cloned = cloneValue(data) as CloudSyncDataSet;
   const tombstones = normalizeCloudSyncTombstones(cloned.syncTombstones || []);
   const preservedPromptDeletes = createPreservedPromptDeleteContext(cloned, tombstones);
+  const preservedCategoryDeletes = createPreservedCategoryDeleteContext(cloned, tombstones);
 
   for (const collection of Object.keys(cloned)) {
     if (collection === 'syncTombstones') {
@@ -425,6 +432,10 @@ export function applyCloudSyncTombstones<TData extends CloudSyncDataSet>(data: T
     cloned[collection] = records.filter(record =>
       !tombstones.some(tombstone => {
         if (shouldIgnoreCascadePromptChildTombstone(tombstone, preservedPromptDeletes)) {
+          return false;
+        }
+
+        if (shouldIgnoreReferencedCategoryTombstone(tombstone, preservedCategoryDeletes)) {
           return false;
         }
 
@@ -582,6 +593,12 @@ function mergeWithBase(
       return;
     }
 
+    if (hasIgnoredReferencedCategoryTombstone(tombstoneContext, collection, remoteRecord)) {
+      records.push(cloneValue(remoteRecord));
+      summary.updated++;
+      return;
+    }
+
     const remoteChanged = !recordsEqual(collection, remoteRecord, baseRecord, relationContexts.remote, relationContexts.base);
     if (!remoteChanged) {
       summary.deleted++;
@@ -604,6 +621,12 @@ function mergeWithBase(
 
   if (!remoteExists) {
     if (hasIgnoredCascadePromptChildTombstone(tombstoneContext, collection, localRecord)) {
+      records.push(cloneValue(localRecord));
+      summary.kept++;
+      return;
+    }
+
+    if (hasIgnoredReferencedCategoryTombstone(tombstoneContext, collection, localRecord)) {
       records.push(cloneValue(localRecord));
       summary.kept++;
       return;
@@ -1190,7 +1213,22 @@ function createTombstoneMergeContext(...dataSets: CloudSyncDataSet[]): CloudSync
 
   return {
     tombstones,
-    preservedPromptDeletes: createPreservedPromptDeleteContext(promptData, tombstones)
+    preservedPromptDeletes: createPreservedPromptDeleteContext(promptData, tombstones),
+    preservedCategoryDeletes: createPreservedCategoryDeleteContext(
+      mergeDataSetsForRelationContext(...getActiveMergeDataSets(dataSets)),
+      tombstones
+    )
+  };
+}
+
+function getActiveMergeDataSets(dataSets: CloudSyncDataSet[]): CloudSyncDataSet[] {
+  return dataSets.length > 1 ? dataSets.slice(0, 2) : dataSets;
+}
+
+function mergeDataSetsForRelationContext(...dataSets: CloudSyncDataSet[]): CloudSyncDataSet {
+  return {
+    categories: dataSets.flatMap(data => Array.isArray(data.categories) ? data.categories : []),
+    prompts: dataSets.flatMap(data => Array.isArray(data.prompts) ? data.prompts : [])
   };
 }
 
@@ -1268,6 +1306,116 @@ function shouldIgnoreCascadePromptChildTombstone(
 
   const promptId = normalizeRelationId(snapshot.promptId);
   return !!promptId && preservedPromptDeletes.promptIds.has(promptId);
+}
+
+function createPreservedCategoryDeleteContext(
+  data: CloudSyncDataSet,
+  tombstones: CloudSyncTombstone[]
+): PreservedCategoryDeleteContext {
+  const context: PreservedCategoryDeleteContext = {
+    categoryUuids: new Set<string>(),
+    categoryIds: new Set<string>()
+  };
+  const categoryTombstones = tombstones
+    .filter(tombstone => tombstone.collectionName === 'categories');
+  if (categoryTombstones.length === 0) {
+    return context;
+  }
+
+  const relationContext = createRelationContext(data);
+  const prompts = (Array.isArray(data.prompts) ? data.prompts : [])
+    .filter(prompt => !tombstones.some(tombstone => tombstoneDeletesRecord(tombstone, 'prompts', prompt)));
+  for (const tombstone of categoryTombstones) {
+    const categoryRefs = getCategoryRefsFromTombstone(tombstone);
+    for (const prompt of prompts) {
+      if (promptReferencesCategory(prompt, categoryRefs, relationContext)) {
+        categoryRefs.categoryUuids.forEach(categoryUuid => context.categoryUuids.add(categoryUuid));
+        categoryRefs.categoryIds.forEach(categoryId => context.categoryIds.add(categoryId));
+      }
+    }
+  }
+
+  return context;
+}
+
+function hasIgnoredReferencedCategoryTombstone(
+  tombstoneContext: CloudSyncTombstoneMergeContext,
+  collection: string,
+  record: any
+): boolean {
+  if (collection !== 'categories' || !isPresent(record)) {
+    return false;
+  }
+
+  return tombstoneContext.tombstones.some(tombstone =>
+    shouldIgnoreReferencedCategoryTombstone(tombstone, tombstoneContext.preservedCategoryDeletes) &&
+    tombstoneMatchesRecord(tombstone, collection, record)
+  );
+}
+
+function shouldIgnoreReferencedCategoryTombstone(
+  tombstone: CloudSyncTombstone,
+  preservedCategoryDeletes: PreservedCategoryDeleteContext
+): boolean {
+  if (tombstone.collectionName !== 'categories') {
+    return false;
+  }
+
+  const categoryRefs = getCategoryRefsFromTombstone(tombstone);
+  return categoryRefs.categoryUuids.some(categoryUuid => preservedCategoryDeletes.categoryUuids.has(categoryUuid)) ||
+    categoryRefs.categoryIds.some(categoryId => preservedCategoryDeletes.categoryIds.has(categoryId));
+}
+
+function getCategoryRefsFromTombstone(tombstone: CloudSyncTombstone): {
+  categoryUuids: string[];
+  categoryIds: string[];
+} {
+  const categoryUuids = new Set<string>();
+  const categoryIds = new Set<string>();
+  if (typeof tombstone.recordUuid === 'string' && tombstone.recordUuid) {
+    categoryUuids.add(tombstone.recordUuid);
+  }
+
+  const snapshot = tombstone.recordSnapshot;
+  if (snapshot && typeof snapshot === 'object') {
+    if (typeof snapshot.uuid === 'string' && snapshot.uuid) {
+      categoryUuids.add(snapshot.uuid);
+    }
+
+    const snapshotId = normalizeRelationId(snapshot.id);
+    if (snapshotId) {
+      categoryIds.add(snapshotId);
+    }
+  }
+
+  const recordKeyUuid = tombstone.recordKey.match(/^uuid:(.+)$/)?.[1];
+  if (recordKeyUuid) {
+    categoryUuids.add(recordKeyUuid);
+  }
+
+  const recordKeyId = tombstone.recordKey.match(/^id:(.+)$/)?.[1];
+  if (recordKeyId) {
+    categoryIds.add(recordKeyId);
+  }
+
+  return {
+    categoryUuids: Array.from(categoryUuids),
+    categoryIds: Array.from(categoryIds)
+  };
+}
+
+function promptReferencesCategory(
+  prompt: any,
+  categoryRefs: { categoryUuids: string[]; categoryIds: string[] },
+  relationContext: CloudSyncRelationContext
+): boolean {
+  const promptCategoryUuid = getInferredCategoryUuid(prompt, relationContext);
+  if (promptCategoryUuid && categoryRefs.categoryUuids.includes(promptCategoryUuid)) {
+    return true;
+  }
+
+  const promptCategoryId = normalizeRelationId(prompt?.categoryId);
+  return !!promptCategoryId && categoryRefs.categoryIds.includes(promptCategoryId);
 }
 
 function tombstoneDeletesRecord(tombstone: CloudSyncTombstone, collection: string, record: any): boolean {

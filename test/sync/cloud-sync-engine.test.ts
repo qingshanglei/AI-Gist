@@ -797,4 +797,119 @@ describe('cloud sync engine', () => {
       expect.objectContaining({ uuid: 'history-2', promptUuid: 'prompt-1' })
     ]))
   })
+
+  it('keeps a category when another device added a prompt that still references it', () => {
+    const base = {
+      categories: [
+        {
+          id: 1,
+          uuid: 'cat-1',
+          name: 'Shared category',
+          updatedAt: '2026-01-01T00:00:00.000Z'
+        }
+      ],
+      prompts: [],
+      syncTombstones: []
+    }
+    const local = {
+      categories: [],
+      prompts: [],
+      syncTombstones: [
+        {
+          collectionName: 'categories',
+          recordKey: 'uuid:cat-1',
+          recordUuid: 'cat-1',
+          deletedAt: '2026-01-02T00:00:00.000Z',
+          recordSnapshot: base.categories[0]
+        }
+      ]
+    }
+    const remote = {
+      categories: base.categories,
+      prompts: [
+        {
+          id: 10,
+          uuid: 'prompt-1',
+          title: 'Prompt created while offline',
+          categoryId: 1,
+          categoryUuid: 'cat-1',
+          updatedAt: '2026-01-03T00:00:00.000Z'
+        }
+      ],
+      syncTombstones: []
+    }
+
+    const result = mergeCloudSyncData(local, remote, base)
+
+    expect(result.data.categories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'cat-1', name: 'Shared category' })
+    ]))
+    expect(result.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'prompt-1',
+        categoryUuid: 'cat-1'
+      })
+    ]))
+    expect(result.data.syncTombstones).toEqual(expect.arrayContaining([
+      expect.objectContaining({ collectionName: 'categories', recordUuid: 'cat-1' })
+    ]))
+  })
+
+  it('does not keep a category only because a deleted prompt used to reference it', () => {
+    const base = {
+      categories: [
+        {
+          id: 1,
+          uuid: 'cat-1',
+          name: 'Shared category',
+          updatedAt: '2026-01-01T00:00:00.000Z'
+        }
+      ],
+      prompts: [
+        {
+          id: 10,
+          uuid: 'prompt-1',
+          title: 'Prompt that was deleted',
+          categoryId: 1,
+          categoryUuid: 'cat-1',
+          updatedAt: '2026-01-01T00:00:00.000Z'
+        }
+      ],
+      syncTombstones: []
+    }
+    const local = {
+      categories: [],
+      prompts: [],
+      syncTombstones: [
+        {
+          collectionName: 'categories',
+          recordKey: 'uuid:cat-1',
+          recordUuid: 'cat-1',
+          deletedAt: '2026-01-02T00:00:00.000Z',
+          recordSnapshot: base.categories[0]
+        },
+        {
+          collectionName: 'prompts',
+          recordKey: 'uuid:prompt-1',
+          recordUuid: 'prompt-1',
+          deletedAt: '2026-01-02T00:00:00.000Z',
+          recordSnapshot: base.prompts[0]
+        }
+      ]
+    }
+    const remote = {
+      categories: base.categories,
+      prompts: base.prompts,
+      syncTombstones: []
+    }
+
+    const result = mergeCloudSyncData(local, remote, base)
+
+    expect(result.data.categories).toEqual([])
+    expect(result.data.prompts).toEqual([])
+    expect(result.data.syncTombstones).toEqual(expect.arrayContaining([
+      expect.objectContaining({ collectionName: 'categories', recordUuid: 'cat-1' }),
+      expect.objectContaining({ collectionName: 'prompts', recordUuid: 'prompt-1' })
+    ]))
+  })
 })

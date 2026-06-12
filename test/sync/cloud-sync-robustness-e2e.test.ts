@@ -961,6 +961,168 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     ]))
   })
 
+  it('删除空分类遇到另一端离线新增提示词时会保留分类关系', async () => {
+    const storageId = 'robust-category-delete-vs-offline-prompt-create'
+    const client = createWebDAVSyncClient(storageId)
+    const baseData = emptyDataSet()
+    baseData.categories = [{
+      id: 301,
+      uuid: 'category-offline-work',
+      name: '离线工作分类',
+      isActive: true,
+      sortOrder: 1,
+      createdAt: '2026-06-13T15:00:00.000Z',
+      updatedAt: '2026-06-13T15:00:00.000Z'
+    }]
+    const deviceADatabase = new MutableSyncDatabase(baseData)
+    const deviceA = createSyncService(client, deviceADatabase, new MemoryStorage(), 'device-a')
+
+    const firstUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(firstUpload).toMatchObject({ success: true, action: 'uploaded' })
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'device-b')
+    expect(await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'downloaded' })
+
+    deviceADatabase.data = mutateDataSet(deviceADatabase.data, data => {
+      const deletedCategory = data.categories![0]
+      data.categories = []
+      data.syncTombstones = [
+        createTombstoneFromRecord('categories', deletedCategory, '2026-06-13T15:05:00.000Z')
+      ]
+    })
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.prompts = [{
+        id: 401,
+        uuid: 'prompt-created-in-offline-category',
+        title: '离线分类里的新提示词',
+        content: '请围绕 {{topic}} 输出计划',
+        categoryId: 301,
+        categoryUuid: 'category-offline-work',
+        tags: ['offline', 'category'],
+        isFavorite: true,
+        useCount: 1,
+        isActive: true,
+        imageBlobs: [INITIAL_IMAGE],
+        createdAt: '2026-06-13T15:10:00.000Z',
+        updatedAt: '2026-06-13T15:10:00.000Z'
+      }]
+      data.promptVariables = [{
+        id: 402,
+        uuid: 'variable-created-in-offline-category',
+        promptId: 401,
+        promptUuid: 'prompt-created-in-offline-category',
+        name: 'topic',
+        type: 'text',
+        defaultValue: 'sync safety',
+        required: true,
+        sortOrder: 1,
+        createdAt: '2026-06-13T15:10:00.000Z',
+        updatedAt: '2026-06-13T15:10:00.000Z'
+      }]
+      data.promptHistories = [{
+        id: 403,
+        uuid: 'history-created-in-offline-category',
+        promptId: 401,
+        promptUuid: 'prompt-created-in-offline-category',
+        categoryId: 301,
+        categoryUuid: 'category-offline-work',
+        title: '离线分类里的新提示词',
+        content: '离线生成分类内提示词',
+        result: 'Offline category prompt result',
+        version: 1,
+        imageBlobs: [INITIAL_IMAGE],
+        createdAt: '2026-06-13T15:11:00.000Z',
+        updatedAt: '2026-06-13T15:11:00.000Z'
+      }]
+    })
+
+    expect(await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'uploaded' })
+
+    const merged = await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })
+    expect(merged, JSON.stringify(merged, null, 2)).toMatchObject({
+      success: true,
+      action: 'merged',
+      uploadedRemote: true
+    })
+    expect(deviceBDatabase.data.categories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'category-offline-work', name: '离线工作分类' })
+    ]))
+    expect(deviceBDatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'prompt-created-in-offline-category',
+        categoryUuid: 'category-offline-work',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(deviceBDatabase.data.promptVariables).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'variable-created-in-offline-category',
+        promptUuid: 'prompt-created-in-offline-category'
+      })
+    ]))
+    expect(deviceBDatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'history-created-in-offline-category',
+        categoryUuid: 'category-offline-work',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+
+    const manifest = await client.getCloudSyncManifest(storageId)
+    expect(manifest.latestSnapshot?.data.categories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'category-offline-work', name: '离线工作分类' })
+    ]))
+    expect(manifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'prompt-created-in-offline-category',
+        categoryUuid: 'category-offline-work'
+      })
+    ]))
+    expect(manifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'history-created-in-offline-category',
+        categoryUuid: 'category-offline-work',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(manifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(manifest.latestSnapshot!.data))
+
+    const deviceCDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceC = createSyncService(client, deviceCDatabase, new MemoryStorage(), 'device-c')
+    expect(await deviceC.syncNow(storageId, {
+      deviceName: 'Desktop C',
+      platform: 'electron',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'downloaded' })
+    expect(deviceCDatabase.data.categories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'category-offline-work' })
+    ]))
+    expect(deviceCDatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'prompt-created-in-offline-category',
+        categoryUuid: 'category-offline-work'
+      })
+    ]))
+  })
+
   it('删除提示词遇到另一端较新生成历史时会保留提示词元数据和新历史', async () => {
     const storageId = 'robust-delete-vs-newer-generated-history'
     const client = createWebDAVSyncClient(storageId)
