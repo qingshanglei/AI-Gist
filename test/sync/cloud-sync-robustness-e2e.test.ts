@@ -225,6 +225,88 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     expect(deviceAStorage.getItem('ai_gist_cloud_sync_conflict_log')).toContain('prompt-main')
   })
 
+  it('多端编辑同一提示词不同字段时会自动字段级合并且不记录冲突', async () => {
+    const storageId = 'robust-same-record-field-merge'
+    const client = createWebDAVSyncClient(storageId)
+    const initialData = createDataSet({
+      promptTitle: 'Field merge base',
+      promptUpdatedAt: '2026-06-13T16:00:00.000Z'
+    })
+    const deviceAStorage = new MemoryStorage()
+    const deviceADatabase = new MutableSyncDatabase(initialData)
+    const deviceA = createSyncService(client, deviceADatabase, deviceAStorage, 'device-a')
+    expect(await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'uploaded' })
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'device-b')
+    expect(await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'downloaded' })
+
+    deviceADatabase.data = mutateDataSet(deviceADatabase.data, data => {
+      data.prompts![0].title = 'Field merge local title'
+      data.prompts![0].tags = ['base', 'local']
+      data.prompts![0].updatedAt = '2026-06-13T16:05:00.000Z'
+    })
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.prompts![0].content = 'Remote content update for {{topic}}'
+      data.prompts![0].useCount = 9
+      data.prompts![0].tags = ['base', 'remote']
+      data.prompts![0].updatedAt = '2026-06-13T16:10:00.000Z'
+    })
+
+    expect(await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'uploaded' })
+
+    const merged = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+
+    expect(merged, JSON.stringify(merged, null, 2)).toMatchObject({
+      success: true,
+      action: 'merged',
+      uploadedRemote: true,
+      appliedLocal: true,
+      conflicts: []
+    })
+    expect(deviceAStorage.getItem('ai_gist_cloud_sync_conflict_log')).toBeNull()
+    expect(deviceADatabase.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'prompt-main',
+        title: 'Field merge local title',
+        content: 'Remote content update for {{topic}}',
+        useCount: 9,
+        tags: ['base', 'local', 'remote'],
+        updatedAt: '2026-06-13T16:10:00.000Z'
+      })
+    ]))
+
+    const manifest = await client.getCloudSyncManifest(storageId)
+    expect(manifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'prompt-main',
+        title: 'Field merge local title',
+        content: 'Remote content update for {{topic}}',
+        useCount: 9,
+        tags: ['base', 'local', 'remote'],
+        updatedAt: '2026-06-13T16:10:00.000Z'
+      })
+    ]))
+    expect(manifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(manifest.latestSnapshot!.data))
+  })
+
   it('真实创建含图片和历史的数据后跨端更新不会丢失元数据', async () => {
     const storageId = 'robust-real-create-then-update'
     const client = createWebDAVSyncClient(storageId)
