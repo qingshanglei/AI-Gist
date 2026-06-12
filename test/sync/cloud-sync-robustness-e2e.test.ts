@@ -89,7 +89,17 @@ interface TestCloudClientHooks {
     },
     saveNormally: () => Promise<CloudSyncManifestSaveResult>
   ) => Promise<CloudSyncManifestSaveResult>
-  getCloudSyncManifest?: (storageId: string) => Promise<CloudSyncManifest>
+  getCloudSyncManifest?: (
+    storageId: string,
+    readNormally: () => Promise<CloudSyncManifest>
+  ) => Promise<CloudSyncManifest>
+  readCloudSyncSnapshot?: (
+    context: {
+      storageId: string
+      snapshot: CloudSyncRemoteSnapshotInfo | string
+    },
+    readNormally: () => Promise<CloudSyncSnapshot>
+  ) => Promise<CloudSyncSnapshot>
 }
 
 const USERNAME = 'testuser'
@@ -1397,6 +1407,87 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     expect(retried.error).toBeUndefined()
   })
 
+  it('WebDAV 写入后短暂读到旧状态时会等待一致而不是报错', async () => {
+    const storageId = 'robust-read-after-write-stale-webdav'
+    const staleManifest = createEmptyCloudSyncManifest('2026-06-13T12:30:00.000Z')
+    let staleReadsRemaining = 0
+    let staleManifestReads = 0
+    let staleSnapshotReads = 0
+    let submittedRevision: string | undefined
+    const client = createWebDAVSyncClient(storageId, {
+      saveCloudSyncManifest: async (context, saveNormally) => {
+        const result = await saveNormally()
+        if (result.success && context.manifest.latestSnapshot?.revision) {
+          submittedRevision = context.manifest.latestSnapshot.revision
+          staleReadsRemaining = 2
+        }
+
+        return result
+      },
+      readCloudSyncSnapshot: async (context, readNormally) => {
+        const revision = typeof context.snapshot === 'string'
+          ? context.snapshot
+          : context.snapshot.revision
+        if (submittedRevision && revision === submittedRevision && staleReadsRemaining > 0) {
+          staleSnapshotReads += 1
+          throw new Error('simulated WebDAV eventual consistency snapshot 404')
+        }
+
+        return readNormally()
+      },
+      getCloudSyncManifest: async (_targetStorageId, readNormally) => {
+        if (staleReadsRemaining > 0) {
+          staleReadsRemaining -= 1
+          staleManifestReads += 1
+          return staleManifest
+        }
+
+        return readNormally()
+      }
+    })
+    const database = new MutableSyncDatabase(createRealisticDataSet())
+    const service = createSyncService(client, database, new MemoryStorage(), 'device-stale-read')
+
+    const result = await service.syncNow(storageId, {
+      deviceName: 'Laptop Stale Read',
+      platform: 'electron',
+      reason: 'manual'
+    })
+
+    expect(result, JSON.stringify(result, null, 2)).toMatchObject({
+      success: true,
+      action: 'uploaded',
+      uploadedRemote: true
+    })
+    expect(result.error).toBeUndefined()
+    expect(staleManifestReads).toBe(2)
+    expect(staleSnapshotReads).toBe(2)
+
+    const manifest = await createWebDAVSyncClient(storageId).getCloudSyncManifest(storageId)
+    expect(manifest.latestSnapshot?.revision).toBe(result.remoteRevision)
+    expect(manifest.latestSnapshot?.data.prompts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-prompt-launch',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(manifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-history-initial',
+        imageBlobs: [INITIAL_IMAGE]
+      })
+    ]))
+    expect(manifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(manifest.latestSnapshot!.data))
+
+    const retryClick = await service.syncNow(storageId, {
+      deviceName: 'Laptop Stale Read',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(retryClick).toMatchObject({ success: true, action: 'noop' })
+  })
+
   it('应用远端数据中途失败时会回滚本机数据，下次同步能继续完整下载', async () => {
     const storageId = 'robust-local-apply-rollback'
     const client = createWebDAVSyncClient(storageId)
@@ -1686,11 +1777,12 @@ function createWebDAVSyncClient(
 
   const client = {
     async getCloudSyncManifest(targetStorageId: string) {
+      const readNormally = () => readManifest()
       if (hooks.getCloudSyncManifest) {
-        return hooks.getCloudSyncManifest(targetStorageId)
+        return hooks.getCloudSyncManifest(targetStorageId, readNormally)
       }
 
-      return readManifest()
+      return readNormally()
     },
 
     async saveCloudSyncManifest(
@@ -1765,8 +1857,16 @@ function createWebDAVSyncClient(
       }
     },
 
-    async readCloudSyncSnapshot(_targetStorageId: string, snapshot: CloudSyncRemoteSnapshotInfo | string) {
-      return readSnapshot(snapshot)
+    async readCloudSyncSnapshot(targetStorageId: string, snapshot: CloudSyncRemoteSnapshotInfo | string) {
+      const readNormally = () => readSnapshot(snapshot)
+      if (hooks.readCloudSyncSnapshot) {
+        return hooks.readCloudSyncSnapshot({
+          storageId: targetStorageId,
+          snapshot
+        }, readNormally)
+      }
+
+      return readNormally()
     },
 
     async saveCloudSyncSnapshot(_targetStorageId: string, snapshot: CloudSyncSnapshot) {
