@@ -168,6 +168,103 @@
 
             <NDivider />
 
+            <!-- 同步冲突记录 -->
+            <div>
+                <NFlex vertical :size="12">
+                    <NFlex justify="space-between" align="center">
+                        <NFlex vertical :size="4">
+                            <NText depth="2">同步冲突记录</NText>
+                            <NText depth="3" style="font-size: 12px;">
+                                {{ conflictLogSummary }}
+                            </NText>
+                        </NFlex>
+                        <NFlex :size="8" v-if="conflictLogEntries.length > 0">
+                            <NPopconfirm
+                                v-if="activeTabKey && visibleConflictLogEntries.length > 0"
+                                @positive-click="clearConflictLog(activeTabKey || undefined)"
+                                negative-text="取消"
+                                positive-text="清理"
+                            >
+                                <template #trigger>
+                                    <NButton size="small" secondary>清理当前存储</NButton>
+                                </template>
+                                清理当前存储的同步冲突记录？
+                            </NPopconfirm>
+                            <NPopconfirm
+                                @positive-click="clearConflictLog()"
+                                negative-text="取消"
+                                positive-text="清理全部"
+                            >
+                                <template #trigger>
+                                    <NButton size="small" secondary type="warning">清理全部</NButton>
+                                </template>
+                                清理全部同步冲突记录？
+                            </NPopconfirm>
+                        </NFlex>
+                    </NFlex>
+
+                    <NAlert v-if="visibleConflictLogEntries.length > 0" type="warning" show-icon>
+                        <NCollapse>
+                            <NCollapseItem
+                                v-for="entry in visibleConflictLogEntries"
+                                :key="entry.id"
+                                :name="entry.id"
+                                :title="formatConflictEntryTitle(entry)"
+                            >
+                                <NFlex vertical :size="12">
+                                    <NFlex :size="8" align="center">
+                                        <NTag size="small" type="info">{{ getStorageName(entry.storageId) }}</NTag>
+                                        <NTag size="small">本地 {{ entry.localRevision || '空' }}</NTag>
+                                        <NTag size="small" type="warning">远端 {{ entry.remoteRevision || '空' }}</NTag>
+                                        <NTag size="small" type="success">结果 {{ entry.resolvedRevision || '空' }}</NTag>
+                                    </NFlex>
+                                    <div
+                                        v-for="(conflict, index) in entry.conflicts"
+                                        :key="`${entry.id}-${index}`"
+                                        class="conflict-log-item"
+                                    >
+                                        <NFlex vertical :size="8">
+                                            <NFlex :size="8" align="center">
+                                                <NTag size="small" :type="getConflictCollectionTagType(conflict.collection)">
+                                                    {{ getConflictCollectionLabel(conflict.collection) }}
+                                                </NTag>
+                                                <NText strong>{{ getConflictRecordLabel(conflict) }}</NText>
+                                                <NTag size="small" type="warning">
+                                                    {{ getConflictReasonLabel(conflict.reason) }}
+                                                </NTag>
+                                                <NTag size="small" type="success">
+                                                    {{ getConflictResolutionLabel(conflict.resolution) }}
+                                                </NTag>
+                                            </NFlex>
+                                            <NGrid cols="3" :x-gap="12" item-responsive>
+                                                <NGridItem span="3 900:1">
+                                                    <NText depth="3" style="font-size: 12px;">本地</NText>
+                                                    <pre class="conflict-preview">{{ formatConflictValue(conflict.local) }}</pre>
+                                                </NGridItem>
+                                                <NGridItem span="3 900:1">
+                                                    <NText depth="3" style="font-size: 12px;">远端</NText>
+                                                    <pre class="conflict-preview">{{ formatConflictValue(conflict.remote) }}</pre>
+                                                </NGridItem>
+                                                <NGridItem span="3 900:1">
+                                                    <NText depth="3" style="font-size: 12px;">基线</NText>
+                                                    <pre class="conflict-preview">{{ formatConflictValue(conflict.base) }}</pre>
+                                                </NGridItem>
+                                            </NGrid>
+                                        </NFlex>
+                                    </div>
+                                </NFlex>
+                            </NCollapseItem>
+                        </NCollapse>
+                    </NAlert>
+
+                    <NText v-else depth="3" style="font-size: 14px;">
+                        暂无同步冲突记录
+                    </NText>
+                </NFlex>
+            </div>
+
+            <NDivider />
+
             <!-- 存储配置管理 -->
             <div>
                 <NFlex vertical :size="16">
@@ -354,6 +451,8 @@ import {
     NSwitch,
     NTabs,
     NTabPane,
+    NCollapse,
+    NCollapseItem,
     NPagination,
     useMessage,
 } from "naive-ui";
@@ -366,7 +465,7 @@ import {
     Recharging,
     Wifi,
 } from "@vicons/tabler";
-import { ref, computed, onMounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { useI18n } from 'vue-i18n';
 import { CloudBackupAPI } from "@/lib/api/cloud-backup.api";
 import { PlatformDetector } from "@shared/platform";
@@ -378,6 +477,10 @@ import {
     getCloudSyncResultMessage,
     getFriendlyCloudSyncError,
 } from "@/lib/services/cloud-sync.service";
+import type {
+    CloudSyncConflictLogEntry,
+    CloudSyncStatus,
+} from "@/lib/services/cloud-sync.service";
 import type { CloudStorageConfig, CloudBackupInfo } from "@shared/types/cloud-backup";
 
 const message = useMessage();
@@ -387,6 +490,7 @@ const capabilities = PlatformDetector.getCapabilities();
 // 响应式数据
 const storageConfigs = ref<CloudStorageConfig[]>([]);
 const cloudBackups = ref<CloudBackupInfo[]>([]);
+const conflictLogEntries = ref<CloudSyncConflictLogEntry[]>([]);
 const syncIntervalMinutes = ref(DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES);
 const activeTabKey = ref<string>('');
 const showConfigModal = ref(false);
@@ -407,6 +511,7 @@ const pageSize = 6;
 
 // 为每个存储配置维护独立的分页状态
 const paginationStates = ref<Record<string, { currentPage: number; pageSize: number }>>({});
+let unsubscribeSyncStatus: (() => void) | null = null;
 
 // 表单数据
 const configForm = ref({
@@ -484,6 +589,24 @@ const storageDescriptionText = computed(() => {
     return capabilities.icloud
         ? t('cloudBackup.storageDescription')
         : t('cloudBackup.webdavOnlyStorageDescription');
+});
+
+const visibleConflictLogEntries = computed(() => {
+    if (!activeTabKey.value) {
+        return conflictLogEntries.value;
+    }
+
+    return conflictLogEntries.value.filter(entry => entry.storageId === activeTabKey.value);
+});
+
+const conflictLogSummary = computed(() => {
+    if (visibleConflictLogEntries.value.length === 0) {
+        return '自动合并后的冲突会保存在这里';
+    }
+
+    const conflictCount = visibleConflictLogEntries.value
+        .reduce((total, entry) => total + entry.conflicts.length, 0);
+    return `${visibleConflictLogEntries.value.length} 次同步，${conflictCount} 项冲突`;
 });
 
 // 分页相关计算属性
@@ -565,6 +688,14 @@ const loadStorageConfigs = async () => {
 
 const loadSyncInterval = async () => {
     syncIntervalMinutes.value = await cloudSyncService.getAutoSyncIntervalMinutes();
+};
+
+const loadConflictLog = () => {
+    conflictLogEntries.value = cloudSyncService.getConflictLog();
+};
+
+const handleSyncStatusChange = (_status: CloudSyncStatus) => {
+    loadConflictLog();
 };
 
 const saveSyncInterval = async () => {
@@ -790,6 +921,7 @@ const syncCloudData = async (storageId?: string) => {
 
         if (result.success) {
             message.success(getCloudSyncResultMessage(result.action, result.conflicts.length));
+            loadConflictLog();
         } else {
             message.error(getFriendlyCloudSyncError(result.error));
         }
@@ -904,6 +1036,90 @@ const formatSize = (size: number) => {
     return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 };
 
+const clearConflictLog = (storageId?: string) => {
+    cloudSyncService.clearConflictLog(storageId);
+    loadConflictLog();
+    message.success(storageId ? '当前存储的冲突记录已清理' : '同步冲突记录已清理');
+};
+
+const formatConflictEntryTitle = (entry: CloudSyncConflictLogEntry) => {
+    return `${formatDate(entry.detectedAt)} · ${entry.conflicts.length} 项冲突`;
+};
+
+const getStorageName = (storageId: string) => {
+    return storageConfigs.value.find(config => config.id === storageId)?.name || storageId;
+};
+
+const getConflictCollectionLabel = (collection: string) => {
+    const labels: Record<string, string> = {
+        categories: '分类',
+        prompts: '提示词',
+        promptVariables: '变量',
+        promptHistories: '提示词历史',
+        aiConfigs: 'AI 配置',
+        quickOptimizationConfigs: '快速优化',
+        aiHistory: 'AI 历史',
+        settings: '设置',
+        syncTombstones: '删除标记'
+    };
+    return labels[collection] || collection;
+};
+
+const getConflictCollectionTagType = (collection: string): 'success' | 'info' | 'warning' | 'default' | 'error' => {
+    const types: Record<string, 'success' | 'info' | 'warning' | 'default' | 'error'> = {
+        categories: 'success',
+        prompts: 'info',
+        promptVariables: 'info',
+        promptHistories: 'default',
+        aiConfigs: 'warning',
+        quickOptimizationConfigs: 'warning',
+        aiHistory: 'default',
+        settings: 'error',
+        syncTombstones: 'error'
+    };
+    return types[collection] || 'default';
+};
+
+const getConflictReasonLabel = (reason: string) => {
+    const labels: Record<string, string> = {
+        both_modified: '双方修改',
+        create_collision: '同时创建',
+        delete_vs_update: '删除与更新'
+    };
+    return labels[reason] || reason;
+};
+
+const getConflictResolutionLabel = (resolution: string) => {
+    const labels: Record<string, string> = {
+        'keep-local': '保留本地',
+        'take-remote': '采用远端',
+        'take-newer': '采用较新'
+    };
+    return labels[resolution] || resolution;
+};
+
+const getConflictRecordLabel = (conflict: any) => {
+    const record = conflict.local || conflict.remote || conflict.base || {};
+    return record.title || record.name || record.key || conflict.key;
+};
+
+const formatConflictValue = (value: any) => {
+    if (value === undefined) {
+        return '无';
+    }
+
+    try {
+        const text = JSON.stringify(value, null, 2);
+        if (!text) {
+            return String(value);
+        }
+
+        return text.length > 700 ? `${text.slice(0, 700)}...` : text;
+    } catch (error) {
+        return String(value);
+    }
+};
+
 // 监听存储类型变化
 const handleTypeChange = () => {
     if (configForm.value.type === 'icloud' && (!configForm.value.path || configForm.value.path.trim() === '')) {
@@ -933,6 +1149,12 @@ onMounted(async () => {
         loadSyncInterval(),
         checkICloudAvailability()
     ]);
+    loadConflictLog();
+    unsubscribeSyncStatus = cloudSyncService.onStatusChange(handleSyncStatusChange);
+});
+
+onUnmounted(() => {
+    unsubscribeSyncStatus?.();
 });
 </script>
 
@@ -943,5 +1165,26 @@ onMounted(async () => {
     margin-top: 16px;
     padding-top: 12px;
     border-top: 1px solid var(--border-color);
+}
+
+.conflict-log-item {
+    padding: 12px;
+    border: 1px solid var(--border-color);
+    border-radius: 8px;
+    background-color: var(--card-bg-color);
+}
+
+.conflict-preview {
+    max-height: 220px;
+    overflow: auto;
+    margin: 6px 0 0;
+    padding: 10px;
+    border-radius: 6px;
+    background-color: var(--code-bg-color);
+    color: var(--text-color);
+    font-size: 12px;
+    line-height: 1.5;
+    white-space: pre-wrap;
+    word-break: break-word;
 }
 </style>
