@@ -5,6 +5,35 @@ const { version } = require('./package.json');
 
 const { defineConfig } = require('vite');
 
+function aiGistWebBackendPlugin() {
+    let apiHandler = null;
+
+    const getApiHandler = () => {
+        if (!apiHandler) {
+            const { createWebRequestHandler } = require('./scripts/web-server.js');
+            apiHandler = createWebRequestHandler({ serveStaticFiles: false });
+        }
+        return apiHandler;
+    };
+
+    const installMiddleware = server => {
+        server.middlewares.use((req, res, next) => {
+            if (!req.url || !req.url.startsWith('/api/')) {
+                next();
+                return;
+            }
+
+            getApiHandler()(req, res, next);
+        });
+    };
+
+    return {
+        name: 'ai-gist-web-backend',
+        configureServer: installMiddleware,
+        configurePreviewServer: installMiddleware,
+    };
+}
+
 const config = defineConfig({
     root: Path.join(__dirname, 'src', 'renderer'),
     publicDir: 'public',
@@ -16,7 +45,7 @@ const config = defineConfig({
         outDir: Path.join(__dirname, 'build', 'web'),
         emptyOutDir: true,
     },
-    plugins: [vuePlugin()],
+    plugins: [vuePlugin(), aiGistWebBackendPlugin()],
     define: {
         '__PLATFORM__': JSON.stringify('web'),
         '__APP_PLATFORM__': JSON.stringify('web'),
@@ -35,4 +64,3 @@ const config = defineConfig({
 });
 
 module.exports = config;
-

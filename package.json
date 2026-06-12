@@ -5,6 +5,7 @@
     "main": "./main/main.js",
     "scripts": {
         "dev": "node scripts/dev-server.js",
+        "dev:web": "vite --config vite.config.web.js",
         "build": "node scripts/build.js && electron-builder",
         "build:win": "node scripts/build.js && electron-builder --win",
         "build:mac": "node scripts/build.js && PYTHON=python3 npm_config_python=python3 electron-builder --mac",
@@ -15,6 +16,7 @@
         "build:ci:win": "node scripts/build.js && yarn electron-builder --win",
         "build:ci:linux": "node scripts/build.js && yarn electron-builder --linux",
         "build:mobile": "node scripts/build-mobile.js",
+        "preview:web": "vite preview --config vite.config.web.js",
         "cap:assets": "npx @capacitor/assets generate",
         "cap:sync": "cap sync",
         "cap:ios": "cap open ios",

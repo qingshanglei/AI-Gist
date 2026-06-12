@@ -357,10 +357,24 @@ export class WebCloudBackupService {
     }
 
     if (!response.ok || !payload?.success) {
+      if (this.isMissingWebBackend(response, payload)) {
+        throw new Error(
+          'Web 端 WebDAV 代理未启用：请使用 AI-Gist Web 后端启动 Web 版，或使用 yarn dev:web / yarn preview:web / yarn serve:web。'
+        );
+      }
       throw new Error(payload?.error || `Web 后端请求失败（HTTP ${response.status}）`);
     }
 
     return payload.data as T;
+  }
+
+  private isMissingWebBackend(response: Response, payload: ApiResponse<unknown> | null): boolean {
+    if (response.status !== 404) {
+      return false;
+    }
+
+    const error = payload?.error || '';
+    return !payload || /API route not found|Not Found/i.test(error);
   }
 
   private formatError(error: unknown): string {

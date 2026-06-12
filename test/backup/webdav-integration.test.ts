@@ -70,8 +70,26 @@ import { WebDAVProvider } from '../../src/main/cloud/webdav-provider'
 import { CloudSyncService } from '~/lib/services/cloud-sync.service'
 import { CapacitorHttp } from '@capacitor/core'
 import { Preferences } from '@capacitor/preferences'
-import { createEmptyCloudSyncManifest } from '@shared/cloud-sync-manifest'
+import {
+  assertValidCloudSyncManifest,
+  createCloudSyncManifestRevisionConflictError,
+  createEmptyCloudSyncManifest,
+  doesCloudSyncManifestMatchExpectedRevision,
+  getCloudSyncManifestRevision,
+  readCloudSyncManifestWithFallback
+} from '@shared/cloud-sync-manifest'
 import { createCloudSyncDataChecksum, createCloudSyncSnapshot } from '@shared/cloud-sync-engine'
+import {
+  getCloudSyncManifestBackupPath,
+  getCloudSyncManifestPath,
+  getCloudSyncSnapshotPath,
+  getCloudSyncSnapshotRevisionFromFileName,
+  getCloudSyncSnapshotsDirectoryPath
+} from '@shared/cloud-backup-paths'
+import {
+  assertValidCloudSyncSnapshotFile,
+  createCloudSyncSnapshotFile
+} from '@shared/cloud-sync-snapshots'
 
 const mockHttp = CapacitorHttp as unknown as { request: ReturnType<typeof vi.fn> }
 
@@ -88,6 +106,131 @@ class MemoryStorage {
 
   removeItem(key: string): void {
     this.values.delete(key)
+  }
+}
+
+function createDesktopWebDAVSyncClient(config: any) {
+  const provider = new WebDAVProvider(config)
+  const formatError = (error: unknown) => error instanceof Error ? error.message : String(error)
+  const isNotFoundError = (error: unknown) => /404|not\s*found|does not exist|ENOENT|不存在|未找到/i
+    .test(formatError(error))
+  const isRevisionConflictError = (error: unknown) => /Precondition|412|if-match|if-none-match|已存在，取消覆盖/i
+    .test(formatError(error))
+
+  const readManifestFile = async (cloudPath: string) => {
+    const data = await provider.readFile(cloudPath)
+    return assertValidCloudSyncManifest(JSON.parse(Buffer.from(data).toString('utf-8')))
+  }
+
+  const readManifest = async () => readCloudSyncManifestWithFallback({
+    readPrimary: () => readManifestFile(getCloudSyncManifestPath()),
+    readBackup: () => readManifestFile(getCloudSyncManifestBackupPath()),
+    isNotFoundError,
+    describeError: formatError
+  })
+
+  const readSnapshot = async (snapshot: any) => {
+    const snapshotPath = typeof snapshot === 'string'
+      ? getCloudSyncSnapshotPath(snapshot)
+      : snapshot.path || getCloudSyncSnapshotPath(snapshot.revision)
+    const data = await provider.readFile(snapshotPath)
+    return assertValidCloudSyncSnapshotFile(JSON.parse(Buffer.from(data).toString('utf-8')))
+  }
+
+  return {
+    async getCloudSyncManifest(_storageId?: string) {
+      return readManifest()
+    },
+
+    async saveCloudSyncManifest(_storageId: string, manifest: any, options: any = {}) {
+      try {
+        await provider.initializeDirectories()
+        const currentManifest = await readManifest()
+        if (!doesCloudSyncManifestMatchExpectedRevision(currentManifest, options.expectedRevision)) {
+          throw createCloudSyncManifestRevisionConflictError(
+            options.expectedRevision,
+            getCloudSyncManifestRevision(currentManifest)
+          )
+        }
+
+        const primaryInfo = await provider.getFileInfo(getCloudSyncManifestPath())
+        const content = Buffer.from(JSON.stringify(assertValidCloudSyncManifest(manifest), null, 2), 'utf-8')
+        await provider.writeFile(getCloudSyncManifestPath(), content, {
+          ifMatch: primaryInfo?.etag,
+          ifNoneMatch: !primaryInfo && !currentManifest.latestSnapshot
+        })
+        await provider.writeFile(getCloudSyncManifestBackupPath(), content)
+        return { success: true }
+      } catch (error) {
+        return {
+          success: false,
+          conflict: isRevisionConflictError(error),
+          error: formatError(error)
+        }
+      }
+    },
+
+    async listCloudSyncSnapshots(_storageId?: string) {
+      try {
+        const files = await provider.listFiles(getCloudSyncSnapshotsDirectoryPath())
+        return files
+          .filter(file => !file.isDirectory)
+          .map(file => {
+            const revision = getCloudSyncSnapshotRevisionFromFileName(file.name)
+            return revision
+              ? {
+                  revision,
+                  path: getCloudSyncSnapshotPath(revision),
+                  modifiedAt: file.modifiedAt,
+                  size: file.size
+                }
+              : null
+          })
+          .filter(Boolean)
+      } catch (error) {
+        if (isNotFoundError(error)) {
+          return []
+        }
+        throw error
+      }
+    },
+
+    async readCloudSyncSnapshot(_storageId: string, snapshot: any) {
+      return readSnapshot(snapshot)
+    },
+
+    async saveCloudSyncSnapshot(_storageId: string, snapshot: any) {
+      try {
+        await provider.initializeDirectories()
+        const normalizedSnapshot = assertValidCloudSyncSnapshotFile(snapshot)
+        const content = Buffer.from(
+          JSON.stringify(createCloudSyncSnapshotFile(normalizedSnapshot), null, 2),
+          'utf-8'
+        )
+        const snapshotPath = getCloudSyncSnapshotPath(normalizedSnapshot.revision)
+        try {
+          await provider.writeFile(snapshotPath, content, { ifNoneMatch: true })
+          return { success: true }
+        } catch (error) {
+          if (!isRevisionConflictError(error)) {
+            throw error
+          }
+
+          const existingSnapshot = await readSnapshot(normalizedSnapshot.revision)
+          if (
+            existingSnapshot.revision === normalizedSnapshot.revision &&
+            existingSnapshot.dataChecksum === normalizedSnapshot.dataChecksum &&
+            JSON.stringify(existingSnapshot.data) === JSON.stringify(normalizedSnapshot.data)
+          ) {
+            return { success: true }
+          }
+
+          throw new Error(`云同步快照 ${normalizedSnapshot.revision} 已存在但内容不一致`)
+        }
+      } catch (error) {
+        return { success: false, error: formatError(error) }
+      }
+    }
   }
 }
 
@@ -952,11 +1095,21 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
         platform: 'ios',
         reason: 'manual'
       })
+      const thirdSync = await device.syncNow(storageId, {
+        deviceName: 'JSON Stable Device',
+        platform: 'ios',
+        reason: 'manual'
+      })
 
       expect(firstSync.success).toBe(true)
       expect(firstSync.error).toBeUndefined()
+      expect(firstSync.action).toBe('uploaded')
       expect(secondSync.success).toBe(true)
       expect(secondSync.error).toBeUndefined()
+      expect(secondSync.action).toBe('noop')
+      expect(thirdSync.success).toBe(true)
+      expect(thirdSync.error).toBeUndefined()
+      expect(thirdSync.action).toBe('noop')
 
       const manifest = await service.getCloudSyncManifest(storageId)
       expect(manifest.latestSnapshot?.data.prompts?.[0]).not.toHaveProperty('optional')
@@ -969,6 +1122,85 @@ describe('WebDAV 集成测试（真实 HTTP 服务器）', () => {
       const snapshot = await service.readCloudSyncSnapshot(storageId, manifest.latestSnapshot!.revision)
       expect(snapshot.dataChecksum).toBe(createCloudSyncDataChecksum(snapshot.data))
       expect(snapshot.data).toEqual(manifest.latestSnapshot!.data)
+
+      const snapshots = await service.listCloudSyncSnapshots(storageId)
+      expect(snapshots).toHaveLength(1)
+    })
+
+    it('桌面 WebDAVProvider 连续三次手动同步等价 JSON 数据时不会持续生成新版本', async () => {
+      const storageId = 'cfg-desktop-json-stable'
+      const cloudClient = createDesktopWebDAVSyncClient({
+        id: storageId,
+        name: 'Desktop JSON Stable WebDAV',
+        type: 'webdav',
+        enabled: true,
+        url: `${server.baseUrl}/desktop-json-stable-${Date.now()}`,
+        username: USERNAME,
+        password: PASSWORD,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      })
+      const syncData = {
+        ...mockExportData,
+        prompts: [
+          {
+            ...mockExportData.prompts[0],
+            optional: undefined,
+            nested: {
+              keep: 'value',
+              drop: undefined
+            },
+            values: [undefined, 'kept']
+          }
+        ],
+        promptHistories: [],
+        syncTombstones: []
+      }
+      const database = {
+        exportAllDataForSync: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'ok',
+          data: syncData
+        }),
+        replaceAllData: vi.fn().mockResolvedValue({
+          success: true,
+          message: 'ok'
+        })
+      }
+      const desktopDevice = new CloudSyncService({
+        cloudClient,
+        database,
+        storage: new MemoryStorage(),
+        createDeviceId: () => 'desktop-json-stable-device'
+      })
+
+      const firstSync = await desktopDevice.syncNow(storageId, {
+        deviceName: 'Desktop JSON Stable Device',
+        platform: 'electron',
+        reason: 'manual'
+      })
+      const secondSync = await desktopDevice.syncNow(storageId, {
+        deviceName: 'Desktop JSON Stable Device',
+        platform: 'electron',
+        reason: 'manual'
+      })
+      const thirdSync = await desktopDevice.syncNow(storageId, {
+        deviceName: 'Desktop JSON Stable Device',
+        platform: 'electron',
+        reason: 'manual'
+      })
+
+      expect(firstSync).toMatchObject({ success: true, action: 'uploaded' })
+      expect(secondSync).toMatchObject({ success: true, action: 'noop' })
+      expect(thirdSync).toMatchObject({ success: true, action: 'noop' })
+
+      const manifest = await cloudClient.getCloudSyncManifest(storageId)
+      const snapshots = await cloudClient.listCloudSyncSnapshots(storageId)
+      expect(snapshots).toHaveLength(1)
+      expect(manifest.latestSnapshot?.revision).toBe(firstSync.remoteRevision)
+      expect(manifest.latestSnapshot?.dataChecksum).toBe(
+        createCloudSyncDataChecksum(manifest.latestSnapshot!.data)
+      )
     })
 
     it('设备 A 上传后，设备 B 作为新设备能从同一 WebDAV manifest 拉取完整数据', async () => {

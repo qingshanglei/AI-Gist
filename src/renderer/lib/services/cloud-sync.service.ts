@@ -12,6 +12,7 @@ import {
   applyCloudSyncTombstones,
   createCloudSyncSnapshot,
   mergeCloudSyncData,
+  normalizeCloudSyncDataSet,
   validateCloudSyncSnapshot
 } from '@shared/cloud-sync-engine';
 import type {
@@ -656,7 +657,7 @@ export class CloudSyncService {
     if (!exportResult.success || !exportResult.data) {
       throw new Error(exportResult.error || exportResult.message || '导出同步数据失败');
     }
-    return applyCloudSyncTombstones(exportResult.data);
+    return normalizeCloudSyncDataSet(applyCloudSyncTombstones(exportResult.data));
   }
 
   private async retryWithLatestRemote(

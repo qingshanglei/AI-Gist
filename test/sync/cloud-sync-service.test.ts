@@ -130,6 +130,34 @@ describe('CloudSyncService', () => {
     expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain(savedManifest.latestSnapshot.revision)
   })
 
+  it('does not create new revisions on repeated manual sync when local data only differs by JSON shape', async () => {
+    const localDataWithJsonDrift = {
+      ...baseData,
+      prompts: [{
+        ...baseData.prompts[0],
+        optional: undefined,
+        nested: {
+          keep: 'value',
+          drop: undefined
+        },
+        values: [undefined, 'kept']
+      }]
+    }
+    const { service, cloudClient } = createService(localDataWithJsonDrift)
+
+    const first = await service.syncNow('cfg-1', { reason: 'manual' })
+    const second = await service.syncNow('cfg-1', { reason: 'manual' })
+    const third = await service.syncNow('cfg-1', { reason: 'manual' })
+
+    expect(first.success).toBe(true)
+    expect(first.action).toBe('uploaded')
+    expect(second.success).toBe(true)
+    expect(second.action).toBe('noop')
+    expect(third.success).toBe(true)
+    expect(third.action).toBe('noop')
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+  })
+
   it('writes the immutable snapshot before updating the manifest pointer', async () => {
     const storage = new MemoryStorage()
     let cloudManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')

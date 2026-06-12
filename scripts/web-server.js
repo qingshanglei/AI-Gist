@@ -1479,33 +1479,68 @@ function serveStatic(req, res, pathname) {
     .pipe(res);
 }
 
-const server = http.createServer((req, res) => {
+function handleWebRequest(req, res, options = {}) {
+  const serveStaticFiles = options.serveStaticFiles !== false;
+  const next = typeof options.next === 'function' ? options.next : null;
   const requestUrl = new URL(req.url || '/', `http://${req.headers.host || 'localhost'}`);
   if (requestUrl.pathname.startsWith('/api/')) {
     if (req.method !== 'POST') {
       sendApiError(res, new Error('Method Not Allowed'), 405);
-      return;
+      return true;
     }
 
     if (streamingApiRoutes[requestUrl.pathname]) {
       void handleStreamingApi(req, res, requestUrl.pathname);
-      return;
+      return true;
     }
 
     void handleApi(req, res, requestUrl.pathname);
-    return;
+    return true;
+  }
+
+  if (!serveStaticFiles) {
+    if (next) {
+      next();
+    }
+    return false;
   }
 
   if (req.method !== 'GET' && req.method !== 'HEAD') {
     res.writeHead(405);
     res.end('Method Not Allowed');
-    return;
+    return true;
   }
 
   serveStatic(req, res, requestUrl.pathname);
-});
+  return true;
+}
 
-server.listen(PORT, () => {
-  console.log(`[web] AI Gist Web server listening on http://0.0.0.0:${PORT}`);
-  console.log(`[web] Serving static assets from ${WEB_ROOT}`);
-});
+function createWebRequestHandler(options = {}) {
+  return (req, res, next) => {
+    handleWebRequest(req, res, {
+      ...options,
+      next
+    });
+  };
+}
+
+function createWebServer(options = {}) {
+  return http.createServer(createWebRequestHandler({
+    serveStaticFiles: true,
+    ...options
+  }));
+}
+
+if (require.main === module) {
+  const server = createWebServer();
+  server.listen(PORT, () => {
+    console.log(`[web] AI Gist Web server listening on http://0.0.0.0:${PORT}`);
+    console.log(`[web] Serving static assets from ${WEB_ROOT}`);
+  });
+}
+
+module.exports = {
+  createWebRequestHandler,
+  createWebServer,
+  handleWebRequest
+};
