@@ -708,6 +708,166 @@ describe('Cloud sync robustness E2E over WebDAV', () => {
     expect(await client.listCloudSyncSnapshots(storageId)).toHaveLength(snapshotsBeforeRepeatedClick.length)
   })
 
+  it('一端离线更新变量配置另一端生成历史时会同时保留变量和历史', async () => {
+    const storageId = 'robust-variable-update-vs-history-create'
+    const client = createWebDAVSyncClient(storageId)
+    const deviceADatabase = new MutableSyncDatabase(createRealisticDataSet())
+    const deviceA = createSyncService(client, deviceADatabase, new MemoryStorage(), 'device-a')
+
+    const firstUpload = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(firstUpload).toMatchObject({ success: true, action: 'uploaded' })
+
+    const deviceBDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceB = createSyncService(client, deviceBDatabase, new MemoryStorage(), 'device-b')
+    expect(await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'downloaded' })
+
+    deviceADatabase.data = mutateDataSet(deviceADatabase.data, data => {
+      data.promptVariables![0].defaultValue = 'precise'
+      data.promptVariables![0].options = ['friendly', 'precise', 'executive']
+      data.promptVariables![0].required = false
+      data.promptVariables![0].updatedAt = '2026-06-13T14:20:00.000Z'
+      data.settings = [{
+        key: 'generation.defaultTone',
+        value: 'precise',
+        type: 'string',
+        updatedAt: '2026-06-13T14:20:00.000Z'
+      }]
+    })
+    deviceBDatabase.data = mutateDataSet(deviceBDatabase.data, data => {
+      data.promptHistories!.push({
+        id: 83,
+        uuid: 'real-history-phone-generated-while-variable-edited',
+        promptId: 31,
+        promptUuid: 'real-prompt-launch',
+        title: '发布计划提示词 - Phone B 继续生成',
+        content: 'Phone B 用旧变量配置继续生成',
+        result: 'Phone B generation should survive variable edit',
+        version: 2,
+        imageBlobs: [UPDATED_IMAGE],
+        createdAt: '2026-06-13T14:21:00.000Z',
+        updatedAt: '2026-06-13T14:21:00.000Z'
+      })
+      data.aiHistory!.push({
+        id: 93,
+        uuid: 'real-ai-history-phone-generated-while-variable-edited',
+        promptUuid: 'real-prompt-launch',
+        input: 'Phone B 用旧变量配置继续生成',
+        output: 'Phone B generation should survive variable edit',
+        provider: 'openai',
+        model: 'gpt-4.1',
+        createdAt: '2026-06-13T14:22:00.000Z',
+        updatedAt: '2026-06-13T14:22:00.000Z'
+      })
+    })
+
+    const remoteHistoryUpload = await deviceB.syncNow(storageId, {
+      deviceName: 'Phone B',
+      platform: 'ios',
+      reason: 'manual'
+    })
+    expect(remoteHistoryUpload).toMatchObject({ success: true, action: 'uploaded' })
+
+    const merged = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(merged, JSON.stringify(merged, null, 2)).toMatchObject({
+      success: true,
+      action: 'merged',
+      appliedLocal: true,
+      uploadedRemote: true,
+      conflicts: []
+    })
+    expect(deviceADatabase.data.promptVariables).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-variable-tone',
+        promptUuid: 'real-prompt-launch',
+        defaultValue: 'precise',
+        options: ['friendly', 'precise', 'executive'],
+        required: false
+      })
+    ]))
+    expect(deviceADatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({
+        uuid: 'real-history-phone-generated-while-variable-edited',
+        promptUuid: 'real-prompt-launch',
+        imageBlobs: [UPDATED_IMAGE]
+      })
+    ]))
+    expect(deviceADatabase.data.aiHistory).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-ai-history-initial' }),
+      expect.objectContaining({
+        uuid: 'real-ai-history-phone-generated-while-variable-edited',
+        output: 'Phone B generation should survive variable edit'
+      })
+    ]))
+    expect(deviceADatabase.data.settings).toEqual(expect.arrayContaining([
+      expect.objectContaining({ key: 'generation.defaultTone', value: 'precise' })
+    ]))
+
+    const manifest = await client.getCloudSyncManifest(storageId)
+    expect(manifest.latestSnapshot?.data.promptVariables).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-variable-tone',
+        promptUuid: 'real-prompt-launch',
+        defaultValue: 'precise',
+        options: ['friendly', 'precise', 'executive'],
+        required: false
+      })
+    ]))
+    expect(manifest.latestSnapshot?.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-initial', imageBlobs: [INITIAL_IMAGE] }),
+      expect.objectContaining({
+        uuid: 'real-history-phone-generated-while-variable-edited',
+        promptUuid: 'real-prompt-launch',
+        imageBlobs: [UPDATED_IMAGE]
+      })
+    ]))
+    expect(manifest.latestSnapshot?.data.aiHistory).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-ai-history-initial' }),
+      expect.objectContaining({ uuid: 'real-ai-history-phone-generated-while-variable-edited' })
+    ]))
+    expect(manifest.latestSnapshot?.dataChecksum)
+      .toBe(createCloudSyncDataChecksum(manifest.latestSnapshot!.data))
+
+    const deviceCDatabase = new MutableSyncDatabase(emptyDataSet())
+    const deviceC = createSyncService(client, deviceCDatabase, new MemoryStorage(), 'device-c')
+    expect(await deviceC.syncNow(storageId, {
+      deviceName: 'Desktop C',
+      platform: 'electron',
+      reason: 'manual'
+    })).toMatchObject({ success: true, action: 'downloaded' })
+    expect(deviceCDatabase.data.promptVariables).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        uuid: 'real-variable-tone',
+        defaultValue: 'precise',
+        options: ['friendly', 'precise', 'executive']
+      })
+    ]))
+    expect(deviceCDatabase.data.promptHistories).toEqual(expect.arrayContaining([
+      expect.objectContaining({ uuid: 'real-history-phone-generated-while-variable-edited' })
+    ]))
+
+    const snapshotsBeforeRepeatedClick = await client.listCloudSyncSnapshots(storageId)
+    const repeatedClick = await deviceA.syncNow(storageId, {
+      deviceName: 'Laptop A',
+      platform: 'electron',
+      reason: 'manual'
+    })
+    expect(repeatedClick).toMatchObject({ success: true, action: 'noop' })
+    expect(await client.listCloudSyncSnapshots(storageId)).toHaveLength(snapshotsBeforeRepeatedClick.length)
+  })
+
   it('新设备离线先创建数据后首次连接云端会合并两边且不丢图片历史', async () => {
     const storageId = 'robust-new-device-offline-create-first-sync'
     const client = createWebDAVSyncClient(storageId)
