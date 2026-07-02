@@ -8,6 +8,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { testDataGenerators } from '../helpers/test-utils'
+import { createBackupPayload } from '../../src/shared/backup-integrity'
 
 // ---- mock 子服务（与 database-manager.test.ts 相同）----
 
@@ -32,7 +33,11 @@ const mockCategoryService = {
 const mockPromptService = {
   getInstance: vi.fn(),
   getAllPromptsForTags: vi.fn(),
+  getAllPromptVariables: vi.fn(),
+  getAllPromptHistories: vi.fn(),
   createPrompt: vi.fn(),
+  createPromptVariableFromBackup: vi.fn(),
+  createPromptHistoryFromBackup: vi.fn(),
   upsertPrompt: vi.fn(),
 }
 const mockAIConfigService = {
@@ -52,7 +57,11 @@ const mockAppSettingsService = {
   updateSettingByKey: vi.fn(),
   getSettingByKey: vi.fn().mockResolvedValue(null),
 }
-const mockQuickOptService = { getInstance: vi.fn() }
+const mockQuickOptService = {
+  getInstance: vi.fn(),
+  getAllQuickOptimizationConfigs: vi.fn(),
+  createQuickOptimizationConfigFromBackup: vi.fn(),
+}
 
 vi.mock('~/lib/services/category.service', () => ({
   CategoryService: { getInstance: () => mockCategoryService }
@@ -95,13 +104,47 @@ import { DatabaseServiceManager } from '~/lib/services/database-manager.service'
 
 const mockCategory = testDataGenerators.createMockCategory({ id: 1, name: '分类A' })
 const mockPrompt = testDataGenerators.createMockPrompt({ id: 1, categoryId: 1, title: '提示词A' })
+const mockPromptVariable = {
+  id: 1,
+  uuid: 'variable-cross-1',
+  promptId: 1,
+  name: 'tone',
+  type: 'text' as const,
+  defaultValue: 'friendly',
+  required: false,
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+}
+const mockPromptHistory = {
+  id: 1,
+  uuid: 'history-cross-1',
+  promptId: 1,
+  title: '提示词A v1',
+  content: '历史内容',
+  version: 1,
+  createdAt: new Date().toISOString(),
+}
 const mockAIConfig = testDataGenerators.createMockAIConfig({ id: 1 })
+const mockQuickOptimizationConfig = {
+  id: 1,
+  uuid: 'quick-opt-cross-1',
+  name: '更清晰',
+  description: '优化表达',
+  prompt: '请优化：{{content}}',
+  enabled: true,
+  sortOrder: 1,
+  createdAt: new Date().toISOString(),
+  updatedAt: new Date().toISOString(),
+}
 const mockSetting = { key: 'theme', value: 'dark', type: 'string', description: '' }
 
 const baseData = {
   categories: [mockCategory],
   prompts: [mockPrompt],
+  promptVariables: [mockPromptVariable],
+  promptHistories: [mockPromptHistory],
   aiConfigs: [mockAIConfig],
+  quickOptimizationConfigs: [mockQuickOptimizationConfig],
   aiHistory: [],
   settings: [mockSetting],
 }
@@ -109,32 +152,58 @@ const baseData = {
 // 移动端备份文件格式（createCloudBackup 生成的）
 function makeMobileBackupFile(data = baseData) {
   const id = `mobile-${Date.now()}`
-  return {
+  return createBackupPayload({
     id,
     name: `backup-2026-03-12-${id.substring(0, 8)}`,
     description: '移动端云端备份',
     createdAt: new Date().toISOString(),
     data,
-  }
+  })
 }
 
 // 桌面端备份文件格式（cloud-backup-manager.ts 生成的）
 function makeDesktopBackupFile(data = baseData) {
-  return {
+  return createBackupPayload({
     id: 'desktop-backup-001',
     name: 'backup-2026-03-12-desktop0',
     description: '桌面端云端备份',
     createdAt: new Date().toISOString(),
     data,
-  }
+  })
 }
 
 describe('跨平台备份兼容性', () => {
   let manager: DatabaseServiceManager
+  let restoredRecords: Record<string, any[]>
+  let restoredCounters: Record<string, number>
+
+  const resetRestoredCapture = () => {
+    restoredRecords = {}
+    restoredCounters = {
+      categories: 10,
+      prompts: 20,
+      promptVariables: 30,
+      promptHistories: 40,
+      ai_configs: 50,
+      quick_optimization_configs: 60,
+      ai_generation_history: 70,
+      settings: 80
+    }
+  }
 
   beforeEach(() => {
     ;(DatabaseServiceManager as any).instance = undefined
     manager = DatabaseServiceManager.getInstance()
+    resetRestoredCapture()
+
+    vi.spyOn(manager as any, 'addRestoredRecord').mockImplementation(async (storeName: string, data: any) => {
+      const id = restoredCounters[storeName] ?? 900
+      restoredCounters[storeName] = id + 1
+      const restored = { ...data, id }
+      restoredRecords[storeName] = restoredRecords[storeName] || []
+      restoredRecords[storeName].push(restored)
+      return restored
+    })
 
     mockCategoryService.checkObjectStoreExists.mockResolvedValue(true)
     mockCategoryService.repairDatabase.mockResolvedValue({ success: true })
@@ -147,13 +216,19 @@ describe('跨平台备份兼容性', () => {
 
     mockCategoryService.getBasicCategories.mockResolvedValue([mockCategory])
     mockPromptService.getAllPromptsForTags.mockResolvedValue([mockPrompt])
+    mockPromptService.getAllPromptVariables.mockResolvedValue([mockPromptVariable])
+    mockPromptService.getAllPromptHistories.mockResolvedValue([mockPromptHistory])
     mockAIConfigService.getAllAIConfigs.mockResolvedValue([mockAIConfig])
+    mockQuickOptService.getAllQuickOptimizationConfigs.mockResolvedValue([mockQuickOptimizationConfig])
     mockAIHistoryService.getAllAIGenerationHistory.mockResolvedValue([])
     mockAppSettingsService.getAllSettings.mockResolvedValue([mockSetting])
 
     mockCategoryService.createCategory.mockResolvedValue({ ...mockCategory, id: 10 })
     mockPromptService.createPrompt.mockResolvedValue({ ...mockPrompt, id: 20 })
+    mockPromptService.createPromptVariableFromBackup.mockResolvedValue({ ...mockPromptVariable, id: 30, promptId: 20 })
+    mockPromptService.createPromptHistoryFromBackup.mockResolvedValue({ ...mockPromptHistory, id: 40, promptId: 20 })
     mockAIConfigService.createAIConfig.mockResolvedValue({ ...mockAIConfig, id: 30 })
+    mockQuickOptService.createQuickOptimizationConfigFromBackup.mockResolvedValue({ ...mockQuickOptimizationConfig, id: 50 })
     mockAIHistoryService.createAIGenerationHistory.mockResolvedValue({})
     mockAppSettingsService.updateSettingByKey.mockResolvedValue({})
   })
@@ -168,8 +243,9 @@ describe('跨平台备份兼容性', () => {
       const result = await manager.replaceAllData(mobileFile.data)
 
       expect(result.success).toBe(true)
-      expect(mockCategoryService.createCategory).toHaveBeenCalledTimes(1)
-      expect(mockPromptService.createPrompt).toHaveBeenCalledTimes(1)
+      expect(restoredRecords.categories).toHaveLength(1)
+      expect(restoredRecords.prompts).toHaveLength(1)
+      expect(restoredRecords.promptHistories).toHaveLength(1)
     })
 
     it('移动端备份包含 base64 图片时，桌面端能正确反序列化', async () => {
@@ -182,7 +258,7 @@ describe('跨平台备份兼容性', () => {
       const result = await manager.replaceAllData(mobileFile.data)
 
       expect(result.success).toBe(true)
-      const promptArg = mockPromptService.createPrompt.mock.calls[0][0]
+      const promptArg = restoredRecords.prompts[0]
       expect(promptArg.imageBlobs[0]).toBeInstanceOf(Blob)
     })
 
@@ -191,8 +267,10 @@ describe('跨平台备份兼容性', () => {
 
       expect(result.success).toBe(true)
       // prompt 的 categoryId 应该映射到新创建的分类 ID (10)
-      const promptArg = mockPromptService.createPrompt.mock.calls[0][0]
+      const promptArg = restoredRecords.prompts[0]
       expect(promptArg.categoryId).toBe(10)
+      const historyArg = restoredRecords.promptHistories[0]
+      expect(historyArg.promptId).toBe(20)
     })
   })
 
@@ -207,10 +285,14 @@ describe('跨平台备份兼容性', () => {
 
       expect(restoredData).toHaveProperty('categories')
       expect(restoredData).toHaveProperty('prompts')
+      expect(restoredData).toHaveProperty('promptVariables')
+      expect(restoredData).toHaveProperty('promptHistories')
       expect(restoredData).toHaveProperty('aiConfigs')
+      expect(restoredData).toHaveProperty('quickOptimizationConfigs')
       expect(restoredData).toHaveProperty('settings')
       expect(Array.isArray(restoredData.categories)).toBe(true)
       expect(Array.isArray(restoredData.prompts)).toBe(true)
+      expect(Array.isArray(restoredData.promptVariables)).toBe(true)
     })
 
     it('桌面备份的 data 不含嵌套 data 字段', () => {
@@ -226,7 +308,7 @@ describe('跨平台备份兼容性', () => {
       const result = await manager.replaceAllData(desktopFile.data)
 
       expect(result.success).toBe(true)
-      expect(mockCategoryService.createCategory).toHaveBeenCalledTimes(1)
+      expect(restoredRecords.categories).toHaveLength(1)
     })
   })
 
@@ -238,25 +320,23 @@ describe('跨平台备份兼容性', () => {
       const exportResult = await manager.exportAllDataForBackup()
       expect(exportResult.success).toBe(true)
 
-      // 只清调用记录
-      mockCategoryService.createCategory.mockClear()
-      mockPromptService.createPrompt.mockClear()
-      mockCategoryService.createCategory.mockResolvedValue({ ...mockCategory, id: 10 })
-      mockPromptService.createPrompt.mockResolvedValue({ ...mockPrompt, id: 20 })
-      mockAIConfigService.createAIConfig.mockResolvedValue({ ...mockAIConfig, id: 30 })
-      mockAppSettingsService.updateSettingByKey.mockResolvedValue({})
+      resetRestoredCapture()
 
       // 恢复
       const restoreResult = await manager.replaceAllData(exportResult.data!)
       expect(restoreResult.success).toBe(true)
-      expect(mockCategoryService.createCategory).toHaveBeenCalledTimes(1)
-      expect(mockPromptService.createPrompt).toHaveBeenCalledTimes(1)
+      expect(restoredRecords.categories).toHaveLength(1)
+      expect(restoredRecords.prompts).toHaveLength(1)
+      expect(restoredRecords.promptHistories).toHaveLength(1)
     })
 
     it('含图片的备份：序列化后能被反序列化恢复', async () => {
       const blob = new Blob(['img'], { type: 'image/png' })
       mockPromptService.getAllPromptsForTags.mockResolvedValue([
         { ...mockPrompt, imageBlobs: [blob] }
+      ])
+      mockPromptService.getAllPromptHistories.mockResolvedValue([
+        { ...mockPromptHistory, imageBlobs: [blob] }
       ])
 
       // 备份（序列化图片）
@@ -265,20 +345,19 @@ describe('跨平台备份兼容性', () => {
 
       const serializedPrompt = exportResult.data!.prompts[0]
       expect(typeof serializedPrompt.imageBlobs[0]).toBe('string') // base64
+      const serializedHistory = exportResult.data!.promptHistories![0]
+      expect(typeof serializedHistory.imageBlobs[0]).toBe('string')
 
       // 恢复（反序列化图片）
-      mockCategoryService.createCategory.mockClear()
-      mockPromptService.createPrompt.mockClear()
-      mockCategoryService.createCategory.mockResolvedValue({ ...mockCategory, id: 10 })
-      mockPromptService.createPrompt.mockResolvedValue({ ...mockPrompt, id: 20 })
-      mockAIConfigService.createAIConfig.mockResolvedValue({ ...mockAIConfig, id: 30 })
-      mockAppSettingsService.updateSettingByKey.mockResolvedValue({})
+      resetRestoredCapture()
 
       const restoreResult = await manager.replaceAllData(exportResult.data!)
       expect(restoreResult.success).toBe(true)
 
-      const promptArg = mockPromptService.createPrompt.mock.calls[0][0]
+      const promptArg = restoredRecords.prompts[0]
       expect(promptArg.imageBlobs[0]).toBeInstanceOf(Blob)
+      const historyArg = restoredRecords.promptHistories[0]
+      expect(historyArg.imageBlobs[0]).toBeInstanceOf(Blob)
     })
 
     it('多分类多提示词时 ID 映射全部正确', async () => {
@@ -290,52 +369,27 @@ describe('跨平台备份兼容性', () => {
 
       mockCategoryService.getBasicCategories.mockResolvedValue([cat1, cat2])
       mockPromptService.getAllPromptsForTags.mockResolvedValue([p1, p2, p3])
-
-      let catIdCounter = 100
-      mockCategoryService.createCategory.mockImplementation(async (data: any) => ({
-        ...data,
-        id: catIdCounter++
-      }))
-      let promptIdCounter = 200
-      mockPromptService.createPrompt.mockImplementation(async (data: any) => ({
-        ...data,
-        id: promptIdCounter++
-      }))
+      mockPromptService.getAllPromptHistories.mockResolvedValue([])
 
       const exportResult = await manager.exportAllDataForBackup()
 
-      // 只清调用记录，不清 mock 实现
-      mockCategoryService.createCategory.mockClear()
-      mockPromptService.createPrompt.mockClear()
-
-      catIdCounter = 100
-      mockCategoryService.createCategory.mockImplementation(async (data: any) => ({
-        ...data,
-        id: catIdCounter++
-      }))
-      promptIdCounter = 200
-      mockPromptService.createPrompt.mockImplementation(async (data: any) => ({
-        ...data,
-        id: promptIdCounter++
-      }))
-      mockAIConfigService.createAIConfig.mockResolvedValue({ id: 300 })
-      mockAppSettingsService.updateSettingByKey.mockResolvedValue({})
+      resetRestoredCapture()
 
       const restoreResult = await manager.replaceAllData(exportResult.data!)
       expect(restoreResult.success).toBe(true)
 
-      const promptCalls = mockPromptService.createPrompt.mock.calls
-      expect(promptCalls).toHaveLength(3)
+      const restoredPrompts = restoredRecords.prompts
+      expect(restoredPrompts).toHaveLength(3)
 
-      // p1 和 p3 的 categoryId 应该映射到 cat1 的新 ID (100)
-      // p2 的 categoryId 应该映射到 cat2 的新 ID (101)
-      const p1Arg = promptCalls.find((c: any[]) => c[0].title === '提示词1')?.[0]
-      const p2Arg = promptCalls.find((c: any[]) => c[0].title === '提示词2')?.[0]
-      const p3Arg = promptCalls.find((c: any[]) => c[0].title === '提示词3')?.[0]
+      // p1 和 p3 的 categoryId 应该映射到 cat1 的新 ID (10)
+      // p2 的 categoryId 应该映射到 cat2 的新 ID (11)
+      const p1Arg = restoredPrompts.find((prompt: any) => prompt.title === '提示词1')
+      const p2Arg = restoredPrompts.find((prompt: any) => prompt.title === '提示词2')
+      const p3Arg = restoredPrompts.find((prompt: any) => prompt.title === '提示词3')
 
-      expect(p1Arg?.categoryId).toBe(100)
-      expect(p2Arg?.categoryId).toBe(101)
-      expect(p3Arg?.categoryId).toBe(100)
+      expect(p1Arg?.categoryId).toBe(10)
+      expect(p2Arg?.categoryId).toBe(11)
+      expect(p3Arg?.categoryId).toBe(10)
     })
   })
 
@@ -370,6 +424,7 @@ describe('跨平台备份兼容性', () => {
       expect(result.data).toHaveProperty('prompts')
       expect(result.data).toHaveProperty('aiConfigs')
       expect(result.data).toHaveProperty('aiHistory')
+      expect(result.data).toHaveProperty('promptHistories')
       expect(result.data).toHaveProperty('settings')
     })
   })

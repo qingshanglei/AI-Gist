@@ -32,6 +32,10 @@ describe('AI provider metadata', () => {
     expect(getDefaultBaseURL('aliyun')).toBe('https://dashscope.aliyuncs.com/compatible-mode/v1')
   })
 
+  it('uses Tencent TokenHub as the default Tencent endpoint', () => {
+    expect(getDefaultBaseURL('tencent')).toBe('https://tokenhub.tencentmaas.com/v1')
+  })
+
   it('keeps OpenAI defaults on current GPT-5 generation models', () => {
     expect(getDefaultModels('openai').slice(0, 4)).toEqual([
       'gpt-5.5',
@@ -43,13 +47,14 @@ describe('AI provider metadata', () => {
   })
 
   it('keeps Gemini defaults away from legacy gemini-pro', () => {
-    expect(getDefaultModels('google')[0]).toBe('gemini-3.1-pro')
+    expect(getDefaultModels('google')[0]).toBe('gemini-3-pro-preview')
+    expect(getDefaultModels('google')).not.toContain('gemini-3.1-pro')
     expect(getDefaultModels('google')).not.toContain('gemini-pro')
   })
 
   it('provides test model priorities for remote providers', () => {
     expect(getTestModelPriority('anthropic')[0]).toBe('claude-sonnet-4-6')
-    expect(getTestModelPriority('aliyun')[0]).toBe('qwen-turbo-latest')
+    expect(getTestModelPriority('aliyun')[0]).toBe('qwen3.6-flash')
     expect(getTestModelPriority('openrouter')[0]).toBe('openai/gpt-5.4-mini')
   })
 })

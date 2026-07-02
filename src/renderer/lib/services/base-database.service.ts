@@ -5,6 +5,22 @@
 
 import { generateUUID } from '../utils/uuid';
 import { emitDataChange } from './data-change-events';
+import type { SyncTombstone } from '@shared/types/database';
+import { getCloudSyncRecordKey } from '@shared/cloud-sync-engine';
+
+const SYNC_TOMBSTONE_STORE = 'syncTombstones';
+const DATABASE_DEBUG_STORAGE_KEY = 'ai-gist.debug.database';
+
+const SYNC_COLLECTION_BY_STORE: Record<string, string> = {
+  categories: 'categories',
+  prompts: 'prompts',
+  promptVariables: 'promptVariables',
+  promptHistories: 'promptHistories',
+  ai_configs: 'aiConfigs',
+  quick_optimization_configs: 'quickOptimizationConfigs',
+  ai_generation_history: 'aiHistory',
+  settings: 'settings'
+};
 
 /**
  * IndexedDB 基础数据库服务类
@@ -13,10 +29,10 @@ import { emitDataChange } from './data-change-events';
 export class BaseDatabaseService {
   protected db: IDBDatabase | null = null;
   protected readonly dbName = 'AIGistDB';
-  protected readonly dbVersion = 10; // 增加版本号以支持提示词图片数组字段
+  protected readonly dbVersion = 11; // 增加版本号以支持同步删除标记
   protected initializationPromise: Promise<void> | null = null;
   protected isInitialized = false;
-  private currentDbVersion = 10; // 添加一个可变的版本号变量
+  private currentDbVersion = 11; // 添加一个可变的版本号变量
 
   /**
    * 初始化数据库连接
@@ -195,6 +211,18 @@ export class BaseDatabaseService {
         settingsStore.createIndex('key', 'key', { unique: true });
       } else {
         console.log('settings 对象存储已存在');
+      }
+
+      // 创建 syncTombstones 表，用于记录硬删除并在多端同步中传播删除
+      if (!db.objectStoreNames.contains(SYNC_TOMBSTONE_STORE)) {
+        console.log('创建 syncTombstones 对象存储');
+        const tombstoneStore = db.createObjectStore(SYNC_TOMBSTONE_STORE, { keyPath: 'id', autoIncrement: true });
+        tombstoneStore.createIndex('storeName', 'storeName', { unique: false });
+        tombstoneStore.createIndex('collectionName', 'collectionName', { unique: false });
+        tombstoneStore.createIndex('recordKey', 'recordKey', { unique: false });
+        tombstoneStore.createIndex('deletedAt', 'deletedAt', { unique: false });
+      } else {
+        console.log('syncTombstones 对象存储已存在');
       }
       
       console.log('对象存储创建完成，最终对象存储列表:', Array.from(db.objectStoreNames));
@@ -452,21 +480,38 @@ export class BaseDatabaseService {
   protected async delete(storeName: string, id: number): Promise<void> {
     const db = await this.ensureDB();
     return new Promise((resolve, reject) => {
-      const transaction = db.transaction([storeName], 'readwrite');
+      const transaction = db.transaction(this.getDeleteTransactionStores(db, storeName), 'readwrite');
       const store = transaction.objectStore(storeName);
-      const request = store.delete(id);
+      const getRequest = store.get(id);
 
-      request.onsuccess = () => {
-        emitDataChange({
-          storeName,
-          action: 'delete',
-          id
-        });
-        resolve();
+      getRequest.onsuccess = () => {
+        const existingRecord = getRequest.result;
+        const request = store.delete(id);
+
+        request.onsuccess = () => {
+          this.writeTombstoneForDeletedRecord(
+            transaction,
+            storeName,
+            existingRecord,
+            () => {
+              emitDataChange({
+                storeName,
+                action: 'delete',
+                id
+              });
+              resolve();
+            },
+            reject
+          );
+        };
+
+        request.onerror = () => {
+          reject(new Error(`Failed to delete record from ${storeName}: ${request.error?.message}`));
+        };
       };
 
-      request.onerror = () => {
-        reject(new Error(`Failed to delete record from ${storeName}: ${request.error?.message}`));
+      getRequest.onerror = () => {
+        reject(new Error(`Failed to get record for delete from ${storeName}: ${getRequest.error?.message}`));
       };
     });
   }
@@ -560,7 +605,8 @@ export class BaseDatabaseService {
         'promptHistories',
         'ai_configs',
         'ai_generation_history',
-        'settings'
+        'settings',
+        SYNC_TOMBSTONE_STORE
       ];
 
       const missingStores: string[] = [];
@@ -775,7 +821,7 @@ export class BaseDatabaseService {
   async addUUIDsToExistingRecords(storeName: string): Promise<number> {
     if (!this.db) throw new Error('Database not initialized');
     
-    console.log(`开始为 ${storeName} 添加UUID...`);
+    this.debugLog(`开始为 ${storeName} 添加UUID...`);
     
     const transaction = this.db.transaction([storeName], 'readwrite');
     const store = transaction.objectStore(storeName);
@@ -789,7 +835,7 @@ export class BaseDatabaseService {
         // 检查是否需要UUID索引
         const needsUUIDIndex = !Array.from(store.indexNames).includes('uuid');
         if (needsUUIDIndex) {
-          console.log(`${storeName} 需要创建UUID索引`);
+          this.debugLog(`${storeName} 需要创建UUID索引`);
           // 注意：在活动事务中无法创建索引，这需要在数据库升级时完成
         }
         
@@ -806,12 +852,12 @@ export class BaseDatabaseService {
               });
               updatedCount++;
             } catch (error) {
-              console.error(`Failed to update record with UUID in ${storeName}:`, error);
+              this.debugLog(`Failed to update record with UUID in ${storeName}:`, error);
             }
           }
         }
         
-        console.log(`为 ${storeName} 成功添加了 ${updatedCount} 个UUID`);
+        this.debugLog(`为 ${storeName} 成功添加了 ${updatedCount} 个UUID`);
         resolve(updatedCount);
       };
       
@@ -830,6 +876,7 @@ export class BaseDatabaseService {
       'promptVariables',
       'promptHistories',
       'ai_configs',
+      'quick_optimization_configs',
       'ai_generation_history'
     ];
     
@@ -843,12 +890,36 @@ export class BaseDatabaseService {
           results[storeName] = 0;
         }
       } catch (error) {
-        console.error(`Failed to migrate ${storeName} to UUID:`, error);
+        this.debugLog(`Failed to migrate ${storeName} to UUID:`, error);
         results[storeName] = -1; // 表示失败
       }
     }
     
     return results;
+  }
+
+  private debugLog(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return;
+    }
+    console.debug(...args);
+  }
+
+  private isDebugLoggingEnabled(): boolean {
+    try {
+      return typeof localStorage !== 'undefined' &&
+        localStorage.getItem(DATABASE_DEBUG_STORAGE_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * 获取同步删除标记。
+   * 该数据不会参与普通业务查询，仅供云同步层传播删除使用。
+   */
+  async getSyncTombstones(): Promise<SyncTombstone[]> {
+    return this.getAll<SyncTombstone>(SYNC_TOMBSTONE_STORE);
   }
 
   /**
@@ -925,77 +996,152 @@ export class BaseDatabaseService {
    * @returns Promise<{ success: number; failed: number; errors: string[] }> 批量删除结果
    */
   protected async batchDelete(storeName: string, ids: number[]): Promise<{ success: number; failed: number; errors: string[] }> {
-    let success = 0;
-    let failed = 0;
+    return this.batchDeleteRecords(storeName, ids, true);
+  }
+
+  /**
+   * 静默批量删除，仍然记录同步 tombstone，但不发数据变更事件。
+   */
+  protected async batchDeleteSilently(storeName: string, ids: number[]): Promise<{ success: number; failed: number; errors: string[] }> {
+    return this.batchDeleteRecords(storeName, ids, false);
+  }
+
+  private async batchDeleteRecords(
+    storeName: string,
+    ids: number[],
+    emitChange: boolean
+  ): Promise<{ success: number; failed: number; errors: string[] }> {
     const errors: string[] = [];
 
     const db = await this.ensureDB();
 
-    // 首先获取要删除的记录的UUID（用于WebDAV同步）
-    const deletedUuids: string[] = [];
+    const deletedRecords = new Map<number, any>();
     try {
       for (const id of ids) {
         const record = await this.getById<any>(storeName, id);
-        if (record && record.uuid) {
-          deletedUuids.push(record.uuid);
+        if (record) {
+          deletedRecords.set(id, record);
         }
       }
     } catch (error) {
-      console.warn('获取删除记录的UUID时出错:', error);
+      console.warn('获取删除记录时出错:', error);
     }
 
-    // 使用事务进行批量操作
     return new Promise((resolve) => {
-      const transaction = db.transaction([storeName], 'readwrite');
+      const transaction = db.transaction(this.getDeleteTransactionStores(db, storeName), 'readwrite');
       const store = transaction.objectStore(storeName);
-      
-      let completed = 0;
       const total = ids.length;
+      const committedIds = new Set<number>();
+      let settled = false;
 
       if (total === 0) {
         resolve({ success: 0, failed: 0, errors: [] });
         return;
       }
 
-      // 批量删除所有记录
+      const resolveOnce = (result: { success: number; failed: number; errors: string[] }) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        resolve(result);
+      };
+
+      transaction.oncomplete = () => {
+        const committedIdList = ids.filter(id => committedIds.has(id));
+        if (emitChange && committedIdList.length > 0) {
+          emitDataChange({
+            storeName,
+            action: 'batch-delete',
+            ids: committedIdList
+          });
+        }
+
+        resolveOnce({
+          success: committedIdList.length,
+          failed: total - committedIdList.length,
+          errors
+        });
+      };
+
+      const resolveTransactionFailure = () => {
+        resolveOnce({
+          success: 0,
+          failed: total,
+          errors: errors.length > 0
+            ? errors
+            : [`批量删除事务失败: ${transaction.error?.message || '未知错误'}`]
+        });
+      };
+
+      transaction.onerror = resolveTransactionFailure;
+      transaction.onabort = resolveTransactionFailure;
+
       ids.forEach(id => {
         const request = store.delete(id);
         
         request.onsuccess = () => {
-          success++;
-          completed++;
-          
-          if (completed === total) {
-            // 所有操作完成后，直接返回结果
-            if (success > 0) {
-              emitDataChange({
-                storeName,
-                action: 'batch-delete',
-                ids: ids.filter(id => !errors.some(error => error.includes(`记录 ${id} `)))
-              });
+          this.writeTombstoneForDeletedRecord(
+            transaction,
+            storeName,
+            deletedRecords.get(id),
+            () => {
+              committedIds.add(id);
+            },
+            error => {
+              errors.push(`记录 ${id} 删除标记写入失败: ${error instanceof Error ? error.message : '未知错误'}`);
             }
-            resolve({ success, failed, errors });
-          }
+          );
         };
 
         request.onerror = () => {
-          failed++;
           errors.push(`删除记录 ${id} 失败: ${request.error?.message || '未知错误'}`);
-          completed++;
-          
-          if (completed === total) {
-            // 所有操作完成后，直接返回结果
-            if (success > 0) {
-              emitDataChange({
-                storeName,
-                action: 'batch-delete',
-                ids: ids.filter(id => !errors.some(error => error.includes(`记录 ${id} `)))
-              });
-            }
-            resolve({ success, failed, errors });
-          }
         };
       });
     });
+  }
+
+  private getDeleteTransactionStores(db: IDBDatabase, storeName: string): string[] {
+    if (storeName !== SYNC_TOMBSTONE_STORE && db.objectStoreNames.contains(SYNC_TOMBSTONE_STORE)) {
+      return [storeName, SYNC_TOMBSTONE_STORE];
+    }
+    return [storeName];
+  }
+
+  private writeTombstoneForDeletedRecord(
+    transaction: IDBTransaction,
+    storeName: string,
+    existingRecord: any,
+    onSuccess: () => void,
+    onError: (error: unknown) => void
+  ): void {
+    if (!existingRecord || storeName === SYNC_TOMBSTONE_STORE || !Array.from(transaction.objectStoreNames).includes(SYNC_TOMBSTONE_STORE)) {
+      onSuccess();
+      return;
+    }
+
+    try {
+      const tombstoneStore = transaction.objectStore(SYNC_TOMBSTONE_STORE);
+      const tombstone = this.createSyncTombstone(storeName, existingRecord);
+      const request = tombstoneStore.add(tombstone);
+      request.onsuccess = () => onSuccess();
+      request.onerror = () => onError(new Error(`Failed to write sync tombstone: ${request.error?.message}`));
+    } catch (error) {
+      onError(error);
+    }
+  }
+
+  private createSyncTombstone(storeName: string, existingRecord: any): Omit<SyncTombstone, 'id'> {
+    const collectionName = SYNC_COLLECTION_BY_STORE[storeName] || storeName;
+    const cleanSnapshot = this.cleanDataForStorage(existingRecord);
+
+    return {
+      storeName,
+      collectionName,
+      recordKey: getCloudSyncRecordKey(collectionName, cleanSnapshot),
+      recordUuid: cleanSnapshot.uuid,
+      deletedAt: new Date(),
+      recordSnapshot: cleanSnapshot
+    };
   }
 }

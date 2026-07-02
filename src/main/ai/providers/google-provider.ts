@@ -21,6 +21,44 @@ export class GoogleProvider extends BaseAIProvider {
     return config.baseURL?.trim() || this.defaultBaseURL;
   }
 
+  private async fetchRemoteModels(config: AIConfig): Promise<string[]> {
+    if (!config.apiKey) {
+      throw new Error('API Key 未设置');
+    }
+
+    const baseUrl = this.getBaseURL(config);
+    const url = `${baseUrl}/${this.apiVersion}/models?key=${encodeURIComponent(config.apiKey)}`;
+    console.log(`Google Gemini 请求URL: ${url.replace(config.apiKey || '', (config.apiKey || '').substring(0, 10) + '...')}`);
+
+    const timeoutFetch = this.createTimeoutFetch(20000);
+    const response = await timeoutFetch(url, {
+      headers: {
+        'Content-Type': 'application/json'
+      }
+    });
+
+    console.log(`Google Gemini 响应状态: ${response.status}`);
+
+    if (!response.ok) {
+      const errorData = await response.text().catch(() => response.statusText);
+      throw new Error(`模型列表请求失败: HTTP ${response.status} ${errorData}`);
+    }
+
+    const data = await response.json();
+    console.log(`Google Gemini 响应数据:`, data);
+
+    return data.models?.map((model: any) => {
+      const name = model.name || '';
+      return name.replace('models/', '');
+    }).filter((name: string, index: number, array: string[]) => {
+      const model = data.models[index];
+      const supportedMethods = model?.supportedGenerationMethods || model?.supported_actions || model?.supportedActions || [];
+      return name.startsWith('gemini') && (
+        supportedMethods.length === 0 || supportedMethods.includes('generateContent')
+      ) && array.indexOf(name) === index;
+    }) || [];
+  }
+
   
   /**
    * 测试配置连接
@@ -29,8 +67,7 @@ export class GoogleProvider extends BaseAIProvider {
     console.log(`测试 Google Gemini 连接，使用 baseURL: ${config.baseURL}`);
     
     try {
-      // 只测试连接和获取模型列表，不测试具体模型
-      const models = await this.getAvailableModels(config);
+      const models = await this.fetchRemoteModels(config);
       console.log(`Google Gemini 获取到模型列表:`, models);
       
       if (models.length > 0) {
@@ -38,13 +75,18 @@ export class GoogleProvider extends BaseAIProvider {
         return { 
           success: true, 
           models,
+          modelSource: 'remote',
+          modelListMessage: `已从远端获取到 ${models.length} 个可用模型`,
           error: `✅ 连接成功！获取到 ${models.length} 个可用模型`
         };
       } else {
+        const defaultModels = this.getDefaultModels();
         console.log(`Google Gemini 连接成功但未获取到模型，使用默认模型列表`);
         return { 
           success: true, 
-          models: this.getDefaultModels(),
+          models: defaultModels,
+          modelSource: defaultModels.length > 0 ? 'default' : 'unavailable',
+          modelListMessage: defaultModels.length > 0 ? '远端模型列表为空，已使用内置默认模型' : '远端模型列表为空，请手动添加模型',
           error: `✅ 连接成功！但未获取到模型列表，使用默认模型`
         };
       }
@@ -62,53 +104,11 @@ export class GoogleProvider extends BaseAIProvider {
     console.log(`获取 Google Gemini 模型列表 - baseURL: ${config.baseURL}`);
     
     try {
-      if (!config.apiKey) {
-        throw new Error('API Key 未设置');
-      }
-      
-      const baseUrl = this.getBaseURL(config);
-      const url = `${baseUrl}/${this.apiVersion}/models?key=${config.apiKey}`;
-      console.log(`Google Gemini 请求URL: ${url.replace(config.apiKey || '', (config.apiKey || '').substring(0, 10) + '...')}`);
-      
-      const timeoutFetch = this.createTimeoutFetch(20000);
-      const response = await timeoutFetch(url, {
-        headers: {
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      console.log(`Google Gemini 响应状态: ${response.status}`);
-      
-      if (response.ok) {
-        const data = await response.json();
-        console.log(`Google Gemini 响应数据:`, data);
-        
-        const models = data.models?.map((model: any) => {
-          // 提取模型名称，去掉路径前缀 "models/"
-          const name = model.name || '';
-          return name.replace('models/', '');
-        }).filter((name: string) => {
-          // 只返回 Gemini 模型
-          return name.startsWith('gemini');
-        }) || [];
-        
-        console.log(`Google Gemini 解析出的模型列表:`, models);
-        
-        // 如果获取到了模型列表，返回；否则返回默认模型列表
-        if (models.length > 0) {
-          return models;
-        }
-      } else {
-        console.error(`Google Gemini API 响应错误: ${response.status} ${response.statusText}`);
-        const errorData = await response.text().catch(() => 'Unknown error');
-        console.error(`Google Gemini API 错误详情:`, errorData);
-        
-        // 特殊处理常见错误
-        if (response.status === 403) {
-          throw new Error('API Key 无效或权限不足，请检查 API Key 是否正确');
-        } else if (response.status === 401) {
-          throw new Error('API Key 认证失败，请检查 API Key 是否有效');
-        }
+      const models = await this.fetchRemoteModels(config);
+      console.log(`Google Gemini 解析出的模型列表:`, models);
+
+      if (models.length > 0) {
+        return models;
       }
     } catch (error) {
       console.error(`获取 Google Gemini 模型列表失败，使用默认列表:`, error);

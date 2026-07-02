@@ -17,15 +17,59 @@ import type {
   CloudRestoreResult,
   CloudFileInfo
 } from '@shared/types/cloud-backup'
+import {
+  CLOUD_BACKUP_DIR,
+  CLOUD_SYNC_MANIFEST_BACKUP_FILE,
+  CLOUD_SYNC_MANIFEST_FILE,
+  getCloudSyncSnapshotFileName,
+  getCloudSyncSnapshotPath,
+  getCloudSyncSnapshotRevisionFromFileName,
+  getCloudSyncSnapshotsDirectoryPath,
+  getCloudSyncSnapshotsDirectoryRelativePath,
+  getCloudBackupDirectoryPath,
+  getCloudBackupFilePath,
+  getCloudSyncManifestBackupPath,
+  getCloudSyncManifestPath,
+  isCloudBackupFileName,
+  joinCloudPath,
+  normalizeCloudPath
+} from '@shared/cloud-backup-paths'
+import type {
+  CloudSyncManifest,
+  CloudSyncManifestSaveOptions,
+  CloudSyncManifestSaveResult
+} from '@shared/cloud-sync-manifest'
+import {
+  assertValidCloudSyncManifest,
+  createCloudSyncManifestRevisionConflictError,
+  doesCloudSyncManifestMatchExpectedRevision,
+  getCloudSyncManifestRevision,
+  readCloudSyncManifestWithFallback
+} from '@shared/cloud-sync-manifest'
+import type { CloudSyncSnapshot } from '@shared/cloud-sync-engine'
+import type { CloudSyncRemoteSnapshotInfo } from '@shared/cloud-sync-snapshots'
+import {
+  assertValidCloudSyncSnapshotFile,
+  createCloudSyncSnapshotFile
+} from '@shared/cloud-sync-snapshots'
+import {
+  createBackupPayload,
+  parseBackupPayload
+} from '@shared/backup-integrity'
 
 const STORAGE_KEYS = {
   CONFIGS: 'cloud_backup_configs'
 }
 
+const WEBDAV_REQUEST_TIMEOUT_MS = 30_000
+const CLOUD_BACKUP_DEBUG_STORAGE_KEY = 'ai-gist.debug.cloud-backup'
+
 export class MobileCloudBackupService {
   private static instance: MobileCloudBackupService
 
-  private constructor() { }
+  private constructor() {
+    // Singleton service.
+  }
 
   static getInstance(): MobileCloudBackupService {
     if (!MobileCloudBackupService.instance) {
@@ -79,9 +123,18 @@ export class MobileCloudBackupService {
       if (!value) return []
       return JSON.parse(value)
     } catch (error) {
-      console.error('获取存储配置失败:', error)
-      return []
+      this.debugLog('获取存储配置失败:', error)
+      throw new Error(`获取存储配置失败: ${error instanceof Error ? error.message : '未知错误'}`)
     }
+  }
+
+  private async getStorageConfigOrThrow(storageId: string): Promise<CloudStorageConfig> {
+    const configs = await this.getStorageConfigs()
+    const config = configs.find(c => c.id === storageId)
+    if (!config) {
+      throw new Error('存储配置不存在')
+    }
+    return config
   }
 
   /**
@@ -121,7 +174,7 @@ export class MobileCloudBackupService {
 
       return { success: true, config: newConfig }
     } catch (error) {
-      console.error('添加存储配置失败:', error)
+      this.debugLog('添加存储配置失败:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : '添加失败'
@@ -160,7 +213,7 @@ export class MobileCloudBackupService {
 
       return { success: true, config: updatedConfig }
     } catch (error) {
-      console.error('更新存储配置失败:', error)
+      this.debugLog('更新存储配置失败:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : '更新失败'
@@ -186,7 +239,7 @@ export class MobileCloudBackupService {
 
       return { success: true }
     } catch (error) {
-      console.error('删除存储配置失败:', error)
+      this.debugLog('删除存储配置失败:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : '删除失败'
@@ -210,7 +263,7 @@ export class MobileCloudBackupService {
 
       return { success: false, error: '不支持的存储类型' }
     } catch (error) {
-      console.error('测试连接失败:', error)
+      this.debugLog('测试连接失败:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : '测试失败'
@@ -234,6 +287,7 @@ export class MobileCloudBackupService {
       const response = await CapacitorHttp.request({
         url: this.normalizeBaseUrl(config.url),
         method: 'OPTIONS',
+        ...this.getWebDAVRequestTimeoutOptions(),
         headers: {
           'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
         }
@@ -253,7 +307,7 @@ export class MobileCloudBackupService {
         error: `连接失败: HTTP ${response.status}`
       }
     } catch (error) {
-      console.error('WebDAV 连接测试失败:', error)
+      this.debugLog('WebDAV 连接测试失败:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : '连接失败'
@@ -303,8 +357,128 @@ export class MobileCloudBackupService {
 
       return []
     } catch (error) {
-      console.error('获取备份列表失败:', error)
+      this.debugLog('获取备份列表失败:', error)
       throw error
+    }
+  }
+
+  /**
+   * 获取云同步 manifest。文件不存在时返回空 manifest，表示首次同步。
+   */
+  async getCloudSyncManifest(storageId: string): Promise<CloudSyncManifest> {
+    const config = await this.getStorageConfigOrThrow(storageId)
+
+    if (config.type === 'webdav') {
+      return this.getWebDAVSyncManifest(config as any)
+    }
+
+    if (config.type === 'icloud') {
+      return this.getICloudSyncManifest(config as any)
+    }
+
+    throw new Error('不支持的存储类型')
+  }
+
+  /**
+   * 保存云同步 manifest。
+   */
+  async saveCloudSyncManifest(
+    storageId: string,
+    manifest: CloudSyncManifest,
+    options: CloudSyncManifestSaveOptions = {}
+  ): Promise<CloudSyncManifestSaveResult> {
+    try {
+      const config = await this.getStorageConfigOrThrow(storageId)
+      const normalizedManifest = assertValidCloudSyncManifest({
+        ...manifest,
+        updatedAt: new Date().toISOString()
+      })
+
+      if (config.type === 'webdav') {
+        await this.saveWebDAVSyncManifest(config as any, normalizedManifest, options)
+        return { success: true }
+      }
+
+      if (config.type === 'icloud') {
+        await this.saveICloudSyncManifest(config as any, normalizedManifest, options)
+        return { success: true }
+      }
+
+      return { success: false, error: '不支持的存储类型' }
+    } catch (error) {
+      if (this.isCloudSyncRevisionConflictError(error)) {
+        return {
+          success: false,
+          conflict: true,
+          currentRevision: await this.tryReadCloudSyncManifestRevision(storageId),
+          error: error instanceof Error ? error.message : '云同步 manifest 已被其他设备更新'
+        }
+      }
+
+      this.debugLog('保存云同步 manifest 失败:', error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : '保存云同步 manifest 失败'
+      }
+    }
+  }
+
+  async listCloudSyncSnapshots(storageId: string): Promise<CloudSyncRemoteSnapshotInfo[]> {
+    const config = await this.getStorageConfigOrThrow(storageId)
+
+    if (config.type === 'webdav') {
+      return this.listWebDAVSyncSnapshots(config as any)
+    }
+
+    if (config.type === 'icloud') {
+      return this.listICloudSyncSnapshots(config as any)
+    }
+
+    return []
+  }
+
+  async readCloudSyncSnapshot(
+    storageId: string,
+    snapshot: CloudSyncRemoteSnapshotInfo | string
+  ): Promise<CloudSyncSnapshot> {
+    const config = await this.getStorageConfigOrThrow(storageId)
+
+    if (config.type === 'webdav') {
+      return this.readWebDAVSyncSnapshot(config as any, snapshot)
+    }
+
+    if (config.type === 'icloud') {
+      return this.readICloudSyncSnapshot(config as any, snapshot)
+    }
+
+    throw new Error('不支持的存储类型')
+  }
+
+  async saveCloudSyncSnapshot(
+    storageId: string,
+    snapshot: CloudSyncSnapshot
+  ): Promise<{ success: boolean; error?: string }> {
+    try {
+      const config = await this.getStorageConfigOrThrow(storageId)
+      const normalizedSnapshot = assertValidCloudSyncSnapshotFile(snapshot)
+
+      if (config.type === 'webdav') {
+        await this.saveWebDAVSyncSnapshot(config as any, normalizedSnapshot)
+        return { success: true }
+      }
+
+      if (config.type === 'icloud') {
+        await this.saveICloudSyncSnapshot(config as any, normalizedSnapshot)
+        return { success: true }
+      }
+
+      return { success: false, error: '不支持的存储类型' }
+    } catch (error) {
+      this.debugLog('保存云同步快照失败:', error)
+      return {
+        success: false,
+        error: error instanceof Error ? error.message : '保存云同步快照失败'
+      }
     }
   }
 
@@ -314,13 +488,20 @@ export class MobileCloudBackupService {
    * iOS/桌面：使用 CapacitorHttp（原生层，支持 PROPFIND）
    */
   private async listWebDAVBackups(config: any): Promise<CloudBackupInfo[]> {
-    const baseUrl = this.normalizeBaseUrl(config.url)
-
     try {
-      const backups = await this.discoverWebDAVBackupsViaPropfind(config, baseUrl)
-      return backups.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      const standardBackups = await this.discoverWebDAVBackupsViaPropfind(
+        config,
+        this.getWebDAVBackupBaseUrl(config),
+        'standard'
+      )
+      const legacyBackups = this.isWebDAVUrlAtBackupDir(config.url)
+        ? []
+        : await this.discoverWebDAVBackupsViaPropfind(config, this.normalizeBaseUrl(config.url), 'legacy')
+
+      return this.dedupeBackups([...standardBackups, ...legacyBackups])
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
     } catch (error) {
-      console.error('列出 WebDAV 备份失败:', error)
+      this.debugLog('列出 WebDAV 备份失败:', error)
       throw error
     }
   }
@@ -330,7 +511,11 @@ export class MobileCloudBackupService {
    * Android：使用自定义原生插件（OkHttp），支持 PROPFIND 且不受 CORS 限制
    * iOS/桌面：使用 CapacitorHttp（原生层，同样不受 CORS 限制，且 iOS 不在 HttpURLConnection 白名单限制下）
    */
-  private async discoverWebDAVBackupsViaPropfind(config: any, baseUrl: string): Promise<CloudBackupInfo[]> {
+  private async discoverWebDAVBackupsViaPropfind(
+    config: any,
+    baseUrl: string,
+    layout: 'standard' | 'legacy'
+  ): Promise<CloudBackupInfo[]> {
     const platform = Capacitor.getPlatform()
 
     let xmlData: string
@@ -344,7 +529,8 @@ export class MobileCloudBackupService {
         url: baseUrl,
         username: config.username,
         password: config.password,
-        depth: 1
+        depth: 1,
+        ...this.getWebDAVRequestTimeoutOptions()
       })
       status = response.status
       xmlData = response.body
@@ -353,6 +539,7 @@ export class MobileCloudBackupService {
       const response = await CapacitorHttp.request({
         url: baseUrl,
         method: 'PROPFIND',
+        ...this.getWebDAVRequestTimeoutOptions(),
         headers: {
           'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`),
           'Depth': '1',
@@ -368,24 +555,22 @@ export class MobileCloudBackupService {
     }
 
     if (status !== 207) {
-      console.warn('WebDAV PROPFIND 失败，状态码:', status)
+      this.debugLog('WebDAV PROPFIND 失败，状态码:', status)
       return []
     }
 
     const files = this.parseWebDAVResponse(xmlData, baseUrl)
-    const backupFiles = files.filter(file =>
-      file.name.endsWith('.json') && file.name.startsWith('backup-') && file.name !== 'backup-manifest.json'
-    )
+    const backupFiles = files.filter(file => isCloudBackupFileName(file.name))
 
     const backups: CloudBackupInfo[] = []
     for (const file of backupFiles) {
       try {
-        const filePath = file.path.startsWith('/') ? file.path : `/${file.path}`
-        const fileUrl = `${baseUrl}${filePath}`
+        const fileUrl = this.joinUrlPath(baseUrl, file.path)
 
         const fileResponse = await CapacitorHttp.request({
           url: fileUrl,
           method: 'GET',
+          ...this.getWebDAVRequestTimeoutOptions(),
           headers: {
             'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
           }
@@ -393,15 +578,20 @@ export class MobileCloudBackupService {
 
         if (fileResponse.status === 200) {
           let backupData
+          let checksum: string | undefined
           let actualSize = 0
 
           if (typeof fileResponse.data === 'string') {
             actualSize = new Blob([fileResponse.data]).size
-            backupData = JSON.parse(fileResponse.data)
+            const parsed = parseBackupPayload(JSON.parse(fileResponse.data))
+            backupData = parsed.payload
+            checksum = parsed.checksum
           } else if (typeof fileResponse.data === 'object') {
             const jsonString = JSON.stringify(fileResponse.data)
             actualSize = new Blob([jsonString]).size
-            backupData = fileResponse.data
+            const parsed = parseBackupPayload(fileResponse.data)
+            backupData = parsed.payload
+            checksum = parsed.checksum
           } else {
             continue
           }
@@ -412,18 +602,285 @@ export class MobileCloudBackupService {
             description: backupData.description,
             createdAt: backupData.createdAt,
             size: actualSize,
-            cloudPath: filePath,
-            storageId: config.id
+            cloudPath: layout === 'standard'
+              ? getCloudBackupFilePath(file.name)
+              : joinCloudPath(file.name),
+            storageId: config.id,
+            checksum
           })
         } else {
-          console.warn('读取备份文件失败，状态码:', fileResponse.status, file.name)
+          this.debugLog('读取备份文件失败，状态码:', fileResponse.status, file.name)
         }
       } catch (error) {
-        console.warn('解析备份文件失败:', file.name, error)
+        this.debugLog('解析备份文件失败:', file.name, error)
       }
     }
 
     return backups
+  }
+
+  private async getWebDAVSyncManifest(config: any): Promise<CloudSyncManifest> {
+    return readCloudSyncManifestWithFallback({
+      readPrimary: () => this.readWebDAVSyncManifestFile(config, getCloudSyncManifestPath()),
+      readBackup: () => this.readWebDAVSyncManifestFile(config, getCloudSyncManifestBackupPath()),
+      isNotFoundError: error => this.isNotFoundError(error),
+      describeError: error => this.formatErrorMessage(error)
+    })
+  }
+
+  private async readWebDAVSyncManifestFile(config: any, cloudPath: string): Promise<CloudSyncManifest> {
+    return (await this.readWebDAVSyncManifestFileWithMeta(config, cloudPath)).manifest
+  }
+
+  private async readWebDAVSyncManifestFileWithMeta(
+    config: any,
+    cloudPath: string
+  ): Promise<{ manifest: CloudSyncManifest; etag?: string }> {
+    const response = await CapacitorHttp.request({
+      url: this.buildWebDAVUrlFromCloudPath(config, cloudPath),
+      method: 'GET',
+      ...this.getWebDAVRequestTimeoutOptions(),
+      headers: {
+        'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
+      }
+    })
+
+    if (response.status === 404) {
+      throw new Error(`云同步 manifest 不存在（HTTP ${response.status}）`)
+    }
+
+    if (response.status !== 200) {
+      throw new Error(`读取云同步 manifest 失败（HTTP ${response.status}）`)
+    }
+
+    const data = typeof response.data === 'string'
+      ? JSON.parse(response.data)
+      : response.data
+    return {
+      manifest: assertValidCloudSyncManifest(data),
+      etag: this.getResponseHeader(response, 'etag')
+    }
+  }
+
+  private async saveWebDAVSyncManifest(
+    config: any,
+    manifest: CloudSyncManifest,
+    options: CloudSyncManifestSaveOptions
+  ): Promise<void> {
+    await this.ensureWebDAVBackupDirectory(config)
+
+    const primaryPath = getCloudSyncManifestPath()
+    const backupPath = getCloudSyncManifestBackupPath()
+
+    if (options.expectedRevision === undefined) {
+      await this.writeWebDAVSyncManifestFile(config, backupPath, manifest)
+      await this.writeWebDAVSyncManifestFile(config, primaryPath, manifest)
+      return
+    }
+
+    const primaryState = await this.tryReadWebDAVSyncManifestFileWithMeta(config, primaryPath)
+    let currentManifest = primaryState?.manifest
+
+    if (!currentManifest) {
+      try {
+        currentManifest = await this.readWebDAVSyncManifestFile(config, backupPath)
+      } catch (error) {
+        if (!this.isNotFoundError(error)) {
+          throw error
+        }
+      }
+    }
+
+    currentManifest = currentManifest || assertValidCloudSyncManifest({})
+    this.assertExpectedCloudSyncRevision(currentManifest, options.expectedRevision)
+
+    await this.writeWebDAVSyncManifestFile(config, primaryPath, manifest, {
+      ifMatch: primaryState?.etag,
+      ifNoneMatch: !primaryState && !currentManifest.latestSnapshot
+    })
+    await this.writeWebDAVSyncManifestFile(config, backupPath, manifest)
+  }
+
+  private async writeWebDAVSyncManifestFile(
+    config: any,
+    cloudPath: string,
+    manifest: CloudSyncManifest,
+    options: { ifMatch?: string; ifNoneMatch?: boolean } = {}
+  ): Promise<void> {
+    const conditionalHeaders: Record<string, string> = {}
+    if (options.ifMatch) {
+      conditionalHeaders['If-Match'] = this.normalizeIfMatchHeaderValue(options.ifMatch)
+    }
+    if (options.ifNoneMatch) {
+      conditionalHeaders['If-None-Match'] = '*'
+    }
+
+    const response = await CapacitorHttp.request({
+      url: this.buildWebDAVUrlFromCloudPath(config, cloudPath),
+      method: 'PUT',
+      ...this.getWebDAVRequestTimeoutOptions(),
+      headers: {
+        'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`),
+        'Content-Type': 'application/json',
+        ...conditionalHeaders
+      },
+      data: JSON.stringify(manifest, null, 2)
+    })
+
+    if (response.status === 412) {
+      throw createCloudSyncManifestRevisionConflictError(undefined, undefined)
+    }
+
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`保存云同步 manifest 失败（HTTP ${response.status}）`)
+    }
+  }
+
+  private normalizeIfMatchHeaderValue(etag: string): string {
+    const value = String(etag || '').trim()
+    if (!value || value === '*' || value.startsWith('"') || value.startsWith('W/"')) {
+      return value
+    }
+
+    return `"${value.replace(/^"+|"+$/g, '')}"`
+  }
+
+  private async listWebDAVSyncSnapshots(config: any): Promise<CloudSyncRemoteSnapshotInfo[]> {
+    const files = await this.listWebDAVFilesViaPropfind(config, getCloudSyncSnapshotsDirectoryPath())
+    return files
+      .filter(file => !file.isDirectory)
+      .map(file => {
+        const revision = getCloudSyncSnapshotRevisionFromFileName(file.name)
+        if (!revision) {
+          return null
+        }
+
+        return {
+          revision,
+          path: getCloudSyncSnapshotPath(revision),
+          modifiedAt: file.modifiedAt,
+          size: file.size
+        }
+      })
+      .filter((info): info is CloudSyncRemoteSnapshotInfo => !!info)
+  }
+
+  private async readWebDAVSyncSnapshot(
+    config: any,
+    snapshot: CloudSyncRemoteSnapshotInfo | string
+  ): Promise<CloudSyncSnapshot> {
+    const snapshotInfo = this.normalizeCloudSyncSnapshotReference(snapshot, revision => getCloudSyncSnapshotPath(revision))
+    const response = await CapacitorHttp.request({
+      url: this.buildWebDAVUrlFromCloudPath(config, snapshotInfo.path),
+      method: 'GET',
+      ...this.getWebDAVRequestTimeoutOptions(),
+      headers: {
+        'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
+      }
+    })
+
+    if (response.status === 404) {
+      throw new Error(`云同步快照不存在（HTTP ${response.status}）`)
+    }
+
+    if (response.status !== 200) {
+      throw new Error(`读取云同步快照失败（HTTP ${response.status}）`)
+    }
+
+    const data = typeof response.data === 'string'
+      ? JSON.parse(response.data)
+      : response.data
+    return assertValidCloudSyncSnapshotFile(data)
+  }
+
+  private async saveWebDAVSyncSnapshot(config: any, snapshot: CloudSyncSnapshot): Promise<void> {
+    await this.ensureWebDAVBackupDirectory(config)
+    await this.ensureWebDAVDirectoryPath(config, getCloudSyncSnapshotsDirectoryPath())
+
+    const normalizedSnapshot = assertValidCloudSyncSnapshotFile(snapshot)
+    const snapshotPath = getCloudSyncSnapshotPath(normalizedSnapshot.revision)
+    const response = await CapacitorHttp.request({
+      url: this.buildWebDAVUrlFromCloudPath(config, snapshotPath),
+      method: 'PUT',
+      ...this.getWebDAVRequestTimeoutOptions(),
+      headers: {
+        'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`),
+        'Content-Type': 'application/json',
+        'If-None-Match': '*'
+      },
+      data: JSON.stringify(createCloudSyncSnapshotFile(normalizedSnapshot), null, 2)
+    })
+
+    if (response.status === 412) {
+      const existingSnapshot = await this.readWebDAVSyncSnapshot(config, {
+        revision: normalizedSnapshot.revision,
+        path: snapshotPath
+      })
+      if (this.isSameCloudSyncSnapshot(existingSnapshot, normalizedSnapshot)) {
+        return
+      }
+      throw new Error(`云同步快照 ${normalizedSnapshot.revision} 已存在但内容不一致`)
+    }
+
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(`保存云同步快照失败（HTTP ${response.status}）`)
+    }
+  }
+
+  private async listWebDAVFilesViaPropfind(config: any, cloudPath: string): Promise<CloudFileInfo[]> {
+    const baseUrl = this.buildWebDAVUrlFromCloudPath(config, cloudPath)
+    const platform = Capacitor.getPlatform()
+    let xmlData: string
+    let status: number
+
+    if (platform === 'android') {
+      const response = await WebDav.propfind({
+        url: baseUrl,
+        username: config.username,
+        password: config.password,
+        depth: 1,
+        ...this.getWebDAVRequestTimeoutOptions()
+      })
+      status = response.status
+      xmlData = response.body
+    } else {
+      const response = await CapacitorHttp.request({
+        url: baseUrl,
+        method: 'PROPFIND',
+        ...this.getWebDAVRequestTimeoutOptions(),
+        headers: {
+          'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`),
+          'Depth': '1',
+          'Content-Type': 'application/xml'
+        }
+      })
+      status = response.status
+      xmlData = response.data
+    }
+
+    if (status === 404) {
+      return []
+    }
+
+    if (status !== 207) {
+      throw new Error(`列出 WebDAV 文件失败（HTTP ${status}）`)
+    }
+
+    return this.parseWebDAVResponse(xmlData, baseUrl)
+  }
+
+  private async tryReadWebDAVSyncManifestFileWithMeta(
+    config: any,
+    cloudPath: string
+  ): Promise<{ manifest: CloudSyncManifest; etag?: string } | null> {
+    try {
+      return await this.readWebDAVSyncManifestFileWithMeta(config, cloudPath)
+    } catch (error) {
+      if (this.isNotFoundError(error)) {
+        return null
+      }
+      throw error
+    }
   }
 
   /**
@@ -436,7 +893,7 @@ export class MobileCloudBackupService {
         throw new Error(icloudCheck.reason)
       }
 
-      const dirPath = config.path || 'AI-Gist-Backup'
+      const dirPath = config.path || CLOUD_BACKUP_DIR
 
       // 检查目录是否存在
       let dirExists = false
@@ -446,9 +903,9 @@ export class MobileCloudBackupService {
           directory: Directory.Documents
         })
         dirExists = true
-        console.log('iCloud 目录已存在:', dirPath)
+        this.debugLog('iCloud 目录已存在:', dirPath)
       } catch (error) {
-        console.log('iCloud 目录不存在，需要创建:', dirPath)
+        this.debugLog('iCloud 目录不存在，需要创建:', dirPath)
       }
 
       // 只在目录不存在时创建
@@ -459,9 +916,9 @@ export class MobileCloudBackupService {
             directory: Directory.Documents,
             recursive: true
           })
-          console.log('iCloud 目录创建成功:', dirPath)
+          this.debugLog('iCloud 目录创建成功:', dirPath)
         } catch (error: any) {
-          console.error('创建 iCloud 目录失败:', error)
+          this.debugLog('创建 iCloud 目录失败:', error)
           // 如果创建失败，可能是权限问题或其他错误
           throw new Error(`无法创建 iCloud 目录: ${error.message || error}`)
         }
@@ -474,9 +931,9 @@ export class MobileCloudBackupService {
           path: dirPath,
           directory: Directory.Documents
         })
-        console.log('读取 iCloud 目录成功，文件数量:', result.files.length)
+        this.debugLog('读取 iCloud 目录成功，文件数量:', result.files.length)
       } catch (error: any) {
-        console.error('读取 iCloud 目录失败:', error)
+        this.debugLog('读取 iCloud 目录失败:', error)
         // 如果目录为空或刚创建，返回空数组
         return []
       }
@@ -484,7 +941,7 @@ export class MobileCloudBackupService {
       const backups: CloudBackupInfo[] = []
 
       for (const file of result.files) {
-        if (file.name && file.name.endsWith('.json') && file.name.startsWith('backup-')) {
+        if (file.name && isCloudBackupFileName(file.name)) {
           try {
             // 读取备份文件
             const fileResult = await Filesystem.readFile({
@@ -493,7 +950,8 @@ export class MobileCloudBackupService {
               encoding: Encoding.UTF8
             })
 
-            const backupData = JSON.parse(fileResult.data as string)
+            const parsedBackup = parseBackupPayload(JSON.parse(fileResult.data as string))
+            const backupData = parsedBackup.payload
             backups.push({
               id: backupData.id,
               name: backupData.name,
@@ -501,22 +959,198 @@ export class MobileCloudBackupService {
               createdAt: backupData.createdAt,
               size: file.size || 0,
               cloudPath: `${dirPath}/${file.name}`,
-              storageId: config.id
+              storageId: config.id,
+              checksum: parsedBackup.checksum
             })
           } catch (error) {
-            console.warn('解析 iCloud 备份文件失败:', file.name, error)
+            this.debugLog('解析 iCloud 备份文件失败:', file.name, error)
           }
         }
       }
 
-      console.log('iCloud 备份列表加载完成，数量:', backups.length)
+      this.debugLog('iCloud 备份列表加载完成，数量:', backups.length)
 
       return backups.sort((a, b) =>
         new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()
       )
     } catch (error) {
-      console.error('列出 iCloud 备份失败:', error)
+      this.debugLog('列出 iCloud 备份失败:', error)
       throw error
+    }
+  }
+
+  private async getICloudSyncManifest(config: any): Promise<CloudSyncManifest> {
+    const icloudCheck = await this.isICloudAvailable()
+    if (!icloudCheck.available) {
+      throw new Error(icloudCheck.reason || 'iCloud 不可用')
+    }
+
+    const dirPath = config.path || CLOUD_BACKUP_DIR
+    await this.ensureICloudDirectory(dirPath)
+
+    return readCloudSyncManifestWithFallback({
+      readPrimary: () => this.readICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_FILE),
+      readBackup: () => this.readICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_BACKUP_FILE),
+      isNotFoundError: error => this.isNotFoundError(error),
+      describeError: error => this.formatErrorMessage(error)
+    })
+  }
+
+  private async readICloudSyncManifestFile(dirPath: string, fileName: string): Promise<CloudSyncManifest> {
+    const result = await Filesystem.readFile({
+      path: `${dirPath}/${fileName}`,
+      directory: Directory.Documents,
+      encoding: Encoding.UTF8
+    })
+
+    return assertValidCloudSyncManifest(JSON.parse(result.data as string))
+  }
+
+  private async saveICloudSyncManifest(
+    config: any,
+    manifest: CloudSyncManifest,
+    options: CloudSyncManifestSaveOptions
+  ): Promise<void> {
+    const icloudCheck = await this.isICloudAvailable()
+    if (!icloudCheck.available) {
+      throw new Error(icloudCheck.reason || 'iCloud 不可用')
+    }
+
+    const dirPath = config.path || CLOUD_BACKUP_DIR
+    await this.ensureICloudDirectory(dirPath)
+
+    if (options.expectedRevision === undefined) {
+      await this.writeICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_BACKUP_FILE, manifest)
+      await this.writeICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_FILE, manifest)
+      return
+    }
+
+    const currentManifest = await readCloudSyncManifestWithFallback({
+      readPrimary: () => this.readICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_FILE),
+      readBackup: () => this.readICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_BACKUP_FILE),
+      isNotFoundError: error => this.isNotFoundError(error),
+      describeError: error => this.formatErrorMessage(error)
+    })
+    this.assertExpectedCloudSyncRevision(currentManifest, options.expectedRevision)
+
+    await this.writeICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_FILE, manifest)
+    await this.writeICloudSyncManifestFile(dirPath, CLOUD_SYNC_MANIFEST_BACKUP_FILE, manifest)
+  }
+
+  private async writeICloudSyncManifestFile(
+    dirPath: string,
+    fileName: string,
+    manifest: CloudSyncManifest
+  ): Promise<void> {
+    await Filesystem.writeFile({
+      path: `${dirPath}/${fileName}`,
+      data: JSON.stringify(manifest, null, 2),
+      directory: Directory.Documents,
+      encoding: Encoding.UTF8
+    })
+  }
+
+  private async listICloudSyncSnapshots(config: any): Promise<CloudSyncRemoteSnapshotInfo[]> {
+    const icloudCheck = await this.isICloudAvailable()
+    if (!icloudCheck.available) {
+      throw new Error(icloudCheck.reason || 'iCloud 不可用')
+    }
+
+    const dirPath = config.path || CLOUD_BACKUP_DIR
+    const snapshotsDir = this.getICloudSyncSnapshotsDirectoryPath(dirPath)
+    try {
+      const result = await Filesystem.readdir({
+        path: snapshotsDir,
+        directory: Directory.Documents
+      })
+
+      return (result.files || [])
+        .map((file: any) => typeof file === 'string' ? file : file.name)
+        .filter((name: unknown): name is string => typeof name === 'string')
+        .map(name => {
+          const revision = getCloudSyncSnapshotRevisionFromFileName(name)
+          if (!revision) {
+            return null
+          }
+
+          return {
+            revision,
+            path: this.getICloudSyncSnapshotPath(dirPath, revision)
+          }
+        })
+        .filter((info): info is CloudSyncRemoteSnapshotInfo => !!info)
+    } catch (error) {
+      if (this.isNotFoundError(error)) {
+        return []
+      }
+      throw error
+    }
+  }
+
+  private async readICloudSyncSnapshot(
+    config: any,
+    snapshot: CloudSyncRemoteSnapshotInfo | string
+  ): Promise<CloudSyncSnapshot> {
+    const dirPath = config.path || CLOUD_BACKUP_DIR
+    const snapshotInfo = this.normalizeCloudSyncSnapshotReference(
+      snapshot,
+      revision => this.getICloudSyncSnapshotPath(dirPath, revision)
+    )
+    const result = await Filesystem.readFile({
+      path: snapshotInfo.path,
+      directory: Directory.Documents,
+      encoding: Encoding.UTF8
+    })
+
+    return assertValidCloudSyncSnapshotFile(JSON.parse(result.data as string))
+  }
+
+  private async saveICloudSyncSnapshot(config: any, snapshot: CloudSyncSnapshot): Promise<void> {
+    const icloudCheck = await this.isICloudAvailable()
+    if (!icloudCheck.available) {
+      throw new Error(icloudCheck.reason || 'iCloud 不可用')
+    }
+
+    const dirPath = config.path || CLOUD_BACKUP_DIR
+    const normalizedSnapshot = assertValidCloudSyncSnapshotFile(snapshot)
+    const snapshotPath = this.getICloudSyncSnapshotPath(dirPath, normalizedSnapshot.revision)
+    await this.ensureICloudDirectory(this.getICloudSyncSnapshotsDirectoryPath(dirPath))
+
+    try {
+      const existingSnapshot = await this.readICloudSyncSnapshot(config, {
+        revision: normalizedSnapshot.revision,
+        path: snapshotPath
+      })
+      if (this.isSameCloudSyncSnapshot(existingSnapshot, normalizedSnapshot)) {
+        return
+      }
+      throw new Error(`云同步快照 ${normalizedSnapshot.revision} 已存在但内容不一致`)
+    } catch (error) {
+      if (!this.isNotFoundError(error)) {
+        throw error
+      }
+    }
+
+    await Filesystem.writeFile({
+      path: snapshotPath,
+      data: JSON.stringify(createCloudSyncSnapshotFile(normalizedSnapshot), null, 2),
+      directory: Directory.Documents,
+      encoding: Encoding.UTF8
+    })
+  }
+
+  private async ensureICloudDirectory(dirPath: string): Promise<void> {
+    try {
+      await Filesystem.stat({
+        path: dirPath,
+        directory: Directory.Documents
+      })
+    } catch {
+      await Filesystem.mkdir({
+        path: dirPath,
+        directory: Directory.Documents,
+        recursive: true
+      })
     }
   }
 
@@ -539,11 +1173,11 @@ export class MobileCloudBackupService {
           baseUrlPath = baseUrlPath.slice(0, -1)
         }
       } catch (e) {
-        console.warn('解析 baseUrl 失败:', baseUrl)
+        this.debugLog('解析 baseUrl 失败:', baseUrl)
       }
 
-      console.log('baseUrl:', baseUrl)
-      console.log('baseUrl 路径前缀:', baseUrlPath)
+      this.debugLog('baseUrl:', baseUrl)
+      this.debugLog('baseUrl 路径前缀:', baseUrlPath)
 
       // 简单的 XML 解析
       const parser = new DOMParser()
@@ -558,37 +1192,35 @@ export class MobileCloudBackupService {
         responses = doc.getElementsByTagName('response')
       }
 
-      console.log('WebDAV 响应数量:', responses.length)
+      this.debugLog('WebDAV 响应数量:', responses.length)
 
-      for (let i = 0; i < responses.length; i++) {
-        const response = responses[i]
-
+      for (const response of Array.from(responses)) {
         // 获取 href
-        let hrefElement = response.getElementsByTagName('d:href')[0] ||
+        const hrefElement = response.getElementsByTagName('d:href')[0] ||
           response.getElementsByTagName('D:href')[0] ||
           response.getElementsByTagName('href')[0]
 
         if (!hrefElement) continue
 
         const href = hrefElement.textContent || ''
-        console.log('处理文件 href:', href)
+        this.debugLog('处理文件 href:', href)
 
         // 获取 propstat
-        let propstat = response.getElementsByTagName('d:propstat')[0] ||
+        const propstat = response.getElementsByTagName('d:propstat')[0] ||
           response.getElementsByTagName('D:propstat')[0] ||
           response.getElementsByTagName('propstat')[0]
 
         if (!propstat) continue
 
         // 获取 prop
-        let prop = propstat.getElementsByTagName('d:prop')[0] ||
+        const prop = propstat.getElementsByTagName('d:prop')[0] ||
           propstat.getElementsByTagName('D:prop')[0] ||
           propstat.getElementsByTagName('prop')[0]
 
         if (!prop) continue
 
         // 检查是否是目录
-        let resourcetype = prop.getElementsByTagName('d:resourcetype')[0] ||
+        const resourcetype = prop.getElementsByTagName('d:resourcetype')[0] ||
           prop.getElementsByTagName('D:resourcetype')[0] ||
           prop.getElementsByTagName('resourcetype')[0]
 
@@ -609,7 +1241,7 @@ export class MobileCloudBackupService {
             const hrefUrl = new URL(href)
             normalizedPath = hrefUrl.pathname
           } catch (e) {
-            console.warn('解析 href URL 失败:', href)
+            this.debugLog('解析 href URL 失败:', href)
           }
         }
 
@@ -621,13 +1253,13 @@ export class MobileCloudBackupService {
         // URL 解码
         normalizedPath = decodeURIComponent(normalizedPath)
 
-        console.log('解码后的路径:', normalizedPath)
-        console.log('baseUrlPath:', baseUrlPath)
+        this.debugLog('解码后的路径:', normalizedPath)
+        this.debugLog('baseUrlPath:', baseUrlPath)
 
         // 移除 baseUrl 的路径前缀，得到相对路径
         if (baseUrlPath && normalizedPath.startsWith(baseUrlPath)) {
           normalizedPath = normalizedPath.substring(baseUrlPath.length)
-          console.log('移除前缀后的路径:', normalizedPath)
+          this.debugLog('移除前缀后的路径:', normalizedPath)
           // 确保以 / 开头
           if (!normalizedPath.startsWith('/')) {
             normalizedPath = '/' + normalizedPath
@@ -638,7 +1270,7 @@ export class MobileCloudBackupService {
         const name = normalizedPath.split('/').filter(Boolean).pop() || ''
 
         // 获取文件大小
-        let contentlength = prop.getElementsByTagName('d:getcontentlength')[0] ||
+        const contentlength = prop.getElementsByTagName('d:getcontentlength')[0] ||
           prop.getElementsByTagName('D:getcontentlength')[0] ||
           prop.getElementsByTagName('getcontentlength')[0] ||
           prop.getElementsByTagName('lp1:getcontentlength')[0] ||
@@ -647,18 +1279,18 @@ export class MobileCloudBackupService {
         let size = 0
         if (contentlength && contentlength.textContent) {
           size = parseInt(contentlength.textContent, 10)
-          console.log('从 XML 解析文件大小:', name, size)
+          this.debugLog('从 XML 解析文件大小:', name, size)
         }
 
         // 获取修改时间
-        let lastmodified = prop.getElementsByTagName('d:getlastmodified')[0] ||
+        const lastmodified = prop.getElementsByTagName('d:getlastmodified')[0] ||
           prop.getElementsByTagName('D:getlastmodified')[0] ||
           prop.getElementsByTagName('getlastmodified')[0]
         const modifiedAt = lastmodified ? (lastmodified.textContent || '') : new Date().toISOString()
 
         // 跳过目录本身和空文件名
         if (name && !isDirectory && normalizedPath !== '/' && normalizedPath !== '') {
-          console.log('添加文件:', name, 'path:', normalizedPath, 'size:', size)
+          this.debugLog('添加文件:', name, 'path:', normalizedPath, 'size:', size)
           files.push({
             name,
             path: normalizedPath, // 使用标准化的相对路径
@@ -669,9 +1301,9 @@ export class MobileCloudBackupService {
         }
       }
 
-      console.log('解析到的文件数量:', files.length)
+      this.debugLog('解析到的文件数量:', files.length)
     } catch (error) {
-      console.error('解析 WebDAV 响应失败:', error)
+      this.debugLog('解析 WebDAV 响应失败:', error)
     }
 
     return files
@@ -702,13 +1334,13 @@ export class MobileCloudBackupService {
       // 使用与桌面端一致的命名格式：backup-YYYY-MM-DD-xxxxxxxx
       const backupName = `backup-${timestamp.split('T')[0]}-${backupId.substring(0, 8)}`
 
-      const backupData = {
+      const backupData = createBackupPayload({
         id: backupId,
         name: backupName,
         description: description || '移动端云端备份',
         createdAt: timestamp,
         data
-      }
+      })
 
       const jsonString = JSON.stringify(backupData, null, 2)
       // 文件名使用完整的 backup-{id}.json 格式
@@ -726,7 +1358,7 @@ export class MobileCloudBackupService {
         error: '不支持的存储类型'
       }
     } catch (error) {
-      console.error('创建云端备份失败:', error)
+      this.debugLog('创建云端备份失败:', error)
       return {
         success: false,
         message: '创建云端备份失败',
@@ -745,15 +1377,17 @@ export class MobileCloudBackupService {
     backupData: any
   ): Promise<CloudBackupResult> {
     try {
-      console.log('创建 WebDAV 备份，文件名:', fileName)
+      this.debugLog('创建 WebDAV 备份，文件名:', fileName)
 
-      // 上传备份文件到配置的 URL（不添加子目录）
-      const baseUrl = this.normalizeBaseUrl(config.url)
-      const fileUrl = `${baseUrl}/${fileName}`
-      console.log('上传到 URL:', fileUrl)
+      await this.ensureWebDAVBackupDirectory(config)
+
+      const cloudPath = getCloudBackupFilePath(fileName)
+      const fileUrl = this.buildWebDAVUrlFromCloudPath(config, cloudPath)
+      this.debugLog('上传到 URL:', fileUrl)
       const response = await CapacitorHttp.request({
         url: fileUrl,
         method: 'PUT',
+        ...this.getWebDAVRequestTimeoutOptions(),
         headers: {
           'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`),
           'Content-Type': 'application/json'
@@ -761,7 +1395,7 @@ export class MobileCloudBackupService {
         data: jsonString
       })
 
-      console.log('上传响应状态:', response.status)
+      this.debugLog('上传响应状态:', response.status)
       if (response.status >= 200 && response.status < 300) {
         const backupInfo: CloudBackupInfo = {
           id: backupData.id,
@@ -769,11 +1403,12 @@ export class MobileCloudBackupService {
           description: backupData.description,
           createdAt: backupData.createdAt,
           size: new Blob([jsonString]).size,
-          cloudPath: `/${fileName}`, // 相对路径
-          storageId: config.id
+          cloudPath,
+          storageId: config.id,
+          checksum: backupData.checksum
         }
 
-        console.log('备份创建成功:', backupInfo)
+        this.debugLog('备份创建成功:', backupInfo)
 
         return {
           success: true,
@@ -793,7 +1428,7 @@ export class MobileCloudBackupService {
         error: uploadErrMsg
       }
     } catch (error) {
-      console.error('创建 WebDAV 备份失败:', error)
+      this.debugLog('创建 WebDAV 备份失败:', error)
       throw error
     }
   }
@@ -817,7 +1452,7 @@ export class MobileCloudBackupService {
         }
       }
 
-      const dirPath = config.path || 'AI-Gist-Backup'
+      const dirPath = config.path || CLOUD_BACKUP_DIR
 
       // 检查目录是否存在
       let dirExists = false
@@ -827,9 +1462,9 @@ export class MobileCloudBackupService {
           directory: Directory.Documents
         })
         dirExists = true
-        console.log('iCloud 目录已存在:', dirPath)
+        this.debugLog('iCloud 目录已存在:', dirPath)
       } catch (error) {
-        console.log('iCloud 目录不存在，需要创建:', dirPath)
+        this.debugLog('iCloud 目录不存在，需要创建:', dirPath)
       }
 
       // 只在目录不存在时创建
@@ -840,9 +1475,9 @@ export class MobileCloudBackupService {
             directory: Directory.Documents,
             recursive: true
           })
-          console.log('iCloud 目录创建成功:', dirPath)
+          this.debugLog('iCloud 目录创建成功:', dirPath)
         } catch (error: any) {
-          console.error('创建 iCloud 目录失败:', error)
+          this.debugLog('创建 iCloud 目录失败:', error)
           return {
             success: false,
             message: '无法创建 iCloud 目录',
@@ -866,7 +1501,8 @@ export class MobileCloudBackupService {
         createdAt: backupData.createdAt,
         size: new Blob([jsonString]).size,
         cloudPath: `${dirPath}/${fileName}`,
-        storageId: config.id
+        storageId: config.id,
+        checksum: backupData.checksum
       }
 
       return {
@@ -875,7 +1511,7 @@ export class MobileCloudBackupService {
         backupInfo
       }
     } catch (error) {
-      console.error('创建 iCloud 备份失败:', error)
+      this.debugLog('创建 iCloud 备份失败:', error)
       return {
         success: false,
         message: '创建 iCloud 备份失败',
@@ -912,7 +1548,7 @@ export class MobileCloudBackupService {
         error: '不支持的存储类型'
       }
     } catch (error) {
-      console.error('恢复云端备份失败:', error)
+      this.debugLog('恢复云端备份失败:', error)
       return {
         success: false,
         message: '恢复云端备份失败',
@@ -939,14 +1575,12 @@ export class MobileCloudBackupService {
       }
 
       // 下载备份文件
-      // backup.cloudPath 是标准化的路径，如 /backup-xxx.json
-      const baseUrl = this.normalizeBaseUrl(config.url)
-      const filePath = backup.cloudPath.startsWith('/') ? backup.cloudPath : `/${backup.cloudPath}`
-      const fileUrl = `${baseUrl}${filePath}`
+      const fileUrl = this.buildWebDAVUrlFromCloudPath(config, backup.cloudPath)
 
       const response = await CapacitorHttp.request({
         url: fileUrl,
         method: 'GET',
+        ...this.getWebDAVRequestTimeoutOptions(),
         headers: {
           'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
         }
@@ -968,9 +1602,9 @@ export class MobileCloudBackupService {
       // CapacitorHttp 可能返回字符串或对象
       let backupData
       if (typeof response.data === 'string') {
-        backupData = JSON.parse(response.data)
+        backupData = parseBackupPayload(JSON.parse(response.data)).payload
       } else if (typeof response.data === 'object') {
-        backupData = response.data
+        backupData = parseBackupPayload(response.data).payload
       } else {
         return {
           success: false,
@@ -986,7 +1620,7 @@ export class MobileCloudBackupService {
         data: backupData.data
       }
     } catch (error) {
-      console.error('恢复 WebDAV 备份失败:', error)
+      this.debugLog('恢复 WebDAV 备份失败:', error)
       throw error
     }
   }
@@ -1024,7 +1658,7 @@ export class MobileCloudBackupService {
         encoding: Encoding.UTF8
       })
 
-      const backupData = JSON.parse(result.data as string)
+      const backupData = parseBackupPayload(JSON.parse(result.data as string)).payload
 
       return {
         success: true,
@@ -1033,7 +1667,7 @@ export class MobileCloudBackupService {
         data: backupData.data
       }
     } catch (error) {
-      console.error('恢复 iCloud 备份失败:', error)
+      this.debugLog('恢复 iCloud 备份失败:', error)
       throw error
     }
   }
@@ -1062,7 +1696,7 @@ export class MobileCloudBackupService {
 
       return { success: false, error: '不支持的存储类型' }
     } catch (error) {
-      console.error('删除云端备份失败:', error)
+      this.debugLog('删除云端备份失败:', error)
       return {
         success: false,
         error: error instanceof Error ? error.message : '删除失败'
@@ -1088,14 +1722,12 @@ export class MobileCloudBackupService {
       }
 
       // 删除文件
-      // backup.cloudPath 是标准化的路径，如 /backup-xxx.json
-      const baseUrl = this.normalizeBaseUrl(config.url)
-      const filePath = backup.cloudPath.startsWith('/') ? backup.cloudPath : `/${backup.cloudPath}`
-      const fileUrl = `${baseUrl}${filePath}`
+      const fileUrl = this.buildWebDAVUrlFromCloudPath(config, backup.cloudPath)
 
       const response = await CapacitorHttp.request({
         url: fileUrl,
         method: 'DELETE',
+        ...this.getWebDAVRequestTimeoutOptions(),
         headers: {
           'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
         }
@@ -1118,7 +1750,7 @@ export class MobileCloudBackupService {
         error: deleteErrMsg
       }
     } catch (error) {
-      console.error('删除 WebDAV 备份失败:', error)
+      this.debugLog('删除 WebDAV 备份失败:', error)
       throw error
     }
   }
@@ -1159,7 +1791,7 @@ export class MobileCloudBackupService {
         message: '云端备份删除成功'
       }
     } catch (error) {
-      console.error('删除 iCloud 备份失败:', error)
+      this.debugLog('删除 iCloud 备份失败:', error)
       throw error
     }
   }
@@ -1169,6 +1801,226 @@ export class MobileCloudBackupService {
    */
   private normalizeBaseUrl(url: string): string {
     return url.replace(/\/+$/, '')
+  }
+
+  private getWebDAVBackupBaseUrl(config: any): string {
+    const baseUrl = this.normalizeBaseUrl(config.url)
+    return this.isWebDAVUrlAtBackupDir(baseUrl)
+      ? baseUrl
+      : this.joinUrlPath(baseUrl, CLOUD_BACKUP_DIR)
+  }
+
+  private isWebDAVUrlAtBackupDir(url: string): boolean {
+    try {
+      const parsed = new URL(this.normalizeBaseUrl(url))
+      const lastSegment = parsed.pathname.split('/').filter(Boolean).pop()
+      return lastSegment === CLOUD_BACKUP_DIR
+    } catch {
+      return false
+    }
+  }
+
+  private buildWebDAVUrlFromCloudPath(config: any, cloudPath: string): string {
+    const normalizedPath = normalizeCloudPath(cloudPath)
+    const backupDirPath = getCloudBackupDirectoryPath()
+
+    if (this.isWebDAVUrlAtBackupDir(config.url) && normalizedPath.startsWith(`${backupDirPath}/`)) {
+      return this.joinUrlPath(this.normalizeBaseUrl(config.url), normalizedPath.slice(backupDirPath.length))
+    }
+
+    return this.joinUrlPath(this.normalizeBaseUrl(config.url), normalizedPath)
+  }
+
+  private getICloudSyncSnapshotsDirectoryPath(dirPath: string): string {
+    return joinCloudPath(dirPath, getCloudSyncSnapshotsDirectoryRelativePath()).replace(/^\/+/, '')
+  }
+
+  private getICloudSyncSnapshotPath(dirPath: string, revision: string): string {
+    return joinCloudPath(
+      dirPath,
+      getCloudSyncSnapshotsDirectoryRelativePath(),
+      getCloudSyncSnapshotFileName(revision)
+    ).replace(/^\/+/, '')
+  }
+
+  private joinUrlPath(baseUrl: string, ...parts: string[]): string {
+    const suffix = parts
+      .flatMap(part => part.split('/'))
+      .filter(Boolean)
+      .map(part => encodeURIComponent(decodeURIComponent(part)))
+      .join('/')
+
+    return suffix ? `${this.normalizeBaseUrl(baseUrl)}/${suffix}` : this.normalizeBaseUrl(baseUrl)
+  }
+
+  private async ensureWebDAVBackupDirectory(config: any): Promise<void> {
+    const response = await this.sendWebDAVRequest(config, this.getWebDAVBackupBaseUrl(config), 'MKCOL')
+    if ([200, 201, 204, 405, 409].includes(response.status)) {
+      return
+    }
+    if (response.status === 401 || response.status === 403) {
+      throw new Error('认证失败，请检查用户名和密码')
+    }
+    throw new Error(`创建 WebDAV 备份目录失败（HTTP ${response.status}）`)
+  }
+
+  private async ensureWebDAVDirectoryPath(config: any, cloudPath: string): Promise<void> {
+    const parts = normalizeCloudPath(cloudPath).split('/').filter(Boolean)
+    let currentPath = ''
+
+    for (const part of parts) {
+      currentPath = joinCloudPath(currentPath, part)
+      const response = await this.sendWebDAVRequest(
+        config,
+        this.buildWebDAVUrlFromCloudPath(config, currentPath),
+        'MKCOL'
+      )
+      if ([200, 201, 204, 405, 409].includes(response.status)) {
+        continue
+      }
+      if (response.status === 401 || response.status === 403) {
+        throw new Error('认证失败，请检查用户名和密码')
+      }
+      throw new Error(`创建 WebDAV 目录失败（HTTP ${response.status}）`)
+    }
+  }
+
+  private async sendWebDAVRequest(
+    config: any,
+    url: string,
+    method: string,
+    data?: string,
+    contentType = 'application/json'
+  ): Promise<{ status: number; data?: any }> {
+    if (Capacitor.getPlatform() === 'android' && method === 'MKCOL') {
+      const response = await WebDav.request({
+        url,
+        method,
+        username: config.username,
+        password: config.password,
+        body: data,
+        contentType,
+        ...this.getWebDAVRequestTimeoutOptions()
+      })
+      return { status: response.status, data: response.body }
+    }
+
+    return CapacitorHttp.request({
+      url,
+      method,
+      ...this.getWebDAVRequestTimeoutOptions(),
+      headers: {
+        'Authorization': 'Basic ' + btoa(`${config.username}:${config.password}`)
+      },
+      data
+    })
+  }
+
+  private getWebDAVRequestTimeoutOptions(): { connectTimeout: number; readTimeout: number } {
+    return {
+      connectTimeout: WEBDAV_REQUEST_TIMEOUT_MS,
+      readTimeout: WEBDAV_REQUEST_TIMEOUT_MS
+    }
+  }
+
+  private debugLog(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return
+    }
+    console.debug(...args)
+  }
+
+  private isDebugLoggingEnabled(): boolean {
+    try {
+      return typeof localStorage !== 'undefined' &&
+        localStorage.getItem(CLOUD_BACKUP_DEBUG_STORAGE_KEY) === 'true'
+    } catch {
+      return false
+    }
+  }
+
+  private dedupeBackups(backups: CloudBackupInfo[]): CloudBackupInfo[] {
+    const seen = new Set<string>()
+    return backups.filter(backup => {
+      const key = backup.id || backup.cloudPath || backup.name
+      if (seen.has(key)) return false
+      seen.add(key)
+      return true
+    })
+  }
+
+  private isNotFoundError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error)
+    return /404|not\s*found|no such file|does not exist|不存在|未找到/i.test(message)
+  }
+
+  private formatErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error)
+  }
+
+  private assertExpectedCloudSyncRevision(
+    manifest: CloudSyncManifest,
+    expectedRevision: string | null | undefined
+  ): void {
+    if (doesCloudSyncManifestMatchExpectedRevision(manifest, expectedRevision)) {
+      return
+    }
+
+    throw createCloudSyncManifestRevisionConflictError(
+      expectedRevision,
+      getCloudSyncManifestRevision(manifest)
+    )
+  }
+
+  private normalizeCloudSyncSnapshotReference(
+    snapshot: CloudSyncRemoteSnapshotInfo | string,
+    pathForRevision: (revision: string) => string
+  ): CloudSyncRemoteSnapshotInfo {
+    if (typeof snapshot === 'string') {
+      return {
+        revision: snapshot,
+        path: pathForRevision(snapshot)
+      }
+    }
+
+    return {
+      ...snapshot,
+      path: snapshot.path || pathForRevision(snapshot.revision)
+    }
+  }
+
+  private isSameCloudSyncSnapshot(left: CloudSyncSnapshot, right: CloudSyncSnapshot): boolean {
+    return left.revision === right.revision &&
+      left.dataChecksum === right.dataChecksum &&
+      JSON.stringify(left.data) === JSON.stringify(right.data)
+  }
+
+  private isCloudSyncRevisionConflictError(error: unknown): boolean {
+    return /manifest 已被其他设备更新|Precondition|412|If-Match|If-None-Match|已被其他设备更新/i
+      .test(this.formatErrorMessage(error))
+  }
+
+  private async tryReadCloudSyncManifestRevision(storageId: string): Promise<string | null> {
+    try {
+      return getCloudSyncManifestRevision(await this.getCloudSyncManifest(storageId))
+    } catch {
+      return null
+    }
+  }
+
+  private getResponseHeader(response: any, headerName: string): string | undefined {
+    const headers = response?.headers
+    if (!headers || typeof headers !== 'object') {
+      return undefined
+    }
+
+    const target = headerName.toLowerCase()
+    for (const [key, value] of Object.entries(headers)) {
+      if (key.toLowerCase() === target && typeof value === 'string') {
+        return value
+      }
+    }
+    return undefined
   }
 
   /**

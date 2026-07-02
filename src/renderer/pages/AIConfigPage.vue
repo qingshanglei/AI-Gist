@@ -275,7 +275,7 @@
                                                     :title="formTestResult.success ? t('aiConfig.testSuccess') : t('aiConfig.testFailed')">
                                                     {{
                                                         formTestResult.success
-                                                            ? t('aiConfig.foundModels', { count: formTestResult.models?.length || 0 })
+                                                            ? getModelListDisplayMessage(formTestResult)
                                                             : formTestResult.error
                                                     }}
                                                 </n-alert>
@@ -588,6 +588,7 @@ import { useWindowSize } from "~/composables/useWindowSize";
 import CommonModal from "~/components/common/CommonModal.vue";
 import QuickOptimizationConfigModal from "~/components/ai/QuickOptimizationConfigModal.vue";
 import { getDefaultBaseURL, getProviderMetadata } from "@shared/ai-provider-metadata";
+import { openExternalUrl } from "~/lib/platform/shell";
 
 const { t } = useI18n();
 const message = useMessage();
@@ -609,6 +610,8 @@ const formTestResult = ref<{
     success: boolean;
     models?: string[];
     error?: string;
+    modelSource?: 'remote' | 'default' | 'unavailable';
+    modelListMessage?: string;
 } | null>(null);
 
 // 模型测试相关状态
@@ -739,7 +742,7 @@ const getBaseURLInfo = computed(() => {
         case 'tencent':
             return {
                 label: t('aiConfig.tencentAPIAddress'),
-                placeholder: t('aiConfig.tencentExample')
+                placeholder: getDefaultBaseURL('tencent')
             };
         case 'aliyun':
             return {
@@ -933,6 +936,35 @@ const canTestConnection = computed(() => {
     return true;
 });
 
+const getModelListDisplayMessage = (result: {
+    success: boolean;
+    models?: string[];
+    error?: string;
+    modelSource?: 'remote' | 'default' | 'unavailable';
+    modelListMessage?: string;
+}) => {
+    if (!result.success) {
+        return result.error || '';
+    }
+
+    const modelCount = result.models?.length || 0;
+    if (result.modelSource === 'remote' && modelCount > 0) {
+        return t('aiConfig.foundModels', { count: modelCount });
+    }
+    if (result.modelSource === 'default' && modelCount > 0) {
+        return t('aiConfig.usingDefaultModels', { count: modelCount });
+    }
+    if (result.modelSource === 'unavailable') {
+        return result.modelListMessage || t('aiConfig.connectionSuccessNoModels');
+    }
+
+    return result.modelListMessage || (
+        modelCount > 0
+            ? t('aiConfig.foundModels', { count: modelCount })
+            : t('aiConfig.connectionSuccessNoModels')
+    );
+};
+
 // 加载配置列表
 const loadConfigs = async () => {
     const result = await safeDbOperation(
@@ -1100,7 +1132,13 @@ const testConfig = async (config: AIConfig) => {
         if (result.success) {
             message.success(t('aiConfig.connectionTestSuccess'));
             if (result.models && result.models.length > 0) {
-                message.info(t('aiConfig.modelsFound', { count: result.models.length }));
+                if (result.modelSource === 'default') {
+                    message.warning(getModelListDisplayMessage(result));
+                } else {
+                    message.info(getModelListDisplayMessage(result));
+                }
+            } else if (result.modelSource === 'unavailable') {
+                message.warning(getModelListDisplayMessage(result));
             }
         } else {
             message.error(t('aiConfig.connectionTestFailed') + result.error);
@@ -1149,9 +1187,13 @@ const testFormConnection = async () => {
                     formData.defaultModel = result.models[0];
                 }
 
-                message.info(t('aiConfig.modelsAutoFilled', { count: result.models.length }));
+                if (result.modelSource === 'default') {
+                    message.warning(getModelListDisplayMessage(result));
+                } else {
+                    message.info(t('aiConfig.modelsAutoFilled', { count: result.models.length }));
+                }
             } else {
-                message.warning(t('aiConfig.connectionSuccessNoModels'));
+                message.warning(getModelListDisplayMessage(result));
             }
         } else {
             message.error(t('aiConfig.connectionTestFailed') + result.error);
@@ -1434,7 +1476,7 @@ const handleQuickOptimizationConfigsUpdated = () => {
 const openApiKeyUrl = () => {
     const info = getApiKeyInfo.value;
     if (info.apiKeyUrl) {
-        window.electronAPI.shell.openExternal(info.apiKeyUrl);
+        openExternalUrl(info.apiKeyUrl);
     }
 };
 
@@ -1442,7 +1484,7 @@ const openApiKeyUrl = () => {
 const openDocumentationUrl = () => {
     const info = getApiKeyInfo.value;
     if (info.docUrl) {
-        window.electronAPI.shell.openExternal(info.docUrl);
+        openExternalUrl(info.docUrl);
     }
 };
 

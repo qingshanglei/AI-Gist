@@ -75,36 +75,36 @@
 
                         <!-- 数据管理设置 -->
                         <DataManagementSettings 
-                            v-show="activeSettingKey === 'data-management'" />
+                            v-if="activeSettingKey === 'data-management'" />
                             
                         <!-- 云端备份设置 -->
-                        <CloudBackupSettings v-show="activeSettingKey === 'cloud-backup'" />
+                        <CloudBackupSettings v-if="capabilities.cloudBackup && activeSettingKey === 'cloud-backup'" />
                             
                         <!-- 外观设置 -->
-                        <AppearanceSettings v-show="activeSettingKey === 'appearance'"
+                        <AppearanceSettings v-if="activeSettingKey === 'appearance'"
                             :model-value="{ themeSource: settings.themeSource }"
                             @update:model-value="(val) => { settings.themeSource = val.themeSource; updateSetting(); }" />
 
                         <!-- 语言设置 -->
-                        <LanguageSettings v-show="activeSettingKey === 'language'" />
+                        <LanguageSettings v-if="activeSettingKey === 'language'" />
 
                         <!-- 关闭行为设置 -->
-                        <CloseBehaviorSettings v-show="activeSettingKey === 'close-behavior'"
+                        <CloseBehaviorSettings v-if="capabilities.tray && activeSettingKey === 'close-behavior'"
                             :model-value="{ closeBehaviorMode: settings.closeBehaviorMode, closeAction: settings.closeAction }"
                             @update:model-value="(val) => { settings.closeBehaviorMode = val.closeBehaviorMode; settings.closeAction = val.closeAction; updateSetting(); }" />
 
                         <!-- 启动行为设置 -->
-                        <StartupBehaviorSettings v-show="activeSettingKey === 'startup-behavior'"
+                        <StartupBehaviorSettings v-if="capabilities.startup && activeSettingKey === 'startup-behavior'"
                             :model-value="{ startMinimized: settings.startMinimized, autoLaunch: settings.autoLaunch }"
                             @update:model-value="(val) => { settings.startMinimized = val.startMinimized; settings.autoLaunch = val.autoLaunch; updateSetting(); }" />
 
                         <!-- 快捷键设置 -->
-                        <ShortcutSettings v-show="activeSettingKey === 'shortcuts'"
+                        <ShortcutSettings v-if="capabilities.globalShortcuts && activeSettingKey === 'shortcuts'"
                             :model-value="settings.shortcuts"
                             @update:model-value="(val: any) => { settings.shortcuts = val; updateSetting(); }" />
 
                         <!-- 网络代理设置 -->
-                        <NetworkProxySettings v-show="activeSettingKey === 'network-proxy'"
+                        <NetworkProxySettings v-if="capabilities.systemProxy && activeSettingKey === 'network-proxy'"
                             :model-value="settings.networkProxy"
                             @update:model-value="(val) => { 
                                 console.log('SettingsPage: networkProxy updated:', val); 
@@ -113,10 +113,10 @@
                             }" />
 
                         <!-- 关于 -->
-                        <AboutSettings v-show="activeSettingKey === 'about'" />
+                        <AboutSettings v-if="activeSettingKey === 'about'" />
 
                         <!-- 实验室 (仅开发环境) -->
-                        <NCard v-show="activeSettingKey === 'laboratory' && isDevelopment">
+                        <NCard v-if="activeSettingKey === 'laboratory' && isDevelopment">
                             <LaboratoryPanel />
                         </NCard>
 
@@ -165,6 +165,9 @@ import AboutSettings from "@/components/settings/AboutSettings.vue";
 import ShortcutSettings from "@/components/settings/ShortcutSettings.vue";
 import NetworkProxySettings from "@/components/settings/NetworkProxySettings.vue";
 import LanguageSettings from "@/components/settings/LanguageSettings.vue";
+import { PlatformDetector } from "@shared/platform";
+import { preferencesClient } from "@/lib/platform/preferences";
+import { useTheme } from "~/composables/useTheme";
 
 
 // Props 定义
@@ -179,6 +182,8 @@ const props = withDefaults(defineProps<Props>(), {
 // 消息提示
 const message = useMessage();
 const { t, initLocale } = useI18n()
+const { setThemeSource } = useTheme()
+const capabilities = PlatformDetector.getCapabilities()
 
 // 检测是否为开发环境
 const isDevelopment = import.meta.env.DEV;
@@ -250,46 +255,55 @@ const menuOptions = computed(() => {
             label: t('settings.sections.dataManagement'),
             key: "data-management",
             icon: () => h(NIcon, { size: 16 }, { default: () => h(Database) }),
+            visible: true,
         },
         {
             label: t('settings.sections.cloudBackup'),
             key: "cloud-backup",
             icon: () => h(NIcon, { size: 16 }, { default: () => h(Cloud) }),
+            visible: capabilities.cloudBackup,
         },
         {
             label: t('settings.sections.appearance'),
             key: "appearance",
             icon: () => h(NIcon, { size: 16 }, { default: () => h(Sun) }),
+            visible: true,
         },
         {
             label: t('settings.sections.shortcuts'),
             key: "shortcuts",
             icon: () => h(NIcon, { size: 16 }, { default: () => h(Keyboard) }),
+            visible: capabilities.globalShortcuts,
         },
         {
             label: t('settings.sections.startup'),
             key: "startup-behavior",
             icon: () => h(NIcon, { size: 16 }, { default: () => h(Rocket) }),
+            visible: capabilities.startup,
         },
         {
             label: t('settings.sections.close'),
             key: "close-behavior",
             icon: () => h(NIcon, { size: 16 }, { default: () => h(Power) }),
+            visible: capabilities.tray,
         },
         {
             label: t('settings.sections.networkProxy'),
             key: "network-proxy",
             icon: () => h(NIcon, { size: 16 }, { default: () => h(Wifi) }),
+            visible: capabilities.systemProxy,
         },
         {
             label: t('language.title'),
             key: "language",
             icon: () => h(NIcon, { size: 16 }, { default: () => h(Globe) }),
+            visible: true,
         },
         {
             label: t('settings.sections.about'),
             key: "about",
             icon: () => h(NIcon, { size: 16 }, { default: () => h(InfoCircle) }),
+            visible: true,
         },
     ];
 
@@ -299,11 +313,22 @@ const menuOptions = computed(() => {
             label: t('settings.sections.laboratory'),
             key: "laboratory",
             icon: () => h(NIcon, { size: 16 }, { default: () => h(Flask) }),
+            visible: true,
         });
     }
 
-    return baseOptions;
+    return baseOptions
+        .filter(option => option.visible)
+        .map(({ visible, ...option }) => option);
 });
+
+const visibleSettingKeys = computed(() => menuOptions.value.map(option => String(option.key)));
+
+const ensureActiveSettingIsVisible = () => {
+    if (!visibleSettingKeys.value.includes(activeSettingKey.value)) {
+        activeSettingKey.value = visibleSettingKeys.value[0] || 'data-management';
+    }
+};
 
         // 当前设置区域信息
 const currentSectionInfo = computed(() => {
@@ -330,7 +355,9 @@ const currentSectionInfo = computed(() => {
 const currentSectionTitle = computed(() => currentSectionInfo.value.title);
 const currentSectionIcon = computed(() => currentSectionInfo.value.icon);
 const currentSectionDescription = computed(
-    () => currentSectionInfo.value.description
+    () => activeSettingKey.value === 'cloud-backup' && !capabilities.icloud
+        ? t('cloudBackup.webdavOnlySectionDescription')
+        : currentSectionInfo.value.description
 );
 
 // 处理菜单选择
@@ -342,7 +369,7 @@ const handleMenuSelect = (key: string) => {
 const loadSettings = async () => {
     try {
         console.log(t('settingsMessages.loadSettings'));
-        const prefs = await window.electronAPI.preferences.get();
+        const prefs = await preferencesClient.get();
         console.log(t('settingsMessages.originalConfig'), prefs);
 
         // 确保数据同步配置结构完整  
@@ -407,12 +434,12 @@ const updateSetting = async () => {
         );
 
         console.log('SettingsPage: saving settings data:', settingsData);
-        const updatedPrefs = await window.electronAPI.preferences.set(settingsData);
+        const updatedPrefs = await preferencesClient.set(settingsData);
         console.log(t('settingsMessages.settingsUpdated'), updatedPrefs);
 
         // 如果更改了主题设置，也要更新主题管理器
         if (settings.themeSource) {
-            await window.electronAPI.theme.setSource(settings.themeSource);
+            await setThemeSource(settings.themeSource);
         }
 
         setTimeout(() => {
@@ -464,12 +491,12 @@ const updateSettingsSmart = async (fieldsToUpdate: string[] | null = null) => {
             return;
         }
 
-        const updatedPrefs = await window.electronAPI.preferences.set(settingsData);
+        const updatedPrefs = await preferencesClient.set(settingsData);
         console.log(t('settingsMessages.settingsUpdated'), updatedPrefs);
 
         // 如果更改了主题设置，也要更新主题管理器
         if (settingsData.themeSource) {
-            await window.electronAPI.theme.setSource(settingsData.themeSource);
+            await setThemeSource(settingsData.themeSource);
         }
 
         setTimeout(() => {
@@ -486,11 +513,11 @@ const updateSettingsSmart = async (fieldsToUpdate: string[] | null = null) => {
 const resetSettings = async () => {
     loading.reset = true;
     try {
-        const defaultPrefs = await window.electronAPI.preferences.reset();
+        const defaultPrefs = await preferencesClient.reset();
         Object.assign(settings, defaultPrefs);
 
         // 重置主题
-        await window.electronAPI.theme.setSource(settings.themeSource);
+        await setThemeSource(settings.themeSource);
 
         message.success(t('settingsMessages.settingsReset'));
         console.log(t('settingsMessages.settingsResetLog'), defaultPrefs);
@@ -506,6 +533,7 @@ const resetSettings = async () => {
 // 组件挂载时加载设置
 onMounted(async () => {
     initLocale(); // 初始化语言设置
+    ensureActiveSettingIsVisible();
     await loadSettings();
 });
 
@@ -513,7 +541,12 @@ onMounted(async () => {
 watch(() => props.targetSection, (newTargetSection) => {
     if (newTargetSection && newTargetSection !== activeSettingKey.value) {
         activeSettingKey.value = newTargetSection;
+        ensureActiveSettingIsVisible();
     }
+}, { immediate: true });
+
+watch(menuOptions, () => {
+    ensureActiveSettingIsVisible();
 }, { immediate: true });
 </script>
 

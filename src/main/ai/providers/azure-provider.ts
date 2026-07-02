@@ -7,8 +7,6 @@ import { BaseAIProvider, AITestResult, AIIntelligentTestResult, AIModelTestResul
  * Azure OpenAI 供应商实现
  */
 export class AzureProvider extends BaseAIProvider {
-  private readonly deploymentsApiVersion = '2024-10-21';
-
   private trimTrailingSlash(url: string): string {
     return url.trim().replace(/\/+$/, '');
   }
@@ -21,15 +19,34 @@ export class AzureProvider extends BaseAIProvider {
     return `${baseURL}/openai/v1`;
   }
 
-  private getResourceBaseURL(config: AIConfig): string {
-    const baseURL = this.trimTrailingSlash(config.baseURL || '');
-    if (baseURL.endsWith('/openai/v1')) {
-      return baseURL.slice(0, -'/openai/v1'.length);
+  private getModelsURL(config: AIConfig): string {
+    return `${this.getChatBaseURL(config)}/models`;
+  }
+
+  private async fetchRemoteModels(config: AIConfig): Promise<string[]> {
+    const url = this.getModelsURL(config);
+    console.log(`Azure OpenAI 请求URL: ${url}`);
+
+    const timeoutFetch = this.createTimeoutFetch(10000);
+    const response = await timeoutFetch(url, {
+      headers: {
+        'api-key': config.apiKey,
+        'Content-Type': 'application/json'
+      }
+    });
+    console.log(`Azure OpenAI 响应状态: ${response.status}`);
+
+    if (!response.ok) {
+      const errorData = await response.text().catch(() => response.statusText);
+      throw new Error(`模型列表请求失败: HTTP ${response.status} ${errorData}`);
     }
-    if (baseURL.endsWith('/openai')) {
-      return baseURL.slice(0, -'/openai'.length);
-    }
-    return baseURL;
+
+    const data = await response.json();
+    console.log(`Azure OpenAI 响应数据:`, data);
+
+    return data.data
+      ?.map((model: any) => model.id)
+      .filter((id: unknown): id is string => typeof id === 'string' && id.trim().length > 0) || [];
   }
 
   
@@ -40,8 +57,7 @@ export class AzureProvider extends BaseAIProvider {
     console.log(`测试 Azure OpenAI 连接，使用 baseURL: ${config.baseURL}`);
     
     try {
-      // 只测试连接和获取模型列表，不测试具体模型
-      const models = await this.getAvailableModels(config);
+      const models = await this.fetchRemoteModels(config);
       console.log(`Azure OpenAI 获取到模型列表:`, models);
       
       if (models.length > 0) {
@@ -49,13 +65,18 @@ export class AzureProvider extends BaseAIProvider {
         return { 
           success: true, 
           models,
+          modelSource: 'remote',
+          modelListMessage: `已从远端获取到 ${models.length} 个可用模型`,
           error: `✅ 连接成功！获取到 ${models.length} 个可用模型`
         };
       } else {
+        const defaultModels = this.getDefaultModels();
         console.log(`Azure OpenAI 连接成功但未获取到模型，使用默认模型列表`);
         return { 
           success: true, 
-          models: this.getDefaultModels(),
+          models: defaultModels,
+          modelSource: defaultModels.length > 0 ? 'default' : 'unavailable',
+          modelListMessage: defaultModels.length > 0 ? '远端模型列表为空，已使用内置默认模型' : '远端模型列表为空，请手动添加部署名',
           error: `✅ 连接成功！但未获取到模型列表，使用默认模型`
         };
       }
@@ -73,29 +94,11 @@ export class AzureProvider extends BaseAIProvider {
     console.log(`获取 Azure OpenAI 模型列表 - baseURL: ${config.baseURL}`);
     
     try {
-      const url = `${this.getResourceBaseURL(config)}/openai/deployments?api-version=${this.deploymentsApiVersion}`;
-      console.log(`Azure OpenAI 请求URL: ${url}`);
-      
-      const timeoutFetch = this.createTimeoutFetch(10000);
-      const response = await timeoutFetch(url, {
-        headers: {
-          'api-key': config.apiKey,
-          'Content-Type': 'application/json'
-        }
-      });
-      console.log(`Azure OpenAI 响应状态: ${response.status}`);
-      
-      if (response.ok) {
-        const data = await response.json();
-        console.log(`Azure OpenAI 响应数据:`, data);
-        
-        const models = data.data?.map((deployment: any) => deployment.id) || [];
-        console.log(`Azure OpenAI 解析出的模型列表:`, models);
-        
-        // 如果获取到了模型列表，返回；否则返回常见模型
-        if (models.length > 0) {
-          return models;
-        }
+      const models = await this.fetchRemoteModels(config);
+      console.log(`Azure OpenAI 解析出的模型列表:`, models);
+
+      if (models.length > 0) {
+        return models;
       }
     } catch (error) {
       console.error(`获取 Azure OpenAI 模型列表失败，使用默认列表:`, error);

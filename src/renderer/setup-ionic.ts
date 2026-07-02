@@ -17,6 +17,7 @@ import '@ionic/vue/css/display.css'
 
 // 导入 Ionic 暗色模式调色板
 import '@ionic/vue/css/palettes/dark.class.css'
+import './assets/styles/mobile.css'
 
 import { IonicVue } from '@ionic/vue'
 import type { App } from 'vue'
@@ -25,5 +26,7 @@ import type { App } from 'vue'
  * 初始化 Ionic
  */
 export function setupIonic(app: App) {
+  document.documentElement.classList.add('ai-gist-mobile')
+  document.body.classList.add('ai-gist-mobile')
   app.use(IonicVue)
 }

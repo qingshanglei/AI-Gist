@@ -1,0 +1,2172 @@
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
+import {
+  CloudSyncService,
+  DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES,
+  getCloudSyncErrorDiagnosis,
+  getFriendlyCloudSyncError,
+  type CloudSyncServiceDeps
+} from '~/lib/services/cloud-sync.service'
+import { emitDataChange } from '~/lib/services/data-change-events'
+import {
+  createCloudSyncDataChecksum,
+  createCloudSyncSnapshot
+} from '@shared/cloud-sync-engine'
+import {
+  assertValidCloudSyncManifest,
+  createEmptyCloudSyncManifest
+} from '@shared/cloud-sync-manifest'
+import {
+  assertValidCloudSyncSnapshotFile,
+  createCloudSyncSnapshotFile
+} from '@shared/cloud-sync-snapshots'
+
+class MemoryStorage {
+  private values = new Map<string, string>()
+
+  getItem(key: string): string | null {
+    return this.values.get(key) || null
+  }
+
+  setItem(key: string, value: string): void {
+    this.values.set(key, value)
+  }
+
+  removeItem(key: string): void {
+    this.values.delete(key)
+  }
+}
+
+const baseData = {
+  categories: [{ id: 1, uuid: 'cat-1', name: 'Base', updatedAt: '2026-01-01T00:00:00.000Z' }],
+  prompts: [{ id: 1, uuid: 'prompt-1', title: 'Base', updatedAt: '2026-01-01T00:00:00.000Z' }],
+  promptVariables: [],
+  promptHistories: [],
+  aiConfigs: [],
+  quickOptimizationConfigs: [],
+  aiHistory: [],
+  settings: [],
+  syncTombstones: []
+}
+
+const enabledWebDAVConfig = {
+  id: 'cfg-1',
+  name: 'WebDAV',
+  type: 'webdav' as const,
+  enabled: true,
+  url: 'http://127.0.0.1/webdav',
+  username: 'user',
+  password: 'pass',
+  createdAt: '2026-01-01T00:00:00.000Z',
+  updatedAt: '2026-01-01T00:00:00.000Z'
+}
+
+function createService(
+  data: any,
+  manifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z'),
+  extraDeps: CloudSyncServiceDeps = {}
+) {
+  const storage = new MemoryStorage()
+  let cloudManifest = manifest
+  const cloudClient = {
+    getCloudSyncManifest: vi.fn().mockImplementation(async () => cloudManifest),
+    saveCloudSyncManifest: vi.fn().mockImplementation(async (_storageId: string, nextManifest: any) => {
+      cloudManifest = nextManifest
+      return { success: true }
+    })
+  }
+  const database = {
+    exportAllDataForSync: vi.fn().mockResolvedValue({
+      success: true,
+      message: 'ok',
+      data
+    }),
+    replaceAllData: vi.fn().mockResolvedValue({
+      success: true,
+      message: 'ok'
+    })
+  }
+  const service = new CloudSyncService({
+    cloudClient,
+    database,
+    storage,
+    createDeviceId: () => 'device-a',
+    ...extraDeps
+  })
+
+  return {
+    service,
+    cloudClient,
+    database,
+    storage
+  }
+}
+
+describe('CloudSyncService', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('uploads a local snapshot when the cloud manifest is empty', async () => {
+    const { service, cloudClient, storage } = createService(baseData)
+
+    const result = await service.syncNow('cfg-1', {
+      deviceName: 'iPhone',
+      platform: 'ios'
+    })
+
+    expect(result.success, JSON.stringify(result, null, 2)).toBe(true)
+    expect(result.action).toBe('uploaded')
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    const savedManifest = cloudClient.saveCloudSyncManifest.mock.calls[0][1]
+    expect(savedManifest.latestSnapshot.data.prompts[0].uuid).toBe('prompt-1')
+    expect(savedManifest.devices['device-a']).toMatchObject({
+      deviceName: 'iPhone',
+      platform: 'ios'
+    })
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain(savedManifest.latestSnapshot.revision)
+  })
+
+  it('fails before upload when the local sync export is missing a required collection', async () => {
+    const incompleteLocalData = { ...baseData }
+    delete (incompleteLocalData as any).promptHistories
+    const { service, cloudClient, database } = createService(incompleteLocalData)
+
+    const result = await service.syncNow('cfg-1', { reason: 'manual' })
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('本机同步数据导出不完整')
+    expect(result.error).toContain('snapshot data missing collection promptHistories')
+    expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+  })
+
+  it('fails before upload when the local sync export contains duplicate record keys', async () => {
+    const duplicateLocalData = {
+      ...baseData,
+      prompts: [
+        baseData.prompts[0],
+        {
+          ...baseData.prompts[0],
+          id: 2,
+          title: 'Duplicate prompt should never overwrite cloud data'
+        }
+      ]
+    }
+    const { service, cloudClient, database } = createService(duplicateLocalData)
+
+    const result = await service.syncNow('cfg-1', { reason: 'manual' })
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('本机同步数据导出不完整')
+    expect(result.error).toContain('snapshot data prompts has duplicate record key uuid:prompt-1')
+    expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+  })
+
+  it('does not create new revisions on repeated manual sync when local data only differs by JSON shape', async () => {
+    const localDataWithJsonDrift = {
+      ...baseData,
+      prompts: [{
+        ...baseData.prompts[0],
+        optional: undefined,
+        nested: {
+          keep: 'value',
+          drop: undefined
+        },
+        values: [undefined, 'kept']
+      }]
+    }
+    const { service, cloudClient } = createService(localDataWithJsonDrift)
+
+    const first = await service.syncNow('cfg-1', { reason: 'manual' })
+    const second = await service.syncNow('cfg-1', { reason: 'manual' })
+    const third = await service.syncNow('cfg-1', { reason: 'manual' })
+
+    expect(first.success).toBe(true)
+    expect(first.action).toBe('uploaded')
+    expect(second.success).toBe(true)
+    expect(second.action).toBe('noop')
+    expect(third.success).toBe(true)
+    expect(third.action).toBe('noop')
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not upload when a new device has only regenerated local numeric ids', async () => {
+    const remoteData = {
+      categories: [
+        { id: 1, uuid: 'cat-real', name: 'Real', updatedAt: '2026-06-12T00:00:00.000Z' }
+      ],
+      prompts: [
+        {
+          id: 10,
+          uuid: 'prompt-real',
+          title: 'Real prompt',
+          content: 'Hello {{tone}}',
+          categoryId: 1,
+          category: { id: 1, uuid: 'cat-real', name: 'Real' },
+          variables: [
+            { id: 100, uuid: 'var-real', promptId: 10, name: 'tone', updatedAt: '2026-06-12T00:00:00.000Z' }
+          ],
+          updatedAt: '2026-06-12T00:00:00.000Z'
+        }
+      ],
+      promptVariables: [
+        { id: 100, uuid: 'var-real', promptId: 10, name: 'tone', updatedAt: '2026-06-12T00:00:00.000Z' }
+      ],
+      promptHistories: [
+        { id: 1000, uuid: 'history-real', promptId: 10, promptUuid: 'prompt-real', content: 'History' }
+      ],
+      aiConfigs: [],
+      quickOptimizationConfigs: [],
+      aiHistory: [],
+      settings: [{ id: 1, key: 'theme', value: 'dark', type: 'string' }],
+      syncTombstones: []
+    }
+    const localData = {
+      ...remoteData,
+      categories: [
+        { ...remoteData.categories[0], id: 501 }
+      ],
+      prompts: [
+        {
+          ...remoteData.prompts[0],
+          id: 601,
+          categoryId: 501,
+          category: { ...remoteData.prompts[0].category, id: 501 },
+          variables: [
+            { ...remoteData.prompts[0].variables[0], id: 701, promptId: 601 }
+          ]
+        }
+      ],
+      promptVariables: [
+        { ...remoteData.promptVariables[0], id: 701, promptId: 601 }
+      ],
+      promptHistories: [
+        { ...remoteData.promptHistories[0], id: 801, promptId: 601 }
+      ],
+      settings: [{ id: 901, key: 'theme', value: 'dark', type: 'string' }]
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(remoteData, 'device-a', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-06-12T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot: remoteSnapshot
+    }
+    const { service, cloudClient, database } = createService(localData, manifest, {
+      createDeviceId: () => 'device-b'
+    })
+
+    const result = await service.syncNow('cfg-1', {
+      deviceName: 'Web Device',
+      platform: 'web',
+      reason: 'manual'
+    })
+
+    expect(result).toMatchObject({
+      success: true,
+      action: 'noop',
+      uploadedRemote: false,
+      appliedLocal: false
+    })
+    expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+  })
+
+  it('writes the immutable snapshot before updating the manifest pointer', async () => {
+    const storage = new MemoryStorage()
+    let cloudManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    const savedSnapshots = new Map<string, any>()
+    const callOrder: string[] = []
+    const cloudClient = {
+      getCloudSyncManifest: vi.fn().mockImplementation(async () => cloudManifest),
+      saveCloudSyncSnapshot: vi.fn().mockImplementation(async (_storageId: string, snapshot: any) => {
+        callOrder.push('snapshot')
+        savedSnapshots.set(snapshot.revision, snapshot)
+        return { success: true }
+      }),
+      readCloudSyncSnapshot: vi.fn().mockImplementation(async (_storageId: string, revision: string) => {
+        const snapshot = savedSnapshots.get(revision)
+        if (!snapshot) {
+          throw new Error('snapshot not found')
+        }
+        return snapshot
+      }),
+      listCloudSyncSnapshots: vi.fn().mockResolvedValue([]),
+      saveCloudSyncManifest: vi.fn().mockImplementation(async (_storageId: string, manifest: any) => {
+        callOrder.push('manifest')
+        cloudManifest = manifest
+        return { success: true }
+      })
+    }
+    const database = {
+      exportAllDataForSync: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok',
+        data: baseData
+      }),
+      replaceAllData: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok'
+      })
+    }
+    const service = new CloudSyncService({
+      cloudClient,
+      database,
+      storage,
+      createDeviceId: () => 'device-a'
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(callOrder).toEqual(['snapshot', 'manifest'])
+    expect(savedSnapshots.has(cloudManifest.latestSnapshot!.revision)).toBe(true)
+    expect(cloudClient.getCloudSyncManifest).toHaveBeenCalledTimes(3)
+  })
+
+  it('keeps checksums stable across real JSON snapshot and manifest round trips', async () => {
+    const storage = new MemoryStorage()
+    const localData = {
+      ...baseData,
+      prompts: [
+        {
+          ...baseData.prompts[0],
+          optional: undefined,
+          nested: {
+            keep: 'value',
+            drop: undefined
+          },
+          values: [undefined, 'kept']
+        }
+      ]
+    }
+    let cloudManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    const savedSnapshotFiles = new Map<string, any>()
+    const cloudClient = {
+      getCloudSyncManifest: vi.fn().mockImplementation(async () =>
+        assertValidCloudSyncManifest(JSON.parse(JSON.stringify(cloudManifest)))
+      ),
+      saveCloudSyncSnapshot: vi.fn().mockImplementation(async (_storageId: string, snapshot: any) => {
+        savedSnapshotFiles.set(snapshot.revision, JSON.parse(JSON.stringify(createCloudSyncSnapshotFile(snapshot))))
+        return { success: true }
+      }),
+      readCloudSyncSnapshot: vi.fn().mockImplementation(async (_storageId: string, revision: string) => {
+        const snapshotFile = savedSnapshotFiles.get(revision)
+        if (!snapshotFile) {
+          throw new Error('snapshot not found')
+        }
+        return assertValidCloudSyncSnapshotFile(JSON.parse(JSON.stringify(snapshotFile)))
+      }),
+      listCloudSyncSnapshots: vi.fn().mockResolvedValue([]),
+      saveCloudSyncManifest: vi.fn().mockImplementation(async (_storageId: string, manifest: any) => {
+        cloudManifest = assertValidCloudSyncManifest(JSON.parse(JSON.stringify(manifest)))
+        return { success: true }
+      })
+    }
+    const database = {
+      exportAllDataForSync: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok',
+        data: localData
+      }),
+      replaceAllData: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok'
+      })
+    }
+    const service = new CloudSyncService({
+      cloudClient,
+      database,
+      storage,
+      createDeviceId: () => 'device-a'
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.error).toBeUndefined()
+    expect(cloudManifest.latestSnapshot?.data.prompts?.[0]).not.toHaveProperty('optional')
+    expect(cloudManifest.latestSnapshot?.data.prompts?.[0].nested).not.toHaveProperty('drop')
+    expect(cloudManifest.latestSnapshot?.data.prompts?.[0].values).toEqual([null, 'kept'])
+    expect(cloudManifest.latestSnapshot?.dataChecksum).toBe(
+      createCloudSyncDataChecksum(cloudManifest.latestSnapshot!.data)
+    )
+  })
+
+  it('recovers a corrupt manifest from the newest remote snapshot file', async () => {
+    const storage = new MemoryStorage()
+    const remoteSnapshot = createCloudSyncSnapshot(baseData, 'device-b', 'rev-from-file')
+    const savedSnapshots: any[] = []
+    const savedManifests: any[] = []
+    let recoveredManifest: any
+    const cloudClient = {
+      getCloudSyncManifest: vi.fn().mockImplementation(async () => {
+        if (recoveredManifest) {
+          return recoveredManifest
+        }
+
+        throw new Error('读取云同步 manifest 失败，且备份副本不可用: sync-manifest.json snapshot data checksum mismatch')
+      }),
+      listCloudSyncSnapshots: vi.fn().mockResolvedValue([{
+        revision: remoteSnapshot.revision,
+        path: '/AI-Gist-Backup/sync/snapshots/rev-from-file.json',
+        modifiedAt: '2026-01-02T00:00:00.000Z'
+      }]),
+      readCloudSyncSnapshot: vi.fn().mockResolvedValue(remoteSnapshot),
+      saveCloudSyncSnapshot: vi.fn().mockImplementation(async (_storageId: string, snapshot: any) => {
+        savedSnapshots.push(snapshot)
+        return { success: true }
+      }),
+      saveCloudSyncManifest: vi.fn().mockImplementation(async (_storageId: string, manifest: any) => {
+        savedManifests.push(manifest)
+        recoveredManifest = manifest
+        return { success: true }
+      })
+    }
+    const database = {
+      exportAllDataForSync: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok',
+        data: baseData
+      }),
+      replaceAllData: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok'
+      })
+    }
+    const service = new CloudSyncService({
+      cloudClient,
+      database,
+      storage,
+      createDeviceId: () => 'device-a'
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.remoteRevision).toBe('rev-from-file')
+    expect(cloudClient.listCloudSyncSnapshots).toHaveBeenCalledTimes(1)
+    expect(savedSnapshots[0].revision).toBe('rev-from-file')
+    expect(savedManifests[0].latestSnapshot.revision).toBe('rev-from-file')
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+  })
+
+  it('does not promote loose snapshot files over a readable manifest pointer', async () => {
+    const oldSnapshot = {
+      ...createCloudSyncSnapshot(baseData, 'device-b', 'rev-old'),
+      createdAt: '2026-01-01T00:00:00.000Z'
+    }
+    const newerData = {
+      ...baseData,
+      prompts: [{ ...baseData.prompts[0], title: 'New file snapshot', updatedAt: '2026-01-02T00:00:00.000Z' }]
+    }
+    const newerSnapshot = {
+      ...createCloudSyncSnapshot(newerData, 'device-b', 'rev-new-file'),
+      createdAt: '2026-01-02T00:00:00.000Z'
+    }
+    let cloudManifest = {
+      ...createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z'),
+      latestSnapshot: oldSnapshot,
+      baseSnapshot: oldSnapshot
+    }
+    const savedManifests: any[] = []
+    const savedSnapshots: any[] = []
+    const cloudClient = {
+      getCloudSyncManifest: vi.fn().mockImplementation(async () => cloudManifest),
+      listCloudSyncSnapshots: vi.fn().mockResolvedValue([{
+        revision: newerSnapshot.revision,
+        path: '/AI-Gist-Backup/sync/snapshots/rev-new-file.json',
+        modifiedAt: '2026-01-02T00:00:00.000Z'
+      }]),
+      readCloudSyncSnapshot: vi.fn().mockImplementation(async (_storageId: string, snapshot: any) => {
+        const revision = typeof snapshot === 'string' ? snapshot : snapshot.revision
+        return savedSnapshots.find(savedSnapshot => savedSnapshot.revision === revision) || newerSnapshot
+      }),
+      saveCloudSyncSnapshot: vi.fn().mockImplementation(async (_storageId: string, snapshot: any) => {
+        savedSnapshots.push(snapshot)
+        return { success: true }
+      }),
+      saveCloudSyncManifest: vi.fn().mockImplementation(async (_storageId: string, manifest: any) => {
+        savedManifests.push(manifest)
+        cloudManifest = manifest
+        return { success: true }
+      })
+    }
+    const database = {
+      exportAllDataForSync: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok',
+        data: newerData
+      }),
+      replaceAllData: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok'
+      })
+    }
+    const service = new CloudSyncService({
+      cloudClient,
+      database,
+      storage: new MemoryStorage(),
+      createDeviceId: () => 'device-a'
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success, JSON.stringify(result, null, 2)).toBe(true)
+    expect(result.action).toBe('uploaded')
+    expect(result.remoteRevision).not.toBe('rev-new-file')
+    expect(cloudClient.listCloudSyncSnapshots).not.toHaveBeenCalled()
+    expect(cloudClient.readCloudSyncSnapshot).not.toHaveBeenCalledWith('cfg-1', 'rev-new-file')
+    expect(cloudClient.readCloudSyncSnapshot).not.toHaveBeenCalledWith(
+      'cfg-1',
+      expect.objectContaining({ revision: 'rev-new-file' })
+    )
+    expect(savedManifests[0].latestSnapshot.revision).not.toBe('rev-new-file')
+    expect(savedManifests[0].latestSnapshot.data.prompts[0].title).toBe('New file snapshot')
+    expect(cloudClient.saveCloudSyncSnapshot).toHaveBeenCalledWith('cfg-1', expect.objectContaining({
+      data: expect.objectContaining({
+        prompts: expect.arrayContaining([expect.objectContaining({ title: 'New file snapshot' })])
+      })
+    }))
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+  })
+
+  it('repairs a readable manifest inline snapshot from the matching immutable snapshot file', async () => {
+    const remoteSnapshot = createCloudSyncSnapshot(baseData, 'device-b', 'rev-shared')
+    const corruptedData = {
+      ...baseData,
+      prompts: [
+        { ...baseData.prompts[0], title: 'Corrupted inline manifest copy' }
+      ],
+      promptHistories: []
+    }
+    const corruptedSnapshot = {
+      ...remoteSnapshot,
+      data: corruptedData,
+      dataChecksum: createCloudSyncDataChecksum(corruptedData)
+    }
+    let cloudManifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: corruptedSnapshot,
+      baseSnapshot: corruptedSnapshot
+    }
+    const savedManifests: any[] = []
+    const cloudClient = {
+      getCloudSyncManifest: vi.fn().mockImplementation(async () => cloudManifest),
+      listCloudSyncSnapshots: vi.fn().mockResolvedValue([]),
+      readCloudSyncSnapshot: vi.fn().mockImplementation(async (_storageId: string, revision: string) => {
+        if (revision !== 'rev-shared') {
+          throw new Error('snapshot not found')
+        }
+
+        return remoteSnapshot
+      }),
+      saveCloudSyncSnapshot: vi.fn().mockResolvedValue({ success: true }),
+      saveCloudSyncManifest: vi.fn().mockImplementation(async (_storageId: string, manifest: any) => {
+        savedManifests.push(manifest)
+        cloudManifest = manifest
+        return { success: true }
+      })
+    }
+    const database = {
+      exportAllDataForSync: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok',
+        data: {
+          categories: [],
+          prompts: [],
+          promptVariables: [],
+          promptHistories: [],
+          aiConfigs: [],
+          quickOptimizationConfigs: [],
+          aiHistory: [],
+          settings: [],
+          syncTombstones: []
+        }
+      }),
+      replaceAllData: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok'
+      })
+    }
+    const service = new CloudSyncService({
+      cloudClient,
+      database,
+      storage: new MemoryStorage(),
+      createDeviceId: () => 'device-a'
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.action).toBe('downloaded')
+    expect(cloudClient.listCloudSyncSnapshots).not.toHaveBeenCalled()
+    expect(cloudClient.readCloudSyncSnapshot).toHaveBeenCalledWith('cfg-1', 'rev-shared')
+    expect(savedManifests[0].latestSnapshot.data.prompts[0].title).toBe('Base')
+    expect(savedManifests[0].latestSnapshot.dataChecksum).toBe(createCloudSyncDataChecksum(baseData))
+    expect(database.replaceAllData).toHaveBeenCalledWith(expect.objectContaining({
+      prompts: expect.arrayContaining([expect.objectContaining({ title: 'Base' })])
+    }))
+  })
+
+  it('continues sync when noncritical local sync metadata cannot be stored', async () => {
+    const storage = new MemoryStorage()
+    const storageSetSpy = vi.spyOn(storage, 'setItem')
+      .mockImplementation((key: string, value: string) => {
+        if (
+          key === 'ai_gist_cloud_sync_last_auto_attempt_at' ||
+          key === 'ai_gist_cloud_sync_device_id' ||
+          key.startsWith('ai_gist_cloud_sync_state:')
+        ) {
+          throw new Error('QuotaExceededError')
+        }
+        MemoryStorage.prototype.setItem.call(storage, key, value)
+      })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), { storage })
+
+    try {
+      const result = await service.syncNow('cfg-1')
+
+      expect(result.success).toBe(true)
+      expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+      expect(storageSetSpy).toHaveBeenCalled()
+      expect(warnSpy).toHaveBeenCalledWith(
+        '保存云同步自动尝试时间失败:',
+        expect.any(Error)
+      )
+      expect(warnSpy).toHaveBeenCalledWith(
+        '保存云同步设备 ID 失败:',
+        expect.any(Error)
+      )
+      expect(warnSpy).toHaveBeenCalledWith(
+        '保存本地同步状态失败:',
+        expect.any(Error)
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('retries local sync state save after clearing noncritical sync cache', async () => {
+    const storage = new MemoryStorage()
+    storage.setItem('ai_gist_cloud_sync_conflict_log', JSON.stringify([{
+      id: 'entry-1',
+      storageId: 'cfg-1',
+      detectedAt: '2026-01-01T00:00:00.000Z',
+      conflicts: []
+    }]))
+    let stateSaveAttempts = 0
+    vi.spyOn(storage, 'setItem')
+      .mockImplementation((key: string, value: string) => {
+        if (key.startsWith('ai_gist_cloud_sync_state:') && stateSaveAttempts === 0) {
+          stateSaveAttempts += 1
+          throw new Error('QuotaExceededError')
+        }
+        MemoryStorage.prototype.setItem.call(storage, key, value)
+      })
+    const removeSpy = vi.spyOn(storage, 'removeItem')
+    const { service } = createService(baseData, createEmptyCloudSyncManifest(), { storage })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(removeSpy).toHaveBeenCalledWith('ai_gist_cloud_sync_conflict_log')
+    expect(storage.getItem('ai_gist_cloud_sync_conflict_log')).toBeNull()
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain(result.remoteRevision)
+  })
+
+  it('saves lightweight local sync state when base snapshot exceeds storage quota', async () => {
+    const storage = new MemoryStorage()
+    vi.spyOn(storage, 'setItem')
+      .mockImplementation((key: string, value: string) => {
+        if (key.startsWith('ai_gist_cloud_sync_state:') && value.includes('"baseSnapshot"')) {
+          throw new Error('QuotaExceededError')
+        }
+        MemoryStorage.prototype.setItem.call(storage, key, value)
+      })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { service } = createService(baseData, createEmptyCloudSyncManifest(), { storage })
+
+    try {
+      const result = await service.syncNow('cfg-1')
+
+      expect(result.success).toBe(true)
+      const savedState = JSON.parse(storage.getItem('ai_gist_cloud_sync_state:cfg-1')!)
+      expect(savedState.lastKnownRevision).toBe(result.remoteRevision)
+      expect(savedState.baseSnapshot).toBeUndefined()
+      expect(warnSpy).not.toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('fails sync when a saved manifest cannot be read back with the same revision', async () => {
+    const emptyManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    const { service, cloudClient, storage } = createService(baseData, emptyManifest)
+    cloudClient.getCloudSyncManifest
+      .mockReset()
+      .mockResolvedValueOnce(emptyManifest)
+      .mockResolvedValueOnce(emptyManifest)
+      .mockImplementation(async () => emptyManifest)
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('云同步 manifest 保存后校验失败')
+    expect(result.error).not.toContain('其他设备')
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(2)
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toBeNull()
+  })
+
+  it('retries a falsely successful manifest save until the manifest pointer is published', async () => {
+    const emptyManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    const { service, cloudClient, storage } = createService(baseData, emptyManifest)
+    let cloudManifest: any = emptyManifest
+    let saveAttempts = 0
+    cloudClient.getCloudSyncManifest.mockImplementation(async () => cloudManifest)
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (_storageId: string, manifest: any) => {
+      saveAttempts += 1
+      if (saveAttempts === 1) {
+        return { success: true }
+      }
+
+      cloudManifest = manifest
+      return { success: true }
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.action).toBe('uploaded')
+    expect(result.error).toBeUndefined()
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(2)
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain(cloudManifest.latestSnapshot.revision)
+  })
+
+  it('accepts a reported manifest save failure when the submitted manifest is already readable', async () => {
+    const emptyManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    const { service, cloudClient, storage } = createService(baseData, emptyManifest)
+    let savedManifest: any
+    cloudClient.getCloudSyncManifest
+      .mockReset()
+      .mockResolvedValueOnce(emptyManifest)
+      .mockResolvedValueOnce(emptyManifest)
+      .mockImplementation(async () => savedManifest || emptyManifest)
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (_storageId: string, manifest: any) => {
+      savedManifest = manifest
+      return {
+        success: false,
+        error: 'HTTP 507 while saving backup manifest'
+      }
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.action).toBe('uploaded')
+    expect(result.error).toBeUndefined()
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain(savedManifest.latestSnapshot.revision)
+  })
+
+  it('waits out stale read-after-write responses instead of treating them as another device', async () => {
+    const emptyManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    const { service, cloudClient, storage } = createService(baseData, emptyManifest)
+    let savedManifest: any
+    cloudClient.getCloudSyncManifest
+      .mockReset()
+      .mockResolvedValueOnce(emptyManifest)
+      .mockResolvedValueOnce(emptyManifest)
+      .mockResolvedValueOnce(emptyManifest)
+      .mockImplementation(async () => savedManifest)
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (_storageId: string, manifest: any) => {
+      savedManifest = manifest
+      return { success: true }
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.error).toBeUndefined()
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain(savedManifest.latestSnapshot.revision)
+  })
+
+  it('does not mention other devices for local read-after-write consistency failures', () => {
+    const message = getFriendlyCloudSyncError(
+      '云同步 manifest 保存后校验失败：期望 revision rev-new，实际 rev-old'
+    )
+
+    expect(message).toContain('自动重试')
+    expect(message).not.toContain('其他设备')
+  })
+
+  it('keeps raw unstable sync errors in a copyable diagnosis report', () => {
+    const rawError = '云同步 manifest 保存后数据校验失败：期望 checksum abc，实际 def'
+    const diagnosis = getCloudSyncErrorDiagnosis(rawError, {
+      storageId: 'cfg-1',
+      reason: 'manual',
+      status: 'error',
+      failureCount: 2,
+      timestamp: '2026-06-12T08:00:00.000Z'
+    })
+
+    expect(diagnosis.title).toBe('云端同步状态暂时不一致')
+    expect(diagnosis.canAutoRetry).toBe(true)
+    expect(diagnosis.canUserFix).toBe(false)
+    expect(diagnosis.copyText).toContain(rawError)
+    expect(diagnosis.copyText).toContain('存储配置 ID: cfg-1')
+    expect(diagnosis.copyText).toContain('连续失败次数: 2')
+  })
+
+  it('classifies WebDAV authentication errors as user-fixable diagnostics', () => {
+    const diagnosis = getCloudSyncErrorDiagnosis('401 Unauthorized', {
+      storageId: 'webdav-1',
+      reason: 'manual'
+    })
+
+    expect(diagnosis.title).toBe('云存储认证失败')
+    expect(diagnosis.canUserFix).toBe(true)
+    expect(diagnosis.canAutoRetry).toBe(false)
+    expect(diagnosis.message).toContain('用户名')
+    expect(diagnosis.copyText).toContain('401 Unauthorized')
+  })
+
+  it('fails sync when a saved manifest reads back the same revision with different data', async () => {
+    const emptyManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    const { service, cloudClient, storage } = createService(baseData, emptyManifest)
+    let corruptedSavedManifest: any = emptyManifest
+
+    cloudClient.getCloudSyncManifest
+      .mockReset()
+      .mockResolvedValueOnce(emptyManifest)
+      .mockResolvedValueOnce(emptyManifest)
+      .mockImplementation(async () => corruptedSavedManifest)
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (_storageId: string, manifest: any) => {
+      const corruptedData = {
+        ...manifest.latestSnapshot.data,
+        prompts: [
+          { ...manifest.latestSnapshot.data.prompts[0], title: 'Corrupted cloud copy' }
+        ]
+      }
+      corruptedSavedManifest = {
+        ...manifest,
+        latestSnapshot: {
+          ...manifest.latestSnapshot,
+          data: corruptedData,
+          dataChecksum: createCloudSyncDataChecksum(corruptedData)
+        }
+      }
+      return { success: true }
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('云同步 manifest 保存后数据校验失败')
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toBeNull()
+  })
+
+  it('repairs remote snapshot checksum drift before merging', async () => {
+    const remoteSnapshot = createCloudSyncSnapshot(baseData, 'device-b', 'rev-remote')
+    remoteSnapshot.data.prompts![0].title = 'Tampered remote data'
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot: remoteSnapshot
+    }
+    let cloudManifest = manifest
+    const cloudClient = {
+      getCloudSyncManifest: vi.fn().mockImplementation(async () => assertValidCloudSyncManifest(cloudManifest)),
+      saveCloudSyncManifest: vi.fn().mockImplementation(async (_storageId: string, nextManifest: any) => {
+        cloudManifest = nextManifest
+        return { success: true }
+      })
+    }
+    const database = {
+      exportAllDataForSync: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok',
+        data: remoteSnapshot.data
+      }),
+      replaceAllData: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok'
+      })
+    }
+    const storage = new MemoryStorage()
+    const service = new CloudSyncService({
+      cloudClient,
+      database,
+      storage,
+      createDeviceId: () => 'device-a'
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.error).toBeUndefined()
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    const savedManifest = cloudClient.saveCloudSyncManifest.mock.calls[0][1]
+    expect(savedManifest.latestSnapshot.dataChecksum).toBe(
+      createCloudSyncDataChecksum(savedManifest.latestSnapshot.data)
+    )
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain('rev-remote')
+  })
+
+  it('rebuilds the cloud manifest from local data when both cloud copies are unreadable', async () => {
+    let cloudManifest: any = null
+    const cloudClient = {
+      getCloudSyncManifest: vi.fn().mockImplementation(async () => {
+        if (!cloudManifest) {
+          throw new Error('读取云同步 manifest 失败: 云同步 manifest 内容无效: Unexpected token')
+        }
+        return cloudManifest
+      }),
+      saveCloudSyncManifest: vi.fn().mockImplementation(async (_storageId: string, nextManifest: any) => {
+        cloudManifest = nextManifest
+        return { success: true }
+      })
+    }
+    const database = {
+      exportAllDataForSync: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok',
+        data: baseData
+      }),
+      replaceAllData: vi.fn().mockResolvedValue({
+        success: true,
+        message: 'ok'
+      })
+    }
+    const storage = new MemoryStorage()
+    const service = new CloudSyncService({
+      cloudClient,
+      database,
+      storage,
+      createDeviceId: () => 'device-a'
+    })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    try {
+      const result = await service.syncNow('cfg-1')
+
+      expect(result.success).toBe(true)
+      expect(result.action).toBe('uploaded')
+      expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+      expect(cloudManifest.latestSnapshot.data.prompts).toEqual(baseData.prompts)
+      expect(database.replaceAllData).not.toHaveBeenCalled()
+      expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain(cloudManifest.latestSnapshot.revision)
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('downloads and applies remote changes when local data matches the previous base', async () => {
+    const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
+    const remoteData = {
+      ...baseData,
+      prompts: [{ id: 9, uuid: 'prompt-1', title: 'Remote edit', updatedAt: '2026-01-02T00:00:00.000Z' }]
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(remoteData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot
+    }
+    const { service, cloudClient, database, storage } = createService(baseData, manifest)
+    storage.setItem('ai_gist_cloud_sync_state:cfg-1', JSON.stringify({
+      storageId: 'cfg-1',
+      deviceId: 'device-a',
+      lastSyncAt: '2026-01-01T00:00:00.000Z',
+      lastKnownRevision: 'rev-base',
+      baseSnapshot
+    }))
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.action).toBe('downloaded')
+    expect(database.replaceAllData).toHaveBeenCalledWith(expect.objectContaining({
+      prompts: [expect.objectContaining({ title: 'Remote edit' })]
+    }))
+    expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain('rev-remote')
+  })
+
+  it('treats a device without local sync state as a new device and pulls remote data', async () => {
+    const emptyLocalData = {
+      categories: [],
+      prompts: [],
+      promptVariables: [],
+      promptHistories: [],
+      aiConfigs: [],
+      quickOptimizationConfigs: [],
+      aiHistory: [],
+      settings: [],
+      syncTombstones: []
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(baseData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot: remoteSnapshot
+    }
+    const { service, cloudClient, database } = createService(emptyLocalData, manifest)
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.action).toBe('downloaded')
+    expect(database.replaceAllData).toHaveBeenCalledWith(expect.objectContaining({
+      prompts: [expect.objectContaining({ uuid: 'prompt-1' })]
+    }))
+    expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
+  })
+
+  it('uploads a merged snapshot that preserves tombstones over stale remote records', async () => {
+    const tombstone = {
+      collectionName: 'prompts',
+      recordKey: 'uuid:prompt-1',
+      recordUuid: 'prompt-1',
+      deletedAt: '2026-01-03T00:00:00.000Z'
+    }
+    const localData = {
+      ...baseData,
+      prompts: [],
+      syncTombstones: [tombstone]
+    }
+    const remoteData = {
+      ...baseData,
+      prompts: [{ id: 9, uuid: 'prompt-1', title: 'Stale remote', updatedAt: '2026-01-02T00:00:00.000Z' }]
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(remoteData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot: remoteSnapshot
+    }
+    const { service, cloudClient, database } = createService(localData, manifest)
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.action).toBe('uploaded')
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+    const savedManifest = cloudClient.saveCloudSyncManifest.mock.calls[0][1]
+    expect(savedManifest.latestSnapshot.data.prompts).toEqual([])
+    expect(savedManifest.latestSnapshot.data.syncTombstones).toHaveLength(1)
+  })
+
+  it('rechecks the remote revision before upload and retries against newer cloud data', async () => {
+    const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
+    const localData = {
+      ...baseData,
+      prompts: [{ id: 1, uuid: 'prompt-1', title: 'Local edit', updatedAt: '2026-01-03T00:00:00.000Z' }]
+    }
+    const remoteDataWrittenByOtherDevice = {
+      ...baseData,
+      categories: [
+        ...baseData.categories,
+        { id: 2, uuid: 'cat-2', name: 'Remote category', updatedAt: '2026-01-02T00:00:00.000Z' }
+      ]
+    }
+    const initialManifest = {
+      ...createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z'),
+      latestSnapshot: baseSnapshot,
+      baseSnapshot
+    }
+    const changedManifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: createCloudSyncSnapshot(remoteDataWrittenByOtherDevice, 'device-b', 'rev-remote-newer'),
+      baseSnapshot
+    }
+    const { service, cloudClient, database, storage } = createService(localData, initialManifest)
+    storage.setItem('ai_gist_cloud_sync_state:cfg-1', JSON.stringify({
+      storageId: 'cfg-1',
+      deviceId: 'device-a',
+      lastSyncAt: '2026-01-01T00:00:00.000Z',
+      lastKnownRevision: 'rev-base',
+      baseSnapshot
+    }))
+    cloudClient.getCloudSyncManifest
+      .mockReset()
+      .mockResolvedValueOnce(initialManifest)
+      .mockResolvedValueOnce(changedManifest)
+      .mockResolvedValueOnce(changedManifest)
+      .mockResolvedValueOnce(changedManifest)
+      .mockImplementation(async () => cloudClient.saveCloudSyncManifest.mock.calls[0]?.[1] || changedManifest)
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(database.replaceAllData).toHaveBeenCalledWith(expect.objectContaining({
+      categories: expect.arrayContaining([expect.objectContaining({ uuid: 'cat-2' })]),
+      prompts: expect.arrayContaining([expect.objectContaining({ title: 'Local edit' })])
+    }))
+    const savedManifest = cloudClient.saveCloudSyncManifest.mock.calls[0][1]
+    expect(savedManifest.latestSnapshot.data.categories).toEqual(
+      expect.arrayContaining([expect.objectContaining({ uuid: 'cat-2' })])
+    )
+    expect(savedManifest.latestSnapshot.data.prompts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ title: 'Local edit' })])
+    )
+  })
+
+  it('continues uploading when the remote revision changes but remote data is unchanged', async () => {
+    const localData = {
+      ...baseData,
+      prompts: [{ id: 1, uuid: 'prompt-1', title: 'Local edit', updatedAt: '2026-01-03T00:00:00.000Z' }]
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(baseData, 'device-b', 'rev-remote-a')
+    const sameDataNewRevisionSnapshot = createCloudSyncSnapshot(baseData, 'device-b', 'rev-remote-b')
+    const initialManifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot: remoteSnapshot
+    }
+    const sameDataManifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:01:00.000Z'),
+      latestSnapshot: sameDataNewRevisionSnapshot,
+      baseSnapshot: sameDataNewRevisionSnapshot
+    }
+    const { service, cloudClient, database } = createService(localData, initialManifest)
+    let savedManifest: any
+    cloudClient.getCloudSyncManifest
+      .mockReset()
+      .mockResolvedValueOnce(initialManifest)
+      .mockResolvedValueOnce(sameDataManifest)
+      .mockImplementation(async () => savedManifest)
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (_storageId: string, manifest: any) => {
+      savedManifest = manifest
+      return { success: true }
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.error).toBeUndefined()
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(database.replaceAllData).not.toHaveBeenCalled()
+    expect(savedManifest.latestSnapshot.data.prompts).toEqual([
+      expect.objectContaining({ title: 'Local edit' })
+    ])
+  })
+
+  it('retries when the cloud rejects a manifest save because another device wrote first', async () => {
+    const localData = {
+      ...baseData,
+      prompts: [{ id: 1, uuid: 'prompt-1', title: 'Local edit', updatedAt: '2026-01-03T00:00:00.000Z' }]
+    }
+    const remoteDataWrittenByOtherDevice = {
+      ...baseData,
+      categories: [
+        ...baseData.categories,
+        { id: 2, uuid: 'cat-2', name: 'Remote category', updatedAt: '2026-01-02T00:00:00.000Z' }
+      ]
+    }
+    const emptyManifest = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    const changedManifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: createCloudSyncSnapshot(remoteDataWrittenByOtherDevice, 'device-b', 'rev-remote-newer')
+    }
+    const { service, cloudClient, database } = createService(localData, emptyManifest)
+    let cloudManifest: any = emptyManifest
+    let saveAttempts = 0
+    cloudClient.getCloudSyncManifest.mockImplementation(async () => cloudManifest)
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (_storageId: string, manifest: any) => {
+      saveAttempts += 1
+      if (saveAttempts === 1) {
+        cloudManifest = changedManifest
+        return {
+          success: false,
+          conflict: true,
+          error: '云同步 manifest 已被其他设备更新'
+        }
+      }
+
+      cloudManifest = manifest
+      return { success: true }
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(2)
+    expect(database.replaceAllData).toHaveBeenCalledWith(expect.objectContaining({
+      categories: expect.arrayContaining([expect.objectContaining({ uuid: 'cat-2' })]),
+      prompts: expect.arrayContaining([expect.objectContaining({ title: 'Local edit' })])
+    }))
+    expect(cloudManifest.latestSnapshot.data.categories).toEqual(
+      expect.arrayContaining([expect.objectContaining({ uuid: 'cat-2' })])
+    )
+    expect(cloudManifest.latestSnapshot.data.prompts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ title: 'Local edit' })])
+    )
+  })
+
+  it('does not upload a merged snapshot when applying merged data locally fails', async () => {
+    const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
+    const localData = {
+      ...baseData,
+      prompts: [{ id: 1, uuid: 'prompt-1', title: 'Local edit', updatedAt: '2026-01-03T00:00:00.000Z' }]
+    }
+    const remoteData = {
+      ...baseData,
+      categories: [
+        ...baseData.categories,
+        { id: 2, uuid: 'cat-2', name: 'Remote category', updatedAt: '2026-01-02T00:00:00.000Z' }
+      ]
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(remoteData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot
+    }
+    const { service, cloudClient, database, storage } = createService(localData, manifest)
+    storage.setItem('ai_gist_cloud_sync_state:cfg-1', JSON.stringify({
+      storageId: 'cfg-1',
+      deviceId: 'device-a',
+      lastSyncAt: '2026-01-01T00:00:00.000Z',
+      lastKnownRevision: 'rev-base',
+      baseSnapshot
+    }))
+    database.replaceAllData.mockResolvedValueOnce({
+      success: false,
+      message: 'write failed',
+      error: 'IndexedDB write failed'
+    }).mockResolvedValueOnce({
+      success: true,
+      message: 'rollback ok'
+    })
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(false)
+    expect(result.error).toContain('IndexedDB write failed')
+    expect(database.replaceAllData).toHaveBeenNthCalledWith(1, expect.objectContaining({
+      categories: expect.arrayContaining([expect.objectContaining({ uuid: 'cat-2' })]),
+      prompts: expect.arrayContaining([expect.objectContaining({ title: 'Local edit' })])
+    }))
+    expect(database.replaceAllData).toHaveBeenNthCalledWith(2, expect.objectContaining({
+      categories: expect.arrayContaining([expect.objectContaining({ uuid: 'cat-1' })]),
+      prompts: expect.arrayContaining([expect.objectContaining({ title: 'Local edit' })])
+    }))
+    expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
+    expect(storage.getItem('ai_gist_cloud_sync_state:cfg-1')).toContain('rev-base')
+  })
+
+  it('ignores corrupted local base snapshots before merging', async () => {
+    const localData = {
+      ...baseData,
+      prompts: [{ id: 1, uuid: 'prompt-1', title: 'Local edit', updatedAt: '2026-01-03T00:00:00.000Z' }]
+    }
+    const remoteData = {
+      ...baseData,
+      prompts: [{ id: 9, uuid: 'prompt-1', title: 'Remote edit', updatedAt: '2026-01-02T00:00:00.000Z' }]
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(remoteData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot: remoteSnapshot
+    }
+    const { service, cloudClient, database, storage } = createService(localData, manifest)
+    const corruptBaseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
+    corruptBaseSnapshot.data = localData
+    storage.setItem('ai_gist_cloud_sync_state:cfg-1', JSON.stringify({
+      storageId: 'cfg-1',
+      deviceId: 'device-a',
+      lastSyncAt: '2026-01-01T00:00:00.000Z',
+      lastKnownRevision: 'rev-base',
+      baseSnapshot: corruptBaseSnapshot
+    }))
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    try {
+      const result = await service.syncNow('cfg-1')
+
+      expect(result.success).toBe(true)
+      expect(result.action).toBe('uploaded')
+      expect(database.replaceAllData).not.toHaveBeenCalled()
+      const savedManifest = cloudClient.saveCloudSyncManifest.mock.calls[0][1]
+      expect(savedManifest.latestSnapshot.data.prompts).toEqual([
+        expect.objectContaining({ title: 'Local edit' })
+      ])
+      expect(warnSpy).toHaveBeenCalledWith(
+        '本地同步状态已损坏，忽略本地 baseSnapshot:',
+        'snapshot data checksum mismatch'
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('ignores local sync state when its revision does not match the base snapshot', async () => {
+    const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
+    const localData = {
+      ...baseData,
+      prompts: []
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(baseData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot: remoteSnapshot
+    }
+    const { service, cloudClient, database, storage } = createService(localData, manifest)
+    storage.setItem('ai_gist_cloud_sync_state:cfg-1', JSON.stringify({
+      storageId: 'cfg-1',
+      deviceId: 'device-a',
+      lastSyncAt: '2026-01-01T00:00:00.000Z',
+      lastKnownRevision: 'different-rev',
+      baseSnapshot
+    }))
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+
+    try {
+      const result = await service.syncNow('cfg-1')
+
+      expect(result.success).toBe(true)
+      expect(result.action).toBe('downloaded')
+      expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
+      expect(database.replaceAllData).toHaveBeenCalledWith(expect.objectContaining({
+        prompts: [expect.objectContaining({ uuid: 'prompt-1' })]
+      }))
+      expect(warnSpy).toHaveBeenCalledWith(
+        '本地同步状态 revision 不一致，忽略本地 baseSnapshot:',
+        'different-rev',
+        'rev-base'
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('persists an audit log when conflicts are automatically resolved', async () => {
+    const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
+    const localData = {
+      ...baseData,
+      prompts: [{ id: 1, uuid: 'prompt-1', title: 'Local edit', updatedAt: '2026-01-03T00:00:00.000Z' }]
+    }
+    const remoteData = {
+      ...baseData,
+      prompts: [{ id: 9, uuid: 'prompt-1', title: 'Remote edit', updatedAt: '2026-01-02T00:00:00.000Z' }]
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(remoteData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot
+    }
+    const { service, storage } = createService(localData, manifest)
+    storage.setItem('ai_gist_cloud_sync_state:cfg-1', JSON.stringify({
+      storageId: 'cfg-1',
+      deviceId: 'device-a',
+      lastSyncAt: '2026-01-01T00:00:00.000Z',
+      lastKnownRevision: 'rev-base',
+      baseSnapshot
+    }))
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    expect(result.conflicts).toHaveLength(1)
+
+    const conflictLog = service.getConflictLog('cfg-1')
+    expect(conflictLog).toHaveLength(1)
+    expect(conflictLog[0]).toMatchObject({
+      storageId: 'cfg-1',
+      localRevision: 'rev-base',
+      remoteRevision: 'rev-remote'
+    })
+    expect(conflictLog[0].resolvedRevision).toBe(result.remoteRevision)
+    expect(conflictLog[0].conflicts[0]).toMatchObject({
+      collection: 'prompts',
+      key: 'uuid:prompt-1',
+      reason: 'both_modified',
+      resolution: 'take-newer'
+    })
+    expect(service.getStatus().conflictLogCount).toBe(1)
+
+    service.clearConflictLog('cfg-1')
+    expect(service.getConflictLog('cfg-1')).toEqual([])
+    expect(service.getStatus().conflictLogCount).toBe(0)
+  })
+
+  it('keeps conflict audit logs lightweight by omitting image payloads', async () => {
+    const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
+    const largeImage = `data:image/png;base64,${'x'.repeat(5000)}`
+    const localData = {
+      ...baseData,
+      prompts: [{
+        id: 1,
+        uuid: 'prompt-1',
+        title: 'Local edit',
+        updatedAt: '2026-01-03T00:00:00.000Z',
+        imageBlobs: [largeImage]
+      }]
+    }
+    const remoteData = {
+      ...baseData,
+      prompts: [{
+        id: 9,
+        uuid: 'prompt-1',
+        title: 'Remote edit',
+        updatedAt: '2026-01-02T00:00:00.000Z',
+        imageBlobs: [largeImage]
+      }]
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(remoteData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot
+    }
+    const { service, cloudClient, storage } = createService(localData, manifest)
+    storage.setItem('ai_gist_cloud_sync_state:cfg-1', JSON.stringify({
+      storageId: 'cfg-1',
+      deviceId: 'device-a',
+      lastSyncAt: '2026-01-01T00:00:00.000Z',
+      lastKnownRevision: 'rev-base',
+      baseSnapshot
+    }))
+
+    const result = await service.syncNow('cfg-1')
+
+    expect(result.success).toBe(true)
+    const conflictLog = service.getConflictLog('cfg-1')
+    expect(conflictLog[0].conflicts[0].local.imageBlobs).toEqual({
+      omitted: true,
+      type: 'imageBlobs',
+      itemCount: 1
+    })
+    expect(JSON.stringify(conflictLog)).not.toContain(largeImage)
+
+    const savedManifest = cloudClient.saveCloudSyncManifest.mock.calls[0][1]
+    expect(savedManifest.conflicts[0].local.imageBlobs).toEqual({
+      omitted: true,
+      type: 'imageBlobs',
+      itemCount: 1
+    })
+    expect(JSON.stringify(savedManifest.conflicts)).not.toContain(largeImage)
+  })
+
+  it('does not fail sync when conflict audit log storage is unavailable', async () => {
+    const baseSnapshot = createCloudSyncSnapshot(baseData, 'device-a', 'rev-base')
+    const localData = {
+      ...baseData,
+      prompts: [{ id: 1, uuid: 'prompt-1', title: 'Local edit', updatedAt: '2026-01-03T00:00:00.000Z' }]
+    }
+    const remoteData = {
+      ...baseData,
+      prompts: [{ id: 9, uuid: 'prompt-1', title: 'Remote edit', updatedAt: '2026-01-02T00:00:00.000Z' }]
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(remoteData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot
+    }
+    const storage = new MemoryStorage()
+    const storageSetSpy = vi.spyOn(storage, 'setItem')
+      .mockImplementation((key: string, value: string) => {
+        if (key === 'ai_gist_cloud_sync_conflict_log') {
+          throw new Error('QuotaExceededError')
+        }
+        MemoryStorage.prototype.setItem.call(storage, key, value)
+      })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { service } = createService(localData, manifest, { storage })
+    storage.setItem('ai_gist_cloud_sync_state:cfg-1', JSON.stringify({
+      storageId: 'cfg-1',
+      deviceId: 'device-a',
+      lastSyncAt: '2026-01-01T00:00:00.000Z',
+      lastKnownRevision: 'rev-base',
+      baseSnapshot
+    }))
+
+    try {
+      const result = await service.syncNow('cfg-1')
+
+      expect(result.success).toBe(true)
+      expect(result.conflicts).toHaveLength(1)
+      expect(warnSpy).toHaveBeenCalledWith(
+        '同步冲突审计记录保存失败:',
+        expect.any(Error)
+      )
+      expect(storageSetSpy).toHaveBeenCalled()
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('does not throw when clearing conflict audit log storage is unavailable', async () => {
+    const storage = new MemoryStorage()
+    storage.setItem('ai_gist_cloud_sync_conflict_log', JSON.stringify([{
+      id: 'entry-1',
+      storageId: 'cfg-1',
+      detectedAt: '2026-01-01T00:00:00.000Z',
+      conflicts: []
+    }]))
+    const removeSpy = vi.spyOn(storage, 'removeItem')
+      .mockImplementation(() => {
+        throw new Error('QuotaExceededError')
+      })
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => undefined)
+    const { service } = createService(baseData, createEmptyCloudSyncManifest(), { storage })
+
+    try {
+      expect(() => service.clearConflictLog()).not.toThrow()
+      expect(removeSpy).toHaveBeenCalledWith('ai_gist_cloud_sync_conflict_log')
+      expect(warnSpy).toHaveBeenCalledWith(
+        '清空同步冲突审计记录失败:',
+        expect.any(Error)
+      )
+    } finally {
+      warnSpy.mockRestore()
+    }
+  })
+
+  it('automatically syncs enabled storage after local data changes', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25,
+      pollIntervalMs: 0,
+      retryMs: 0
+    })
+    dataChangeListener?.({
+      storeName: 'prompts',
+      action: 'update',
+      id: 1,
+      timestamp: Date.now(),
+      sourceId: 'test'
+    })
+
+    expect(service.getStatus().status).toBe('scheduled')
+
+    await vi.advanceTimersByTimeAsync(25)
+
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(service.getStatus()).toMatchObject({
+      status: 'success',
+      pending: false,
+      storageId: 'cfg-1'
+    })
+
+    service.stopAutoSync()
+  })
+
+  it('automatically syncs quick optimization config changes through the default event bus', async () => {
+    vi.useFakeTimers()
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25,
+      pollIntervalMs: 0,
+      retryMs: 0
+    })
+    emitDataChange({
+      storeName: 'quick_optimization_configs',
+      action: 'update',
+      id: 1
+    })
+
+    expect(service.getStatus().status).toBe('scheduled')
+
+    await vi.advanceTimersByTimeAsync(25)
+
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+
+    service.stopAutoSync()
+  })
+
+  it('uses a 15 minute remote polling interval by default', async () => {
+    vi.useFakeTimers()
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      retryMs: 0
+    })
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(cloudClient.saveCloudSyncManifest).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES * 60 * 1000 - 30_000)
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+
+    service.stopAutoSync()
+  })
+
+  it('syncs local changes after debounce without waiting for the remote polling interval', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const { service, cloudClient, database } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25,
+      retryMs: 0
+    })
+    await service.syncNow('cfg-1')
+    cloudClient.saveCloudSyncManifest.mockClear()
+    database.exportAllDataForSync.mockResolvedValue({
+      success: true,
+      message: 'ok',
+      data: {
+        ...baseData,
+        prompts: [{ id: 1, uuid: 'prompt-1', title: 'Local throttled edit', updatedAt: '2026-01-03T00:00:00.000Z' }]
+      }
+    })
+
+    dataChangeListener?.({
+      storeName: 'prompts',
+      action: 'update',
+      id: 1,
+      timestamp: Date.now(),
+      sourceId: 'test'
+    })
+
+    await vi.advanceTimersByTimeAsync(25)
+    expect(cloudClient.saveCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(service.getStatus()).toMatchObject({
+      status: 'success',
+      pending: false
+    })
+
+    service.stopAutoSync()
+  })
+
+  it('queues an automatic local-change sync when local data changes during a running sync', async () => {
+    vi.useFakeTimers()
+    const initialData = {
+      ...baseData,
+      prompts: [{ ...baseData.prompts[0], title: 'Before running sync' }]
+    }
+    const editedData = {
+      ...baseData,
+      prompts: [{ ...baseData.prompts[0], title: 'Edited during running sync', updatedAt: '2026-01-03T00:00:00.000Z' }]
+    }
+    let currentData = initialData
+    let cloudManifest: any = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    let releaseFirstSave!: () => void
+    let notifyFirstSaveStarted!: () => void
+    const firstSaveStarted = new Promise<void>(resolve => {
+      notifyFirstSaveStarted = resolve
+    })
+    const releaseFirstSavePromise = new Promise<void>(resolve => {
+      releaseFirstSave = resolve
+    })
+    let saveAttempts = 0
+    const { service, cloudClient, database } = createService(initialData, cloudManifest, {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      }
+    })
+    database.exportAllDataForSync.mockImplementation(async () => ({
+      success: true,
+      message: 'ok',
+      data: currentData
+    }))
+    cloudClient.getCloudSyncManifest.mockImplementation(async () => cloudManifest)
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (_storageId: string, manifest: any) => {
+      saveAttempts += 1
+      cloudManifest = manifest
+      if (saveAttempts === 1) {
+        notifyFirstSaveStarted()
+        await releaseFirstSavePromise
+      }
+
+      return { success: true }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 0,
+      pollIntervalMs: 0,
+      retryMs: 0,
+      storageIds: ['cfg-1']
+    })
+
+    const firstSync = service.syncNow('cfg-1', { reason: 'local-change' })
+    await firstSaveStarted
+    currentData = editedData
+    const queuedSync = service.syncNow('cfg-1', { reason: 'local-change' })
+    expect(saveAttempts).toBe(1)
+
+    releaseFirstSave()
+    await firstSync
+    await queuedSync
+    await vi.runOnlyPendingTimersAsync()
+    await vi.runOnlyPendingTimersAsync()
+
+    expect(saveAttempts).toBe(2)
+    expect(cloudClient.saveCloudSyncManifest.mock.calls[1][1].latestSnapshot.data.prompts)
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ title: 'Edited during running sync' })
+      ]))
+
+    service.stopAutoSync()
+  })
+
+  it('drops a queued automatic local-change sync when auto sync is stopped', async () => {
+    vi.useFakeTimers()
+    let currentData = {
+      ...baseData,
+      prompts: [{ ...baseData.prompts[0], title: 'Before stopped auto sync' }]
+    }
+    let cloudManifest: any = createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    let releaseFirstSave!: () => void
+    let notifyFirstSaveStarted!: () => void
+    const firstSaveStarted = new Promise<void>(resolve => {
+      notifyFirstSaveStarted = resolve
+    })
+    const releaseFirstSavePromise = new Promise<void>(resolve => {
+      releaseFirstSave = resolve
+    })
+    let saveAttempts = 0
+    const { service, cloudClient, database } = createService(currentData, cloudManifest, {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      }
+    })
+    database.exportAllDataForSync.mockImplementation(async () => ({
+      success: true,
+      message: 'ok',
+      data: currentData
+    }))
+    cloudClient.getCloudSyncManifest.mockImplementation(async () => cloudManifest)
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (_storageId: string, manifest: any) => {
+      saveAttempts += 1
+      cloudManifest = manifest
+      if (saveAttempts === 1) {
+        notifyFirstSaveStarted()
+        await releaseFirstSavePromise
+      }
+
+      return { success: true }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 0,
+      pollIntervalMs: 0,
+      retryMs: 0,
+      storageIds: ['cfg-1']
+    })
+
+    const firstSync = service.syncNow('cfg-1', { reason: 'local-change' })
+    await firstSaveStarted
+    currentData = {
+      ...baseData,
+      prompts: [{ ...baseData.prompts[0], title: 'Edited after auto sync stopped' }]
+    }
+    const queuedSync = service.syncNow('cfg-1', { reason: 'local-change' })
+    service.stopAutoSync()
+
+    releaseFirstSave()
+    await firstSync
+    await queuedSync
+    await vi.runOnlyPendingTimersAsync()
+
+    expect(saveAttempts).toBe(1)
+  })
+
+  it('backs off automatic retries after a transient cloud read failure', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+    cloudClient.getCloudSyncManifest.mockRejectedValue(new Error('ECONNRESET'))
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25
+    })
+    dataChangeListener?.({
+      storeName: 'prompts',
+      action: 'update',
+      id: 1,
+      timestamp: Date.now(),
+      sourceId: 'test'
+    })
+
+    await vi.advanceTimersByTimeAsync(25)
+    expect(cloudClient.getCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(service.getStatus()).toMatchObject({
+      status: 'error',
+      pending: true,
+      failureCount: 1
+    })
+
+    await vi.advanceTimersByTimeAsync(30_000)
+    expect(cloudClient.getCloudSyncManifest).toHaveBeenCalledTimes(1)
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES * 60 * 1000 - 30_000)
+    expect(cloudClient.getCloudSyncManifest).toHaveBeenCalledTimes(2)
+
+    service.stopAutoSync()
+  })
+
+  it('keeps retry status when focus triggers during retry backoff', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+    cloudClient.getCloudSyncManifest.mockRejectedValue(new Error('ECONNRESET'))
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25
+    })
+    dataChangeListener?.({
+      storeName: 'prompts',
+      action: 'update',
+      id: 1,
+      timestamp: Date.now(),
+      sourceId: 'test'
+    })
+
+    await vi.advanceTimersByTimeAsync(25)
+    const retryStatus = service.getStatus()
+
+    service.scheduleSync('focus', { delayMs: 0 })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(cloudClient.getCloudSyncManifest).toHaveBeenCalledTimes(1)
+    expect(service.getStatus()).toMatchObject({
+      status: 'error',
+      pending: true,
+      reason: 'local-change',
+      failureCount: 1
+    })
+    expect(service.getStatus().nextSyncAt).toBe(retryStatus.nextSyncAt)
+
+    service.stopAutoSync()
+  })
+
+  it('retries immediately when browser comes online during retry backoff', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+    cloudClient.getCloudSyncManifest.mockRejectedValueOnce(new Error('ECONNRESET'))
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25,
+      pollIntervalMs: 0,
+      retryMs: 60_000
+    })
+    dataChangeListener?.({
+      storeName: 'prompts',
+      action: 'update',
+      id: 1,
+      timestamp: Date.now(),
+      sourceId: 'test'
+    })
+
+    await vi.advanceTimersByTimeAsync(25)
+    expect(service.getStatus()).toMatchObject({
+      status: 'error',
+      pending: true,
+      failureCount: 1
+    })
+    const callsAfterFailure = cloudClient.getCloudSyncManifest.mock.calls.length
+
+    service.scheduleSync('online', { delayMs: 0 })
+    await vi.advanceTimersByTimeAsync(0)
+
+    expect(cloudClient.getCloudSyncManifest.mock.calls.length).toBeGreaterThan(callsAfterFailure)
+    expect(service.getStatus()).toMatchObject({
+      status: 'success',
+      pending: false,
+      failureCount: 0
+    })
+
+    const callsAfterOnlineRecovery = cloudClient.getCloudSyncManifest.mock.calls.length
+    await vi.advanceTimersByTimeAsync(60_000)
+    expect(cloudClient.getCloudSyncManifest).toHaveBeenCalledTimes(callsAfterOnlineRecovery)
+
+    service.stopAutoSync()
+  })
+
+  it('clears pending automatic retry after a manual sync succeeds', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+    cloudClient.getCloudSyncManifest.mockRejectedValueOnce(new Error('ECONNRESET'))
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25,
+      pollIntervalMs: 0,
+      retryMs: 1000
+    })
+    dataChangeListener?.({
+      storeName: 'prompts',
+      action: 'update',
+      id: 1,
+      timestamp: Date.now(),
+      sourceId: 'test'
+    })
+
+    await vi.advanceTimersByTimeAsync(25)
+    expect(service.getStatus()).toMatchObject({
+      status: 'error',
+      pending: true,
+      failureCount: 1
+    })
+
+    const manualResult = await service.syncNow('cfg-1', { reason: 'manual' })
+    expect(manualResult.success).toBe(true)
+    const callsAfterManualSync = cloudClient.getCloudSyncManifest.mock.calls.length
+
+    await vi.advanceTimersByTimeAsync(1000)
+
+    expect(cloudClient.getCloudSyncManifest).toHaveBeenCalledTimes(callsAfterManualSync)
+    expect(service.getStatus()).toMatchObject({
+      status: 'success',
+      pending: false
+    })
+
+    service.stopAutoSync()
+  })
+
+  it('surfaces storage config failures and retries instead of going idle', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const getStorageConfigs = vi.fn().mockRejectedValue(new Error('settings unavailable'))
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25
+    })
+    dataChangeListener?.({
+      storeName: 'prompts',
+      action: 'update',
+      id: 1,
+      timestamp: Date.now(),
+      sourceId: 'test'
+    })
+
+    await vi.advanceTimersByTimeAsync(25)
+    expect(getStorageConfigs).toHaveBeenCalledTimes(1)
+    expect(cloudClient.getCloudSyncManifest).not.toHaveBeenCalled()
+    expect(service.getStatus()).toMatchObject({
+      status: 'error',
+      pending: true,
+      failureCount: 1
+    })
+    expect(service.getStatus().error).toContain('获取自动同步存储配置失败')
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES * 60 * 1000)
+    expect(getStorageConfigs).toHaveBeenCalledTimes(2)
+
+    service.stopAutoSync()
+  })
+
+  it('retries only the storage that failed during automatic sync', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const secondConfig = {
+      ...enabledWebDAVConfig,
+      id: 'cfg-2',
+      name: 'Second WebDAV'
+    }
+    const manifests: Record<string, any> = {
+      'cfg-2': createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    }
+    const manifestReads: string[] = []
+    const { service, cloudClient } = createService(baseData, createEmptyCloudSyncManifest(), {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig, secondConfig])
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+    cloudClient.getCloudSyncManifest.mockImplementation(async (storageId: string) => {
+      manifestReads.push(storageId)
+      if (storageId === 'cfg-1') {
+        throw new Error('ECONNRESET')
+      }
+      return manifests[storageId] || createEmptyCloudSyncManifest('2026-01-01T00:00:00.000Z')
+    })
+    cloudClient.saveCloudSyncManifest.mockImplementation(async (storageId: string, manifest: any) => {
+      manifests[storageId] = manifest
+      return { success: true }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25
+    })
+    dataChangeListener?.({
+      storeName: 'prompts',
+      action: 'update',
+      id: 1,
+      timestamp: Date.now(),
+      sourceId: 'test'
+    })
+
+    await vi.advanceTimersByTimeAsync(25)
+    expect(manifestReads).toContain('cfg-1')
+    expect(manifestReads).toContain('cfg-2')
+    const cfg2ReadsAfterFirstRun = manifestReads.filter(storageId => storageId === 'cfg-2').length
+    expect(service.getStatus()).toMatchObject({
+      status: 'error',
+      pending: true,
+      storageId: 'cfg-1'
+    })
+
+    await vi.advanceTimersByTimeAsync(DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES * 60 * 1000)
+
+    expect(manifestReads.filter(storageId => storageId === 'cfg-1').length).toBeGreaterThan(1)
+    expect(manifestReads.filter(storageId => storageId === 'cfg-2')).toHaveLength(cfg2ReadsAfterFirstRun)
+
+    service.stopAutoSync()
+  })
+
+  it('does not schedule another upload from data changes emitted while applying remote data', async () => {
+    vi.useFakeTimers()
+    let dataChangeListener: ((change: any) => void) | undefined
+    const emptyLocalData = {
+      categories: [],
+      prompts: [],
+      promptVariables: [],
+      promptHistories: [],
+      aiConfigs: [],
+      quickOptimizationConfigs: [],
+      aiHistory: [],
+      settings: [],
+      syncTombstones: []
+    }
+    const remoteSnapshot = createCloudSyncSnapshot(baseData, 'device-b', 'rev-remote')
+    const manifest = {
+      ...createEmptyCloudSyncManifest('2026-01-02T00:00:00.000Z'),
+      latestSnapshot: remoteSnapshot,
+      baseSnapshot: remoteSnapshot
+    }
+    const { service, database } = createService(emptyLocalData, manifest, {
+      configClient: {
+        getStorageConfigs: vi.fn().mockResolvedValue([enabledWebDAVConfig])
+      },
+      subscribeToDataChanges: listener => {
+        dataChangeListener = listener
+        return vi.fn()
+      }
+    })
+    database.replaceAllData.mockImplementation(async () => {
+      dataChangeListener?.({
+        storeName: 'prompts',
+        action: 'create',
+        id: 1,
+        timestamp: Date.now(),
+        sourceId: 'test'
+      })
+      return {
+        success: true,
+        message: 'ok'
+      }
+    })
+
+    service.startAutoSync({
+      syncOnStart: false,
+      debounceMs: 25,
+      pollIntervalMs: 0,
+      retryMs: 0
+    })
+
+    const result = await service.syncNow('cfg-1')
+    expect(result.success).toBe(true)
+    expect(result.action).toBe('downloaded')
+
+    await vi.advanceTimersByTimeAsync(25)
+
+    expect(database.exportAllDataForSync).toHaveBeenCalledTimes(1)
+    expect(service.getStatus()).toMatchObject({
+      status: 'success',
+      pending: false
+    })
+
+    service.stopAutoSync()
+  })
+})

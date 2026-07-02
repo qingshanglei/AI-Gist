@@ -49,6 +49,7 @@ export interface Prompt {
   imageBlobs?: Blob[]; // 图片数据数组，支持多张图片
 
   shortcutKey?: string; // 快捷键组合
+  isShortcutTrigger?: boolean; // 是否作为全局快捷键触发提示词
   createdAt: Date;
   updatedAt: Date;
 }
@@ -169,6 +170,20 @@ export interface PromptHistory {
   version: number;
   changeDescription?: string; // 变更描述
   createdAt: Date;
+}
+
+/**
+ * 同步删除标记。
+ * 业务表仍然执行硬删除；同步层依靠 tombstone 将删除传播到其他设备。
+ */
+export interface SyncTombstone {
+  id?: number;
+  storeName: string;
+  collectionName: string;
+  recordKey: string;
+  recordUuid?: string;
+  deletedAt: Date;
+  recordSnapshot?: any;
 }
 
 /**

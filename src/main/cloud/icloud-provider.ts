@@ -4,7 +4,13 @@ import path from 'path';
 import os from 'os';
 
 // 本地模块导入
-import { CloudStorageProvider, CloudFileInfo, ICloudConfig } from '@shared/types/cloud-backup';
+import {
+  CloudStorageProvider,
+  CloudFileInfo,
+  CloudFileWriteOptions,
+  CloudFileWriteResult,
+  ICloudConfig
+} from '@shared/types/cloud-backup';
 
 /**
  * 常量定义
@@ -39,6 +45,7 @@ const CONSTANTS = {
     LIST_FILES_FAILED: 'iCloud Drive 列出文件失败',
     READ_FILE_FAILED: 'iCloud Drive 读取文件失败',
     WRITE_FILE_FAILED: 'iCloud Drive 写入文件失败',
+    WRITE_VERIFY_FAILED: 'iCloud Drive 写入后校验失败',
     DELETE_FILE_FAILED: 'iCloud Drive 删除文件失败',
     CREATE_DIRECTORY_FAILED: 'iCloud Drive 创建目录失败'
   },
@@ -93,7 +100,7 @@ export class ICloudProvider implements CloudStorageProvider {
     const platform = os.platform();
     const homedir = os.homedir();
     
-    console.log(CONSTANTS.LOG_MESSAGES.DETECTING_ICLOUD
+    this.debugLog(CONSTANTS.LOG_MESSAGES.DETECTING_ICLOUD
       .replace('{platform}', platform)
       .replace('{homedir}', homedir));
     
@@ -138,19 +145,19 @@ export class ICloudProvider implements CloudStorageProvider {
       const fsSync = await import('fs');
       
       for (const basePath of possiblePaths) {
-        console.log(CONSTANTS.LOG_MESSAGES.CHECKING_PATH.replace('{path}', basePath));
+        this.debugLog(CONSTANTS.LOG_MESSAGES.CHECKING_PATH.replace('{path}', basePath));
         
         if (fsSync.default.existsSync(basePath)) {
-          console.log(CONSTANTS.LOG_MESSAGES.PATH_EXISTS
+          this.debugLog(CONSTANTS.LOG_MESSAGES.PATH_EXISTS
             .replace('{platform}', 'macOS')
             .replace('{path}', basePath));
           return { available: true };
         } else {
-          console.log(CONSTANTS.LOG_MESSAGES.PATH_NOT_EXISTS.replace('{path}', basePath));
+          this.debugLog(CONSTANTS.LOG_MESSAGES.PATH_NOT_EXISTS.replace('{path}', basePath));
         }
       }
       
-      console.log(CONSTANTS.LOG_MESSAGES.MACOS_NOT_FOUND);
+      this.debugLog(CONSTANTS.LOG_MESSAGES.MACOS_NOT_FOUND);
       return { available: false, reason: CONSTANTS.ERROR_MESSAGES.MACOS_NOT_FOUND };
     } catch (error) {
       console.error(CONSTANTS.LOG_MESSAGES.DETECTION_FAILED
@@ -168,13 +175,13 @@ export class ICloudProvider implements CloudStorageProvider {
   private static async checkWindowsAvailability(homedir: string): Promise<{ available: boolean; reason?: string }> {
     const possiblePaths = CONSTANTS.ICLOUD_PATHS.WINDOWS.map(p => path.join(homedir, p));
     
-    console.log(CONSTANTS.LOG_MESSAGES.WINDOWS_PATHS.replace('{paths}', JSON.stringify(possiblePaths)));
+    this.debugLog(CONSTANTS.LOG_MESSAGES.WINDOWS_PATHS.replace('{paths}', JSON.stringify(possiblePaths)));
     
     for (const basePath of possiblePaths) {
       try {
         const fsSync = await import('fs');
         if (fsSync.default.existsSync(basePath)) {
-          console.log(CONSTANTS.LOG_MESSAGES.PATH_EXISTS
+          this.debugLog(CONSTANTS.LOG_MESSAGES.PATH_EXISTS
             .replace('{platform}', 'Windows')
             .replace('{path}', basePath));
           return { available: true };
@@ -187,7 +194,7 @@ export class ICloudProvider implements CloudStorageProvider {
       }
     }
     
-    console.log(CONSTANTS.LOG_MESSAGES.WINDOWS_NOT_FOUND);
+    this.debugLog(CONSTANTS.LOG_MESSAGES.WINDOWS_NOT_FOUND);
     return { available: false, reason: CONSTANTS.ERROR_MESSAGES.WINDOWS_NOT_FOUND };
   }
 
@@ -278,6 +285,22 @@ export class ICloudProvider implements CloudStorageProvider {
     return `${operation}失败: ${errorMessage}`;
   }
 
+  private static debugLog(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return;
+    }
+    console.debug(...args);
+  }
+
+  private static isDebugLoggingEnabled(): boolean {
+    return process.env.AI_GIST_DEBUG_CLOUD === '1' ||
+      (process.env.DEBUG || '').split(',').some(scope => scope.trim() === 'ai-gist:cloud');
+  }
+
+  private debugLog(...args: unknown[]): void {
+    ICloudProvider.debugLog(...args);
+  }
+
   // ==================== 公共方法 ====================
 
   /**
@@ -291,7 +314,7 @@ export class ICloudProvider implements CloudStorageProvider {
       
       // 确保目录存在
       await fs.mkdir(fullPath, { recursive: true });
-      console.log('iCloud Drive 目录初始化成功');
+      this.debugLog('iCloud Drive 目录初始化成功');
     } catch (error) {
       console.warn('iCloud Drive 目录初始化失败，可能目录已存在:', error);
       // 不抛出错误，因为目录可能已经存在
@@ -317,7 +340,7 @@ export class ICloudProvider implements CloudStorageProvider {
       
       return true;
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.CONNECTION_TEST_FAILED.replace('{error}', String(error)));
+      this.debugLog(CONSTANTS.LOG_MESSAGES.CONNECTION_TEST_FAILED.replace('{error}', String(error)));
       return false;
     }
   }
@@ -354,7 +377,7 @@ export class ICloudProvider implements CloudStorageProvider {
       
       return files;
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.LIST_FILES_FAILED.replace('{error}', String(error)));
+      this.debugLog(CONSTANTS.LOG_MESSAGES.LIST_FILES_FAILED.replace('{error}', String(error)));
       throw new Error(this.handleFileOperationError('列出文件', error));
     }
   }
@@ -370,7 +393,7 @@ export class ICloudProvider implements CloudStorageProvider {
       const fullPath = this.buildFullPath(basePath, filePath);
       return await fs.readFile(fullPath);
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.READ_FILE_FAILED.replace('{error}', String(error)));
+      this.debugLog(CONSTANTS.LOG_MESSAGES.READ_FILE_FAILED.replace('{error}', String(error)));
       throw new Error(this.handleFileOperationError('读取文件', error));
     }
   }
@@ -380,21 +403,26 @@ export class ICloudProvider implements CloudStorageProvider {
    * @param filePath 文件路径
    * @param data 文件数据
    */
-  async writeFile(filePath: string, data: Buffer): Promise<void> {
+  async writeFile(
+    filePath: string,
+    data: Buffer,
+    options: CloudFileWriteOptions = {}
+  ): Promise<CloudFileWriteResult> {
     try {
       const basePath = await this.getICloudBasePath();
       const fullPath = this.buildFullPath(basePath, filePath);
       const dirPath = path.dirname(fullPath);
       
-      // 确保目录存在（如果文件名包含路径）
-      if (dirPath !== this.buildFullPath(basePath)) {
-        await fs.mkdir(dirPath, { recursive: true });
-      }
-      
-      // 写入文件
-      await fs.writeFile(fullPath, data);
+      await fs.mkdir(dirPath, { recursive: true });
+
+      await this.assertConditionalWriteAllowed(fullPath, options);
+
+      const tempPath = `${fullPath}.tmp-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+      await fs.writeFile(tempPath, data);
+      await fs.rename(tempPath, fullPath);
+      return await this.verifyLocalWrite(fullPath, data);
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.WRITE_FILE_FAILED.replace('{error}', String(error)));
+      this.debugLog(CONSTANTS.LOG_MESSAGES.WRITE_FILE_FAILED.replace('{error}', String(error)));
       throw new Error(this.handleFileOperationError('写入文件', error));
     }
   }
@@ -409,7 +437,7 @@ export class ICloudProvider implements CloudStorageProvider {
       const fullPath = this.buildFullPath(basePath, filePath);
       await fs.unlink(fullPath);
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.DELETE_FILE_FAILED.replace('{error}', String(error)));
+      this.debugLog(CONSTANTS.LOG_MESSAGES.DELETE_FILE_FAILED.replace('{error}', String(error)));
       throw new Error(this.handleFileOperationError('删除文件', error));
     }
   }
@@ -436,8 +464,92 @@ export class ICloudProvider implements CloudStorageProvider {
       // 递归创建目录
       await fs.mkdir(fullPath, { recursive: true });
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.CREATE_DIRECTORY_FAILED.replace('{error}', String(error)));
+      this.debugLog(CONSTANTS.LOG_MESSAGES.CREATE_DIRECTORY_FAILED.replace('{error}', String(error)));
       throw new Error(this.handleFileOperationError('创建目录', error));
     }
+  }
+
+  async getFileInfo(filePath: string): Promise<CloudFileInfo | null> {
+    try {
+      const basePath = await this.getICloudBasePath();
+      const fullPath = this.buildFullPath(basePath, filePath);
+      const stats = await fs.stat(fullPath);
+      return {
+        name: path.basename(fullPath),
+        path: filePath,
+        size: stats.size,
+        isDirectory: stats.isDirectory(),
+        modifiedAt: stats.mtime.toISOString(),
+        etag: this.createLocalFileEtag(stats)
+      };
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? String((error as { code?: string }).code || '')
+        : '';
+      if (code === 'ENOENT') {
+        return null;
+      }
+      throw error;
+    }
+  }
+
+  private async assertConditionalWriteAllowed(
+    filePath: string,
+    options: CloudFileWriteOptions
+  ): Promise<void> {
+    if (!options.ifMatch && !options.ifNoneMatch) {
+      return;
+    }
+
+    let stats: Awaited<ReturnType<typeof fs.stat>> | null = null;
+    try {
+      stats = await fs.stat(filePath);
+    } catch (error) {
+      const code = typeof error === 'object' && error !== null && 'code' in error
+        ? String((error as { code?: string }).code || '')
+        : '';
+      if (code !== 'ENOENT') {
+        throw error;
+      }
+    }
+
+    if (options.ifNoneMatch && stats) {
+      throw new Error('远端文件已存在，取消覆盖写入');
+    }
+
+    if (options.ifMatch) {
+      if (!stats || this.createLocalFileEtag(stats) !== options.ifMatch) {
+        throw new Error('远端文件已被其他设备更新，取消覆盖写入');
+      }
+    }
+  }
+
+  private async verifyLocalWrite(filePath: string, expectedData: Buffer): Promise<CloudFileWriteResult> {
+    try {
+      const stats = await fs.stat(filePath);
+      if (!stats.isFile()) {
+        throw new Error('目标路径不是文件');
+      }
+
+      if (stats.size !== expectedData.length) {
+        throw new Error(`文件大小不一致，期望 ${expectedData.length}，实际 ${stats.size}`);
+      }
+
+      const writtenData = await fs.readFile(filePath);
+      if (Buffer.compare(writtenData, expectedData) !== 0) {
+        throw new Error('文件内容与写入数据不一致');
+      }
+
+      return {
+        etag: this.createLocalFileEtag(stats),
+        modifiedAt: stats.mtime.toISOString()
+      };
+    } catch (error) {
+      throw new Error(`${CONSTANTS.ERROR_MESSAGES.WRITE_VERIFY_FAILED}: ${this.handleFileOperationError('校验文件', error)}`);
+    }
+  }
+
+  private createLocalFileEtag(stats: Awaited<ReturnType<typeof fs.stat>>): string {
+    return `local-${String(stats.size)}-${Math.floor(Number(stats.mtimeMs))}`;
   }
 } 

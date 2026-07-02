@@ -228,8 +228,9 @@ const loadConfigs = async () => {
     // 直接从已加载的启用列表中查找首选配置，避免二次 DB 查询与列表数据不一致
     // （单独调用 getPreferredAIConfig 可能因 enabled 字段类型差异返回不在列表中的配置）
     const preferred = result.find(c => c.isPreferred) ?? result[0]
-    if (preferred?.defaultModel) {
-      selectedModelKey.value = `${preferred.configId}:${preferred.defaultModel}`
+    const preferredModel = preferred ? getConfigModels(preferred)[0] : ''
+    if (preferred?.configId && preferredModel) {
+      selectedModelKey.value = `${preferred.configId}:${preferredModel}`
       selectedConfigName.value = preferred.name
     }
   } catch (error) {
@@ -270,10 +271,8 @@ const generatePrompt = async () => {
     const selectedConfig = configs.value.find(c => c.configId === configId)
 
     if (!selectedConfig) {
-      throw new Error('未找到选中的配置')
+      throw new Error(t('aiConfig.configNotFound'))
     }
-
-    console.log('生成请求参数:', { configId, model, topic: formData.topic })
 
     const request = {
       configId: selectedConfig.configId,
@@ -336,10 +335,12 @@ const savePrompt = async () => {
 
   try {
     const promptData = {
-      title: `AI生成: ${generatedTopic.value || '提示词生成'}`,
+      title: t('aiGenerator.generatedPromptTitle', {
+        topic: generatedTopic.value || t('aiGenerator.generatedPromptFallbackTopic')
+      }),
       content: generatedResult.value,
       description: '',
-      tags: ['AI生成'],
+      tags: [t('aiGenerator.generatedPromptTag')],
       categoryId: undefined,
       isFavorite: false,
       useCount: 0,
@@ -364,10 +365,10 @@ const savePrompt = async () => {
 const saveGeneratedPrompt = async (result: any) => {
   try {
     const promptData = {
-      title: `AI生成: ${result.topic}`,
+      title: t('aiGenerator.generatedPromptTitle', { topic: result.topic }),
       content: result.generatedPrompt,
       description: '',
-      tags: ['AI生成'],
+      tags: [t('aiGenerator.generatedPromptTag')],
       categoryId: undefined,
       isFavorite: false,
       useCount: 0,

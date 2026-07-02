@@ -24,7 +24,7 @@ export const AI_PROVIDER_METADATA: Record<AIProviderType, AIProviderMetadata> = 
       'gpt-5.4-nano',
       'gpt-4.1',
       'gpt-4.1-mini',
-      'gpt-4o',
+      'gpt-4.1-nano',
       'gpt-4o-mini'
     ],
     testModelPriority: ['gpt-5.5', 'gpt-5.4-mini', 'gpt-4.1-mini', 'gpt-4o-mini']
@@ -57,6 +57,7 @@ export const AI_PROVIDER_METADATA: Record<AIProviderType, AIProviderMetadata> = 
       'claude-opus-4-7',
       'claude-sonnet-4-6',
       'claude-haiku-4-5',
+      'claude-opus-4-5',
       'claude-sonnet-4-5',
       'claude-3-5-sonnet-20241022'
     ],
@@ -69,14 +70,13 @@ export const AI_PROVIDER_METADATA: Record<AIProviderType, AIProviderMetadata> = 
     apiKeyUrl: 'https://aistudio.google.com/app/apikey',
     docUrl: 'https://ai.google.dev/gemini-api/docs',
     defaultModels: [
-      'gemini-3.1-pro',
-      'gemini-3.1-flash',
       'gemini-3-pro-preview',
       'gemini-3-flash-preview',
       'gemini-2.5-pro',
-      'gemini-2.5-flash'
+      'gemini-2.5-flash',
+      'gemini-2.5-flash-lite'
     ],
-    testModelPriority: ['gemini-3.1-flash', 'gemini-3-flash-preview', 'gemini-2.5-flash']
+    testModelPriority: ['gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-2.5-flash-lite']
   },
   azure: {
     type: 'azure',
@@ -89,6 +89,7 @@ export const AI_PROVIDER_METADATA: Record<AIProviderType, AIProviderMetadata> = 
       'gpt-5.4',
       'gpt-5.4-mini',
       'gpt-4.1',
+      'gpt-4.1-mini',
       'gpt-4o'
     ],
     testModelPriority: ['gpt-5.4-mini', 'gpt-4.1-mini', 'gpt-4o-mini']
@@ -96,16 +97,14 @@ export const AI_PROVIDER_METADATA: Record<AIProviderType, AIProviderMetadata> = 
   deepseek: {
     type: 'deepseek',
     displayName: 'DeepSeek',
-    defaultBaseURL: 'https://api.deepseek.com/v1',
+    defaultBaseURL: 'https://api.deepseek.com',
     apiKeyUrl: 'https://platform.deepseek.com/api_keys',
     docUrl: 'https://api-docs.deepseek.com/',
     defaultModels: [
       'deepseek-v4-flash',
-      'deepseek-v4-pro',
-      'deepseek-chat',
-      'deepseek-reasoner'
+      'deepseek-v4-pro'
     ],
-    testModelPriority: ['deepseek-v4-flash', 'deepseek-chat']
+    testModelPriority: ['deepseek-v4-flash', 'deepseek-v4-pro']
   },
   mistral: {
     type: 'mistral',
@@ -114,14 +113,14 @@ export const AI_PROVIDER_METADATA: Record<AIProviderType, AIProviderMetadata> = 
     apiKeyUrl: 'https://console.mistral.ai/api-keys/',
     docUrl: 'https://docs.mistral.ai/',
     defaultModels: [
+      'mistral-medium-3.5',
       'mistral-large-latest',
-      'mistral-medium-latest',
-      'mistral-small-latest',
+      'mistral-small-4',
       'magistral-medium-latest',
       'codestral-latest',
       'ministral-8b-latest'
     ],
-    testModelPriority: ['mistral-small-latest', 'mistral-medium-latest', 'mistral-large-latest']
+    testModelPriority: ['mistral-small-4', 'mistral-medium-3.5', 'mistral-large-latest']
   },
   siliconflow: {
     type: 'siliconflow',
@@ -140,17 +139,20 @@ export const AI_PROVIDER_METADATA: Record<AIProviderType, AIProviderMetadata> = 
   },
   tencent: {
     type: 'tencent',
-    displayName: '腾讯云',
-    defaultBaseURL: 'https://api.hunyuan.cloud.tencent.com/v1',
-    apiKeyUrl: 'https://console.cloud.tencent.com/hunyuan',
-    docUrl: 'https://cloud.tencent.com/document/product/1729',
+    displayName: '腾讯云 TokenHub',
+    defaultBaseURL: 'https://tokenhub.tencentmaas.com/v1',
+    apiKeyUrl: 'https://console.cloud.tencent.com/tokenhub',
+    docUrl: 'https://cloud.tencent.com/document/product/1823',
     defaultModels: [
-      'hunyuan-turbos-latest',
-      'hunyuan-turbo-latest',
-      'hunyuan-large',
-      'hunyuan-standard'
+      'hy3-preview',
+      'deepseek-v4-flash',
+      'deepseek-v4-pro',
+      'glm-5.1',
+      'kimi-k2.6',
+      'minimax-m2.7',
+      'hunyuan-role-latest'
     ],
-    testModelPriority: ['hunyuan-turbos-latest', 'hunyuan-turbo-latest']
+    testModelPriority: ['hy3-preview', 'deepseek-v4-flash', 'glm-5.1']
   },
   aliyun: {
     type: 'aliyun',
@@ -159,14 +161,15 @@ export const AI_PROVIDER_METADATA: Record<AIProviderType, AIProviderMetadata> = 
     apiKeyUrl: 'https://bailian.console.aliyun.com/',
     docUrl: 'https://help.aliyun.com/zh/model-studio/',
     defaultModels: [
-      'qwen-max-latest',
-      'qwen-plus-latest',
+      'qwen3.7-max',
+      'qwen3.6-plus',
+      'qwen3.6-flash',
       'qwen-turbo-latest',
-      'qwen3-max',
-      'qwen3-plus',
-      'qwen3-coder-plus'
+      'qwen3-coder-plus',
+      'qwen-long-latest',
+      'qwq-plus-latest'
     ],
-    testModelPriority: ['qwen-turbo-latest', 'qwen-plus-latest', 'qwen3-plus']
+    testModelPriority: ['qwen3.6-flash', 'qwen-turbo-latest', 'qwen3.6-plus']
   },
   zhipu: {
     type: 'zhipu',
@@ -178,11 +181,12 @@ export const AI_PROVIDER_METADATA: Record<AIProviderType, AIProviderMetadata> = 
       'glm-5.1',
       'glm-5',
       'glm-5-turbo',
+      'glm-5v-turbo',
       'glm-4.7',
       'glm-4.6',
-      'glm-4'
+      'glm-4-flash-250414'
     ],
-    testModelPriority: ['glm-5.1', 'glm-5-turbo', 'glm-4.6', 'glm-4']
+    testModelPriority: ['glm-5.1', 'glm-5-turbo', 'glm-4-flash-250414']
   },
   openrouter: {
     type: 'openrouter',
@@ -194,7 +198,7 @@ export const AI_PROVIDER_METADATA: Record<AIProviderType, AIProviderMetadata> = 
       'openai/gpt-5.5',
       'openai/gpt-5.4-mini',
       'anthropic/claude-sonnet-4.6',
-      'google/gemini-3.1-pro',
+      'google/gemini-3-pro-preview',
       'mistralai/mistral-large-latest',
       'deepseek/deepseek-v4-flash',
       'openai/gpt-4o-mini'

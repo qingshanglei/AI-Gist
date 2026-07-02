@@ -36,6 +36,14 @@
                                         </template>
                                         {{ t('cloudBackup.refreshBackupList') }}
                                     </NButton>
+                                    <NButton secondary @click="syncCloudData(config.id)" :loading="loading.syncNow">
+                                        <template #icon>
+                                            <NIcon>
+                                                <Refresh />
+                                            </NIcon>
+                                        </template>
+                                        立即同步
+                                    </NButton>
                                 </NFlex>
 
                                 <!-- 云端备份列表 -->
@@ -130,13 +138,43 @@
 
             <NDivider v-if="storageConfigs.length > 0" />
 
+            <!-- 自动同步设置 -->
+            <div>
+                <NFlex vertical :size="12">
+                    <NText depth="2">自动同步</NText>
+                    <NText depth="3" style="font-size: 12px;">
+                        应用会按这个周期检查云端变化；本机变更也会遵守同一节流周期，避免反复连接云存储。
+                    </NText>
+                    <NFlex align="center" :size="12">
+                        <NInputNumber
+                            v-model:value="syncIntervalMinutes"
+                            :min="MIN_CLOUD_SYNC_INTERVAL_MINUTES"
+                            :max="MAX_CLOUD_SYNC_INTERVAL_MINUTES"
+                            :step="5"
+                            style="width: 180px;"
+                        >
+                            <template #suffix>分钟</template>
+                        </NInputNumber>
+                        <NButton
+                            secondary
+                            @click="saveSyncInterval"
+                            :loading="loading.saveSyncInterval"
+                        >
+                            保存频率
+                        </NButton>
+                    </NFlex>
+                </NFlex>
+            </div>
+
+            <NDivider />
+
             <!-- 存储配置管理 -->
             <div>
                 <NFlex vertical :size="16">
                     <NFlex vertical :size="12">
                         <NText depth="2">{{ t('cloudBackup.storageConfiguration') }}</NText>
                         <NText depth="3" style="font-size: 12px;">
-                            {{ t('cloudBackup.storageDescription') }}
+                            {{ storageDescriptionText }}
                         </NText>
 
                         <NFlex :size="12">
@@ -233,7 +271,7 @@
                     <NFormItem label="存储类型" path="type">
                         <NRadioGroup v-model:value="configForm.type" @update:value="handleTypeChange">
                             <NRadio value="webdav">WebDAV</NRadio>
-                            <NRadio value="icloud">iCloud Drive</NRadio>
+                            <NRadio v-if="capabilities.icloud" value="icloud">iCloud Drive</NRadio>
                         </NRadioGroup>
                     </NFormItem>
 
@@ -290,6 +328,53 @@
                 </NFlex>
             </NFlex>
         </NModal>
+
+        <NModal v-model:show="syncErrorDialogVisible" preset="card" style="width: min(680px, calc(100vw - 32px));"
+            title="云同步错误详情">
+            <NFlex v-if="syncErrorDiagnosis" vertical :size="16">
+                <NAlert type="error" :title="syncErrorDiagnosis.title">
+                    <template #icon>
+                        <NIcon>
+                            <AlertTriangle />
+                        </NIcon>
+                    </template>
+                    {{ syncErrorDiagnosis.message }}
+                </NAlert>
+
+                <NFlex vertical :size="8">
+                    <NText depth="2">建议操作</NText>
+                    <ul class="sync-error-action-list">
+                        <li v-for="action in syncErrorDiagnosis.suggestedActions" :key="action">{{ action }}</li>
+                    </ul>
+                </NFlex>
+
+                <NFlex vertical :size="8">
+                    <NText depth="2">完整错误详情</NText>
+                    <NInput :value="syncErrorDiagnosis.copyText" type="textarea" readonly :autosize="{ minRows: 8, maxRows: 14 }" />
+                </NFlex>
+
+                <NFlex justify="end" :size="12">
+                    <NButton @click="syncErrorDialogVisible = false">关闭</NButton>
+                    <NButton secondary @click="copySyncErrorDetails">
+                        <template #icon>
+                            <NIcon>
+                                <Copy />
+                            </NIcon>
+                        </template>
+                        复制详情
+                    </NButton>
+                    <NButton type="primary" @click="retrySyncFromDialog" :loading="loading.syncNow"
+                        :disabled="!syncErrorStorageId">
+                        <template #icon>
+                            <NIcon>
+                                <Refresh />
+                            </NIcon>
+                        </template>
+                        重新同步
+                    </NButton>
+                </NFlex>
+            </NFlex>
+        </NModal>
     </NCard>
 </template>
 
@@ -310,6 +395,7 @@ import {
     NForm,
     NFormItem,
     NInput,
+    NInputNumber,
     NRadioGroup,
     NRadio,
     NSwitch,
@@ -326,26 +412,44 @@ import {
     Refresh,
     Recharging,
     Wifi,
+    Copy,
+    AlertTriangle,
 } from "@vicons/tabler";
 import { ref, computed, onMounted, watch } from "vue";
 import { useI18n } from 'vue-i18n';
 import { CloudBackupAPI } from "@/lib/api/cloud-backup.api";
+import { PlatformDetector } from "@shared/platform";
+import {
+    cloudSyncService,
+    DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES,
+    MAX_CLOUD_SYNC_INTERVAL_MINUTES,
+    MIN_CLOUD_SYNC_INTERVAL_MINUTES,
+    getCloudSyncResultMessage,
+    getCloudSyncErrorDiagnosis,
+} from "@/lib/services/cloud-sync.service";
 import type { CloudStorageConfig, CloudBackupInfo } from "@shared/types/cloud-backup";
 
 const message = useMessage();
 const { t } = useI18n();
+const capabilities = PlatformDetector.getCapabilities();
 
 // 响应式数据
 const storageConfigs = ref<CloudStorageConfig[]>([]);
 const cloudBackups = ref<CloudBackupInfo[]>([]);
+const syncIntervalMinutes = ref(DEFAULT_CLOUD_SYNC_INTERVAL_MINUTES);
 const activeTabKey = ref<string>('');
 const showConfigModal = ref(false);
+const syncErrorDialogVisible = ref(false);
+const syncErrorStorageId = ref('');
+const syncErrorDiagnosis = ref<ReturnType<typeof getCloudSyncErrorDiagnosis> | null>(null);
 const iCloudAvailability = ref<{ available: boolean; reason?: string } | null>(null);
 const loading = ref({
     saveConfig: false,
     createBackup: false,
     restoreBackup: false,
     refreshList: false,
+    syncNow: false,
+    saveSyncInterval: false,
     checkICloud: false,
 });
 
@@ -428,6 +532,12 @@ const canSaveICloudConfig = computed(() => {
     return iCloudAvailability.value?.available !== false;
 });
 
+const storageDescriptionText = computed(() => {
+    return capabilities.icloud
+        ? t('cloudBackup.storageDescription')
+        : t('cloudBackup.webdavOnlyStorageDescription');
+});
+
 // 分页相关计算属性
 const getPaginatedBackups = (storageId: string) => {
     const backups = cloudBackups.value.filter(backup => backup.storageId === storageId);
@@ -466,6 +576,11 @@ const getAutoGeneratedName = () => {
 };
 
 const checkICloudAvailability = async () => {
+    if (!capabilities.icloud) {
+        iCloudAvailability.value = { available: false, reason: '当前平台不支持 iCloud Drive' };
+        return;
+    }
+
     loading.value.checkICloud = true;
     try {
         console.log('开始检测 iCloud 可用性...');
@@ -497,6 +612,23 @@ const loadStorageConfigs = async () => {
     } catch (error) {
         console.error('加载存储配置失败:', error);
         message.error('加载存储配置失败');
+    }
+};
+
+const loadSyncInterval = async () => {
+    syncIntervalMinutes.value = await cloudSyncService.getAutoSyncIntervalMinutes();
+};
+
+const saveSyncInterval = async () => {
+    loading.value.saveSyncInterval = true;
+    try {
+        syncIntervalMinutes.value = await cloudSyncService.setAutoSyncIntervalMinutes(syncIntervalMinutes.value);
+        message.success(`自动同步频率已设为 ${syncIntervalMinutes.value} 分钟`);
+    } catch (error) {
+        console.error('保存自动同步频率失败:', error);
+        message.error('保存自动同步频率失败');
+    } finally {
+        loading.value.saveSyncInterval = false;
     }
 };
 
@@ -574,6 +706,12 @@ const saveConfig = async () => {
             message.success(configForm.value.id ? '配置更新成功' : '配置添加成功');
             showConfigModal.value = false;
             await loadStorageConfigs();
+            if (result.config?.enabled) {
+                cloudSyncService.scheduleSync('config-change', {
+                    storageId: result.config.id,
+                    delayMs: 0
+                });
+            }
         } else {
             message.error(result.error || '操作失败');
         }
@@ -690,6 +828,64 @@ const createCloudBackup = async (storageId?: string) => {
     } finally {
         loading.value.createBackup = false;
     }
+};
+
+const syncCloudData = async (storageId?: string) => {
+    const targetStorageId = storageId || activeTabKey.value;
+    if (!targetStorageId) return;
+
+    loading.value.syncNow = true;
+    try {
+        const result = await cloudSyncService.syncNow(targetStorageId, {
+            platform: PlatformDetector.getPlatform(),
+            reason: 'manual'
+        });
+
+        if (result.success) {
+            message.success(getCloudSyncResultMessage(result.action, result.conflicts.length));
+        } else {
+            const diagnosis = showSyncErrorDetails(result.error, targetStorageId);
+            message.error(diagnosis.message);
+        }
+    } catch (error) {
+        console.error('云同步失败:', error);
+        const diagnosis = showSyncErrorDetails(error instanceof Error ? error.message : String(error), targetStorageId);
+        message.error(diagnosis.message);
+    } finally {
+        loading.value.syncNow = false;
+    }
+};
+
+const showSyncErrorDetails = (error: string | undefined, storageId: string) => {
+    const diagnosis = getCloudSyncErrorDiagnosis(error, {
+        storageId,
+        reason: 'manual',
+        status: 'error',
+        timestamp: new Date().toISOString()
+    });
+    syncErrorStorageId.value = storageId;
+    syncErrorDiagnosis.value = diagnosis;
+    syncErrorDialogVisible.value = true;
+    return diagnosis;
+};
+
+const copySyncErrorDetails = async () => {
+    if (!syncErrorDiagnosis.value) return;
+
+    try {
+        await navigator.clipboard.writeText(syncErrorDiagnosis.value.copyText);
+        message.success('错误详情已复制');
+    } catch {
+        message.error('复制错误详情失败');
+    }
+};
+
+const retrySyncFromDialog = async () => {
+    const storageId = syncErrorStorageId.value;
+    if (!storageId) return;
+
+    syncErrorDialogVisible.value = false;
+    await syncCloudData(storageId);
 };
 
 const restoreCloudBackup = async (storageId: string, backupId: string) => {
@@ -821,6 +1017,7 @@ watch(activeTabKey, async (newTabKey) => {
 onMounted(async () => {
     await Promise.all([
         loadStorageConfigs(),
+        loadSyncInterval(),
         checkICloudAvailability()
     ]);
 });
@@ -834,4 +1031,13 @@ onMounted(async () => {
     padding-top: 12px;
     border-top: 1px solid var(--border-color);
 }
+
+.sync-error-action-list {
+    margin: 0;
+    padding-left: 20px;
+    color: var(--text-color-2);
+    font-size: 13px;
+    line-height: 1.6;
+}
+
 </style>

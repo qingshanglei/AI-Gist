@@ -1,0 +1,62 @@
+html.ai-gist-mobile {
+  --mobile-tabbar-height: 64px;
+  --mobile-page-gutter: 16px;
+  --mobile-touch-target: 44px;
+  --mobile-surface-border: rgb(17 24 39 / 10%);
+  --mobile-elevated-shadow: 0 12px 32px rgb(15 23 42 / 12%);
+  --ion-font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto, sans-serif;
+}
+
+html.ai-gist-mobile.ion-palette-dark {
+  --mobile-surface-border: rgb(255 255 255 / 12%);
+  --mobile-elevated-shadow: 0 14px 34px rgb(0 0 0 / 28%);
+}
+
+body.ai-gist-mobile {
+  overscroll-behavior-y: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+html.ai-gist-mobile ion-content {
+  --padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 20px);
+}
+
+html.ai-gist-mobile ion-toolbar {
+  --min-height: 52px;
+}
+
+html.ai-gist-mobile ion-title {
+  font-weight: 650;
+}
+
+html.ai-gist-mobile ion-item {
+  --min-height: var(--mobile-touch-target);
+}
+
+html.ai-gist-mobile ion-tab-bar {
+  min-height: calc(var(--mobile-tabbar-height) + env(safe-area-inset-bottom, 0px));
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+html.ai-gist-mobile ion-tab-button {
+  min-height: var(--mobile-tabbar-height);
+}
+
+html.ai-gist-mobile ion-fab[vertical="bottom"][horizontal="end"] {
+  right: var(--mobile-page-gutter);
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 76px);
+}
+
+html.ai-gist-mobile ion-fab-button {
+  --box-shadow: var(--mobile-elevated-shadow);
+}
+
+html.ai-gist-mobile ion-modal ion-content {
+  --padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 24px);
+}
+
+html.ai-gist-mobile ion-searchbar {
+  --box-shadow: none;
+  padding-inline-start: 12px;
+  padding-inline-end: 12px;
+}

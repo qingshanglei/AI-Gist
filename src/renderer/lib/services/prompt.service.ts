@@ -202,16 +202,6 @@ export class PromptService extends BaseDatabaseService {
     }    // 计算总数
     const total = filteredPrompts.length;
     
-    // 调试信息
-    console.log('getAllPrompts debug:', {
-      filters,
-      totalPrompts: prompts.length,
-      filteredPromptsLength: filteredPrompts.length,
-      total,
-      page: filters?.page,
-      limit: filters?.limit
-    });
-
     // 应用分页
     let paginatedPrompts = filteredPrompts;
     if (filters?.page && filters?.limit) {
@@ -618,6 +608,25 @@ export class PromptService extends BaseDatabaseService {
   }
 
   /**
+   * 获取所有提示词变量
+   * 用于备份和云同步导出独立变量集合，避免提示词变量元数据丢失。
+   */
+  async getAllPromptVariables(): Promise<PromptVariable[]> {
+    return this.getAll<PromptVariable>('promptVariables');
+  }
+
+  /**
+   * 从备份数据创建提示词变量
+   * 保留 UUID，便于跨设备同步时稳定识别同一变量。
+   */
+  async createPromptVariableFromBackup(data: Omit<PromptVariable, 'id'>): Promise<PromptVariable> {
+    return this.add<PromptVariable>('promptVariables', {
+      ...data,
+      uuid: data.uuid || generateUUID()
+    });
+  }
+
+  /**
    * 删除提示词变量
    * 删除指定的变量定义
    * @param id number 变量ID
@@ -655,6 +664,49 @@ export class PromptService extends BaseDatabaseService {
         });
       };
       request.onerror = () => reject(request.error);
+    });
+  }
+
+  /**
+   * 创建备份恢复用的提示词历史记录，保留原 UUID 和创建时间。
+   * @param history PromptHistory 去除 id 后的历史记录数据
+   * @returns Promise<PromptHistory> 创建的历史记录
+   */
+  async createPromptHistoryFromBackup(history: Omit<PromptHistory, 'id'>): Promise<PromptHistory> {
+    if (!this.db) throw new Error('Database not initialized');
+
+    const transaction = this.db.transaction(['promptHistories'], 'readwrite');
+    const store = transaction.objectStore('promptHistories');
+
+    const historyToStore = {
+      ...history,
+      uuid: history.uuid || generateUUID(),
+      createdAt: history.createdAt ? new Date(history.createdAt) : new Date()
+    };
+
+    const request = store.add(historyToStore);
+
+    return new Promise((resolve, reject) => {
+      request.onsuccess = () => {
+        resolve({
+          ...historyToStore,
+          id: request.result as number
+        });
+      };
+      request.onerror = () => reject(request.error);
+    });
+  }
+
+  /**
+   * 获取所有提示词历史记录，用于完整备份。
+   */
+  async getAllPromptHistories(): Promise<PromptHistory[]> {
+    const histories = await this.getAll<PromptHistory>('promptHistories');
+    return histories.sort((a, b) => {
+      if (a.promptId !== b.promptId) {
+        return a.promptId - b.promptId;
+      }
+      return b.version - a.version;
     });
   }
 
@@ -711,16 +763,8 @@ export class PromptService extends BaseDatabaseService {
    * @returns Promise<boolean> 删除是否成功
    */
   async deletePromptHistory(id: number): Promise<boolean> {
-    if (!this.db) throw new Error('Database not initialized');
-
-    const transaction = this.db.transaction(['promptHistories'], 'readwrite');
-    const store = transaction.objectStore('promptHistories');
-    const request = store.delete(id);
-
-    return new Promise((resolve, reject) => {
-      request.onsuccess = () => resolve(true);
-      request.onerror = () => reject(request.error);
-    });
+    await this.delete('promptHistories', id);
+    return true;
   }
 
   /**
@@ -1004,49 +1048,7 @@ export class PromptService extends BaseDatabaseService {
    * 不触发同步的批量删除方法（内部使用）
    */
   private async batchDeleteWithoutSync(storeName: string, ids: number[]): Promise<{ success: number; failed: number; errors: string[] }> {
-    let success = 0;
-    let failed = 0;
-    const errors: string[] = [];
-
-    const db = await this.ensureDB();
-
-    // 使用事务进行批量操作
-    return new Promise((resolve) => {
-      const transaction = db.transaction([storeName], 'readwrite');
-      const store = transaction.objectStore(storeName);
-      
-      let completed = 0;
-      const total = ids.length;
-
-      if (total === 0) {
-        resolve({ success: 0, failed: 0, errors: [] });
-        return;
-      }
-
-      // 批量删除所有记录
-      ids.forEach(id => {
-        const request = store.delete(id);
-        
-        request.onsuccess = () => {
-          success++;
-          completed++;
-          
-          if (completed === total) {
-            resolve({ success, failed, errors });
-          }
-        };
-
-        request.onerror = () => {
-          failed++;
-          errors.push(`删除记录 ${id} 失败: ${request.error?.message || '未知错误'}`);
-          completed++;
-          
-          if (completed === total) {
-            resolve({ success, failed, errors });
-          }
-        };
-      });
-    });
+    return this.batchDeleteSilently(storeName, ids);
   }
 
   /**

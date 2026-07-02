@@ -96,6 +96,8 @@ export interface AIConfigTestResult {
   error?: string;
   message?: string;
   models?: string[];
+  modelSource?: 'remote' | 'default' | 'unavailable';
+  modelListMessage?: string;
   response?: string;
 }
 

@@ -162,6 +162,7 @@ import {
 } from 'naive-ui';
 import { Refresh, Bug, Bulb, MessageCircle } from '@vicons/tabler';
 import { useUpdate } from '~/composables/useUpdate';
+import { openExternalUrl } from '~/lib/platform/shell';
 
 const { t } = useI18n();
 
@@ -215,27 +216,24 @@ const handleOpenDownloadPage = async () => {
 
 // 打开 GitHub 仓库
 const openGitHub = async () => {
-    try {
-        await window.electronAPI.app.openDownloadPage('https://github.com/yarin-zhang/AI-Gist');
-    } catch (error) {
+    const result = await openExternalUrl('https://github.com/yarin-zhang/AI-Gist');
+    if (!result.success) {
         message.error('打开 GitHub 失败');
     }
 };
 
 // 打开问题报告页面
 const openIssues = async () => {
-    try {
-        await window.electronAPI.app.openDownloadPage('https://github.com/yarin-zhang/AI-Gist/issues');
-    } catch (error) {
+    const result = await openExternalUrl('https://github.com/yarin-zhang/AI-Gist/issues');
+    if (!result.success) {
         message.error('打开页面失败');
     }
 };
 
 // 打开功能建议页面
 const openFeatureRequest = async () => {
-    try {
-        await window.electronAPI.app.openDownloadPage('https://github.com/yarin-zhang/AI-Gist/issues/new?template=feature_request.md');
-    } catch (error) {
+    const result = await openExternalUrl('https://github.com/yarin-zhang/AI-Gist/issues/new?template=feature_request.md');
+    if (!result.success) {
         message.error('打开页面失败');
     }
 };
@@ -245,7 +243,7 @@ onMounted(async () => {
     await initVersion();
 
     // 监听更新通知
-    window.electronAPI.app.onUpdateAvailable((info: any) => {
+    window.electronAPI?.app?.onUpdateAvailable?.((info: any) => {
         message.info(`发现新版本 ${info.latestVersion}！`);
     });
 });

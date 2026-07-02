@@ -1,5 +1,6 @@
 import { AIConfig, AIGenerationRequest, AIGenerationResult } from '@shared/types/ai';
 import {
+  getConfiguredBaseURL,
   getDefaultModels as getProviderDefaultModels,
   getTestModelPriority
 } from '@shared/ai-provider-metadata';
@@ -11,28 +12,12 @@ import { BaseAIProvider, AITestResult, AIIntelligentTestResult, AIModelTestResul
  */
 export class ZhipuAIProvider extends BaseAIProvider {
   
-  /**
-   * 智谱API的模型映射
-   * 将标准模型名称映射到智谱API的实际模型名称
-   */
-  private readonly modelMapping: Record<string, string> = {
-    'glm-5.1': 'glm-5.1',
-    'glm-5': 'glm-5',
-    'glm-5-turbo': 'glm-5-turbo',
-    'glm-4.7': 'glm-4.7',
-    'glm-4.6': 'glm-4.6',
-    'glm-4': 'glm-4',
-    'glm-4v': 'glm-4v',
-    'glm-3-turbo': 'glm-3-turbo',
-    'cogview-3': 'cogview-3',
-    'chatglm_turbo': 'chatglm_turbo',
-    'chatglm_pro': 'chatglm_pro',
-    'chatglm_std': 'chatglm_std',
-    'chatglm_lite': 'chatglm_lite'
-  };
-
   private getDefaultModel(): string {
     return this.getDefaultModels()[0];
+  }
+
+  private getBaseURL(config: AIConfig): string {
+    return getConfiguredBaseURL('zhipu', config.baseURL);
   }
 
   /**
@@ -42,22 +27,26 @@ export class ZhipuAIProvider extends BaseAIProvider {
     console.log(`测试智谱AI连接，使用 baseURL: ${config.baseURL}`);
     
     try {
-      // 只测试连接和获取模型列表，不测试具体模型
-      const models = await this.getAvailableModels(config);
-      console.log(`智谱AI获取到模型列表:`, models);
+      await this.makeZhipuRequest(config, this.findSuitableTestModel(this.getDefaultModels()), 'test', 1);
+      const models = this.getDefaultModels();
+      console.log(`智谱AI使用默认模型列表:`, models);
       
       if (models.length > 0) {
         console.log(`智谱AI连接测试成功，获取到 ${models.length} 个模型`);
         return { 
           success: true, 
           models,
-          error: `✅ 连接成功！获取到 ${models.length} 个可用模型`
+          modelSource: 'default',
+          modelListMessage: '智谱AI 未提供可用的远端模型列表接口，已使用内置默认模型',
+          error: `✅ 连接成功！智谱AI 未提供可用的远端模型列表接口，已使用内置默认模型`
         };
       } else {
         console.log(`智谱AI连接成功但未获取到模型，使用默认模型列表`);
         return { 
           success: true, 
           models: this.getDefaultModels(),
+          modelSource: 'unavailable',
+          modelListMessage: '未获取到模型列表，请手动添加模型',
           error: `✅ 连接成功！但未获取到模型列表，使用默认模型`
         };
       }
@@ -72,39 +61,7 @@ export class ZhipuAIProvider extends BaseAIProvider {
    * 获取可用模型列表
    */
   async getAvailableModels(config: AIConfig): Promise<string[]> {
-    console.log(`获取智谱AI模型列表 - baseURL: ${config.baseURL}`);
-    
-    try {
-      const url = `${config.baseURL}/models`;
-      console.log(`智谱AI请求URL: ${url}`);
-      
-      const timeoutFetch = this.createTimeoutFetch(10000);
-      const response = await timeoutFetch(url, {
-        headers: {
-          'Authorization': `Bearer ${config.apiKey}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      console.log(`智谱AI响应状态: ${response.status}`);
-      
-      if (response.ok) {
-        const data = await response.json();
-        console.log(`智谱AI响应数据:`, data);
-        
-        // 智谱API返回的模型格式可能不同，需要适配
-        const models = data.data?.map((model: any) => model.id || model.model_id) || [];
-        console.log(`智谱AI解析出的模型列表:`, models);
-        
-        // 如果获取到了模型列表，返回；否则返回默认模型
-        if (models.length > 0) {
-          return models;
-        }
-      }
-    } catch (error) {
-      console.error(`获取智谱AI模型列表失败，使用默认列表:`, error);
-    }
-    
-    // 返回智谱AI的默认模型列表
+    console.log(`智谱AI 未提供可用的远端模型列表接口，使用默认列表 - baseURL: ${config.baseURL}`);
     return this.getDefaultModels();
   }
 
@@ -287,15 +244,15 @@ export class ZhipuAIProvider extends BaseAIProvider {
   /**
    * 创建智谱API请求
    */
-  private async makeZhipuRequest(config: AIConfig, model: string, messages: any[] | string): Promise<string> {
-    const url = `${config.baseURL}/chat/completions`;
+  private async makeZhipuRequest(config: AIConfig, model: string, messages: any[] | string, maxTokens = 4096): Promise<string> {
+    const url = `${this.getBaseURL(config)}/chat/completions`;
     
     const requestBody = {
       model: model,
       messages: Array.isArray(messages) ? messages : [{ role: 'user', content: messages }],
       stream: false,
       temperature: 0.7,
-      max_tokens: 4096
+      max_tokens: maxTokens
     };
 
     const timeoutFetch = this.createTimeoutFetch(60000); // 智谱AI可能需要更长时间
@@ -326,7 +283,7 @@ export class ZhipuAIProvider extends BaseAIProvider {
     messages: any[], 
     abortSignal?: AbortSignal
   ): Promise<AsyncIterable<{ content: string }>> {
-    const url = `${config.baseURL}/chat/completions`;
+    const url = `${this.getBaseURL(config)}/chat/completions`;
     
     const requestBody = {
       model: model,

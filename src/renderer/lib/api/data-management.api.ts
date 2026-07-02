@@ -3,12 +3,75 @@
  * 所有业务逻辑都在前端，主进程只负责文件操作
  */
 
+import { PlatformDetector } from '@shared/platform';
+import {
+  createBackupPayload,
+  unwrapBackupData
+} from '@shared/backup-integrity';
+
 export class DataManagementAPI {
+  private static webImportFiles = new Map<string, File>();
+
+  private static createBackupId(): string {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+
+    return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  }
+
   /**
    * 检查 Electron API 是否可用
    */
   private static isElectronAvailable(): boolean {
-    return typeof window !== 'undefined' && !!(window as any).electronAPI;
+    return PlatformDetector.isElectron() && typeof window !== 'undefined' && !!(window as any).electronAPI;
+  }
+
+  private static isWebFileToken(path: string): boolean {
+    return path.startsWith('web-import:') || path.startsWith('web-download:');
+  }
+
+  private static async selectWebImportFile(format: string): Promise<string | null> {
+    if (typeof document === 'undefined') {
+      return null;
+    }
+
+    return new Promise(resolve => {
+      const input = document.createElement('input');
+      input.type = 'file';
+      input.accept = format === 'json' ? '.json,application/json' : '.csv,text/csv';
+
+      input.onchange = () => {
+        const file = input.files?.[0];
+        if (!file) {
+          resolve(null);
+          return;
+        }
+
+        const token = `web-import:${this.createBackupId()}`;
+        this.webImportFiles.set(token, file);
+        resolve(token);
+      };
+
+      input.click();
+    });
+  }
+
+  private static downloadWebFile(defaultName: string, content: string): boolean {
+    if (typeof document === 'undefined') {
+      return false;
+    }
+
+    const blob = new Blob([content], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = defaultName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+    return true;
   }
 
   /**
@@ -16,7 +79,7 @@ export class DataManagementAPI {
    */
   static async selectImportFile(format: string): Promise<string | null> {
     if (!this.isElectronAvailable()) {
-      throw new Error('Electron API not available');
+      return this.selectWebImportFile(format);
     }
     
     try {
@@ -32,7 +95,7 @@ export class DataManagementAPI {
    */
   static async selectExportPath(defaultName: string): Promise<string | null> {
     if (!this.isElectronAvailable()) {
-      throw new Error('Electron API not available');
+      return `web-download:${defaultName}`;
     }
     
     try {
@@ -48,7 +111,10 @@ export class DataManagementAPI {
    */
   static async writeFile(filePath: string, content: string): Promise<boolean> {
     if (!this.isElectronAvailable()) {
-      throw new Error('Electron API not available');
+      if (filePath.startsWith('web-download:')) {
+        return this.downloadWebFile(filePath.replace('web-download:', ''), content);
+      }
+      throw new Error('当前平台不支持写入该文件路径');
     }
     
     try {
@@ -65,7 +131,12 @@ export class DataManagementAPI {
    */
   static async readFile(filePath: string): Promise<string | null> {
     if (!this.isElectronAvailable()) {
-      throw new Error('Electron API not available');
+      if (filePath.startsWith('web-import:')) {
+        const file = this.webImportFiles.get(filePath);
+        this.webImportFiles.delete(filePath);
+        return file ? await file.text() : null;
+      }
+      throw new Error('当前平台不支持读取该文件路径');
     }
     
     try {
@@ -207,8 +278,16 @@ export class DataManagementAPI {
         return { success: false, message: '未选择导出路径' };
       }
       
+      const backupPayload = createBackupPayload({
+        id: this.createBackupId(),
+        name: defaultName.replace(/\.json$/i, ''),
+        description: '完整备份',
+        createdAt: new Date().toISOString(),
+        data
+      });
+
       // 3. 导出数据
-      const success = await this.exportDataToFile(data, filePath, 'json');
+      const success = await this.exportDataToFile(backupPayload, filePath, 'json');
       
       return {
         success,
@@ -236,9 +315,20 @@ export class DataManagementAPI {
       }
       
       // 2. 读取并解析数据
-      const data = await this.importDataFromFile(filePath, 'json');
-      if (!data) {
+      const imported = await this.importDataFromFile(filePath, 'json');
+      if (!imported) {
         return { success: false, message: '文件读取失败' };
+      }
+
+      let data: any;
+      try {
+        data = unwrapBackupData(imported);
+      } catch (error) {
+        return {
+          success: false,
+          message: error instanceof Error ? error.message : '备份文件校验失败',
+          error
+        };
       }
       
       // 3. 导入到数据库
@@ -300,33 +390,19 @@ export class DataManagementAPI {
     try {
       // 从 window 对象获取数据库服务
       if (typeof window !== 'undefined' && (window as any).databaseAPI) {
-        const result = await (window as any).databaseAPI.exportAllData();
-        return result.data || {
-          categories: [],
-          prompts: [],
-          aiConfigs: [],
-          aiHistory: [],
-          settings: []
-        };
+        const exportForBackup = (window as any).databaseAPI.exportAllDataForBackup ||
+          (window as any).databaseAPI.exportAllData;
+        const result = await exportForBackup();
+        if (!result?.success || !result.data) {
+          throw new Error(result?.error || result?.message || '导出数据库数据失败');
+        }
+        return result.data;
       }
       
-      // 如果无法访问数据库服务，返回空数据
-      return {
-        categories: [],
-        prompts: [],
-        aiConfigs: [],
-        aiHistory: [],
-        settings: []
-      };
+      throw new Error('数据库服务未初始化');
     } catch (error) {
       console.error('获取数据库数据失败:', error);
-      return {
-        categories: [],
-        prompts: [],
-        aiConfigs: [],
-        aiHistory: [],
-        settings: []
-      };
+      throw error;
     }
   }
 
@@ -353,7 +429,7 @@ export class DataManagementAPI {
       return data;
     } catch (error) {
       console.error('获取选定数据失败:', error);
-      return {};
+      throw error;
     }
   }
 

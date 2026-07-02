@@ -19,6 +19,7 @@ export interface WebDAVConfig extends CloudStorageConfig {
   url: string;
   username: string;
   password: string;
+  requestTimeoutMs?: number;
 }
 
 export interface ICloudConfig extends CloudStorageConfig {
@@ -53,13 +54,16 @@ export interface CloudStorageProvider {
   readFile(path: string): Promise<Buffer>;
   
   // 写入文件
-  writeFile(path: string, data: Buffer): Promise<void>;
+  writeFile(path: string, data: Buffer, options?: CloudFileWriteOptions): Promise<void | CloudFileWriteResult>;
   
   // 删除文件
   deleteFile(path: string): Promise<void>;
   
   // 创建目录
   createDirectory(path: string): Promise<void>;
+
+  // 获取文件信息（可选，用于支持云同步条件写）
+  getFileInfo?(path: string): Promise<CloudFileInfo | null>;
 }
 
 export interface CloudFileInfo {
@@ -68,6 +72,18 @@ export interface CloudFileInfo {
   size: number;
   isDirectory: boolean;
   modifiedAt: string;
+  etag?: string;
+}
+
+export interface CloudFileWriteOptions {
+  overwrite?: boolean;
+  ifMatch?: string;
+  ifNoneMatch?: boolean;
+}
+
+export interface CloudFileWriteResult {
+  etag?: string;
+  modifiedAt?: string;
 }
 
 export interface CloudBackupResult {

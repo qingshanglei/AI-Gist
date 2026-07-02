@@ -19,7 +19,12 @@ export class OllamaProvider extends BaseAIProvider {
       
       if (response.ok) {
         const models = await this.getAvailableModels(config);
-        return { success: true, models };
+        return {
+          success: true,
+          models,
+          modelSource: models.length > 0 ? 'remote' : 'unavailable',
+          modelListMessage: models.length > 0 ? `已从本地服务获取到 ${models.length} 个可用模型` : 'Ollama 当前未返回模型，请先拉取模型'
+        };
       } else {
         return { success: false, error: '无法连接到 Ollama 服务，请确保服务已启动' };
       }

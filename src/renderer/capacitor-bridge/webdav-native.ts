@@ -21,6 +21,8 @@ export interface WebDavPlugin {
     username?: string
     password?: string
     depth?: number
+    connectTimeout?: number
+    readTimeout?: number
   }): Promise<{ status: number; body: string }>
 
   /**
@@ -33,6 +35,8 @@ export interface WebDavPlugin {
     password?: string
     body?: string
     contentType?: string
+    connectTimeout?: number
+    readTimeout?: number
   }): Promise<{ status: number; body: string }>
 }
 

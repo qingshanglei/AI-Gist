@@ -16,6 +16,17 @@ import type {
   CloudStorageConfig,
   CloudBackupInfo
 } from './cloud-backup';
+import type {
+  CloudSyncManifest,
+  CloudSyncManifestSaveOptions,
+  CloudSyncManifestSaveResult
+} from '../cloud-sync-manifest';
+import type {
+  CloudSyncRemoteSnapshotInfo
+} from '../cloud-sync-snapshots';
+import type {
+  CloudSyncSnapshot
+} from '../cloud-sync-engine';
 
 /**
  * Electron API 接口定义
@@ -100,6 +111,31 @@ export default interface ElectronApi {
     createBackup: (storageId: string, description?: string) => Promise<{ success: boolean; message: string; backupInfo?: CloudBackupInfo; error?: string }>
     restoreBackup: (storageId: string, backupId: string) => Promise<{ success: boolean; message: string; backupInfo?: CloudBackupInfo; error?: string }>
     deleteBackup: (storageId: string, backupId: string) => Promise<{ success: boolean; message?: string; error?: string }>
+    getSyncManifest: (storageId: string) => Promise<
+      CloudSyncManifest |
+      { success: true; manifest: CloudSyncManifest } |
+      { success: false; error?: string }
+    >
+    saveSyncManifest: (
+      storageId: string,
+      manifest: CloudSyncManifest,
+      options?: CloudSyncManifestSaveOptions
+    ) => Promise<CloudSyncManifestSaveResult>
+    listSyncSnapshots: (storageId: string) => Promise<
+      { success: true; snapshots: CloudSyncRemoteSnapshotInfo[] } |
+      { success: false; error?: string }
+    >
+    readSyncSnapshot: (
+      storageId: string,
+      snapshot: CloudSyncRemoteSnapshotInfo | string
+    ) => Promise<
+      { success: true; snapshot: CloudSyncSnapshot } |
+      { success: false; error?: string }
+    >
+    saveSyncSnapshot: (
+      storageId: string,
+      snapshot: CloudSyncSnapshot
+    ) => Promise<{ success: boolean; error?: string }>
   }
 
   // 应用信息和更新
@@ -144,14 +180,14 @@ export default interface ElectronApi {
         successSites: number;
         failedSites: number;
       };
-      results: Array<{
+      results: {
         name: string;
         url: string;
         description: string;
         success: boolean;
         responseTime?: number;
         error?: string;
-      }>;
+      }[];
     }>
     getProxyInfo: (url?: string) => Promise<string>
     setProxyMode: (mode: 'direct' | 'system' | 'manual', config?: any) => Promise<{
@@ -211,4 +247,4 @@ declare global {
   interface Window {
     electronAPI: ElectronApi,
   }
-} 
+}

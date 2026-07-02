@@ -60,6 +60,17 @@ export class QuickOptimizationService extends BaseDatabaseService {
   }
 
   /**
+   * 从备份数据创建快速优化配置
+   * 保留 UUID，避免跨设备同步时同一配置被识别成多条记录。
+   */
+  async createQuickOptimizationConfigFromBackup(data: Omit<QuickOptimizationConfig, 'id'>): Promise<QuickOptimizationConfig> {
+    return this.add<QuickOptimizationConfig>('quick_optimization_configs', {
+      ...data,
+      uuid: data.uuid || generateUUID()
+    });
+  }
+
+  /**
    * 获取所有快速优化提示词配置
    * @returns Promise<QuickOptimizationConfig[]> 所有快速优化提示词配置记录的数组
    */
@@ -240,4 +251,4 @@ export class QuickOptimizationService extends BaseDatabaseService {
       recentConfigs
     };
   }
-} 
+}

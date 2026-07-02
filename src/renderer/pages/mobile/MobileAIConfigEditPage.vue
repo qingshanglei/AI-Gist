@@ -137,8 +137,8 @@
           </div>
         </div>
 
-        <!-- 模型配置 - 测试成功后显示 -->
-        <div v-if="testResult?.success" class="form-section">
+        <!-- 模型配置 -->
+        <div v-if="shouldShowModelConfig" class="form-section">
           <div class="section-title">{{ t('aiConfig.modelConfig') }}</div>
           <div class="form-content">
             <ion-list lines="none">
@@ -248,10 +248,18 @@ const {
 // 状态
 const saving = ref(false)
 const testingConnection = ref(false)
-const testResult = ref<{ success: boolean; message: string; models?: string[] } | null>(null)
+const testResult = ref<{
+  success: boolean
+  message: string
+  models?: string[]
+  modelSource?: 'remote' | 'default' | 'unavailable'
+} | null>(null)
 
 // 判断是否为编辑模式
 const isEditMode = computed(() => !!route.params.id)
+const shouldShowModelConfig = computed(() => {
+  return !!testResult.value?.success || isEditMode.value || formData.models.length > 0 || !!formData.customModel
+})
 
 // 计算属性：服务商信息
 const getServiceInfo = computed(() => {
@@ -341,6 +349,35 @@ const onTypeChange = () => {
   testResult.value = null
 }
 
+const getModelListDisplayMessage = (result: {
+  success: boolean
+  models?: string[]
+  error?: string
+  modelSource?: 'remote' | 'default' | 'unavailable'
+  modelListMessage?: string
+}) => {
+  if (!result.success) {
+    return result.error || t('aiConfig.connectionTestFailed')
+  }
+
+  const modelCount = result.models?.length || 0
+  if (result.modelSource === 'remote' && modelCount > 0) {
+    return t('aiConfig.foundModels', { count: modelCount })
+  }
+  if (result.modelSource === 'default' && modelCount > 0) {
+    return t('aiConfig.usingDefaultModels', { count: modelCount })
+  }
+  if (result.modelSource === 'unavailable') {
+    return result.modelListMessage || t('aiConfig.connectionSuccessNoModels')
+  }
+
+  return result.modelListMessage || (
+    modelCount > 0
+      ? t('aiConfig.foundModels', { count: modelCount })
+      : t('aiConfig.connectionSuccessNoModels')
+  )
+}
+
 // 测试连接
 const handleTestConnection = async () => {
   // 验证必填字段
@@ -361,13 +398,6 @@ const handleTestConnection = async () => {
   testResult.value = null
 
   try {
-    console.log('[Page] 准备测试连接，formData:', {
-      type: formData.type,
-      baseURL: formData.baseURL,
-      hasApiKey: !!formData.apiKey,
-      apiKeyLength: formData.apiKey?.length || 0
-    })
-
     // 使用统一的 API 调用（会自动根据平台选择实现）
     const result = await api.aiConfigs.test.mutate({
       type: formData.type,
@@ -375,9 +405,9 @@ const handleTestConnection = async () => {
       apiKey: formData.apiKey
     })
 
-    console.log('[Page] 测试结果:', result)
-
     if (result.success) {
+      const resultMessage = getModelListDisplayMessage(result)
+
       // 如果获取到模型，自动填充
       if (result.models && result.models.length > 0) {
         formData.models = result.models
@@ -389,17 +419,19 @@ const handleTestConnection = async () => {
 
         testResult.value = {
           success: true,
-          message: t('aiConfig.foundModels', { count: result.models.length }),
-          models: result.models
+          message: resultMessage,
+          models: result.models,
+          modelSource: result.modelSource
         }
-        showToast(t('aiConfig.connectionTestSuccess'))
+        showToast(resultMessage, result.modelSource === 'default' ? 'warning' : 'success')
       } else {
         // 连接成功但没有获取到模型
         testResult.value = {
           success: true,
-          message: t('aiConfig.connectionSuccessNoModels') || '连接成功，但未获取到模型列表，请手动添加'
+          message: resultMessage,
+          modelSource: result.modelSource
         }
-        showToast(t('aiConfig.connectionSuccessNoModels') || '连接成功，请手动添加模型', 'warning')
+        showToast(resultMessage, 'warning')
       }
     } else {
       // 显示详细的错误信息
@@ -487,6 +519,13 @@ const handleSave = async () => {
   saving.value = true
 
   try {
+    if (!formData.defaultModel && formData.models.length > 0) {
+      formData.defaultModel = formData.models[0]
+    }
+    if (!formData.defaultModel && formData.customModel) {
+      formData.defaultModel = formData.customModel
+    }
+
     const configData: Partial<AIConfig> = {
       type: formData.type,
       name: formData.name,

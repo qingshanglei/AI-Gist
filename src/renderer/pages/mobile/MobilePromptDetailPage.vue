@@ -30,8 +30,20 @@
       <div v-else>
         <!-- 标题和描述 -->
         <div class="prompt-header">
-          <h1 class="prompt-title">{{ prompt.title }}</h1>
+          <h1 class="prompt-title">{{ prompt.title || getFirstLineOfContent(prompt.content) }}</h1>
           <p v-if="prompt.description" class="prompt-description">{{ prompt.description }}</p>
+          <div class="prompt-meta-row">
+            <ion-chip v-if="prompt.categoryId" size="small" outline>
+              <ion-label>{{ getCategoryName(prompt.categoryId) }}</ion-label>
+            </ion-chip>
+            <ion-chip v-for="tag in promptTags" :key="tag" size="small">
+              <ion-label>{{ tag }}</ion-label>
+            </ion-chip>
+          </div>
+          <div class="prompt-submeta">
+            <span>{{ t('promptManagement.useCount', { count: prompt.useCount || 0 }) }}</span>
+            <span>{{ formatDate(prompt.updatedAt) }}</span>
+          </div>
         </div>
 
         <!-- 提示词内容 -->
@@ -80,7 +92,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from 'vue'
+import { computed, ref, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import {
   IonPage,
@@ -126,10 +138,18 @@ const categories = ref<Category[]>([])
 const loading = ref(true)
 const imageUrls = ref<string[]>([])
 const previewUrl = ref<string | null>(null)
+let initialLoadPromise: Promise<void> | null = null
 
 const openImagePreview = (url: string) => {
   previewUrl.value = url
 }
+
+const promptTags = computed(() => {
+  const tags = prompt.value?.tags
+  if (!tags) return []
+  if (Array.isArray(tags)) return tags
+  return tags.split(',').map(tag => tag.trim()).filter(Boolean)
+})
 
 const updateImageUrls = () => {
   imageUrls.value.forEach(url => URL.revokeObjectURL(url))
@@ -167,10 +187,28 @@ const loadCategories = async () => {
 }
 
 // 获取分类名称
-const getCategoryName = (categoryId: string | null) => {
+const getCategoryName = (categoryId: number | null | undefined) => {
   if (!categoryId) return t('promptManagement.noCategory')
   const category = categories.value.find(c => c.id === categoryId)
   return category?.name || t('promptManagement.noCategory')
+}
+
+const getFirstLineOfContent = (content: string | undefined) => {
+  if (!content) return t('promptManagement.detailModal.noDescription')
+  const firstLine = content.split('\n')[0].trim()
+  return firstLine.length > 64 ? `${firstLine.slice(0, 64)}...` : firstLine
+}
+
+const formatDate = (date: Date | string | undefined) => {
+  if (!date) return ''
+  const value = new Date(date)
+  if (Number.isNaN(value.getTime())) return ''
+  return value.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit'
+  })
 }
 
 // 切换收藏
@@ -203,6 +241,12 @@ const copyContent = async () => {
 
   try {
     await navigator.clipboard.writeText(prompt.value.content)
+    try {
+      const updated = await api.prompts.incrementUseCount.mutate(prompt.value.id!)
+      prompt.value.useCount = updated.useCount
+    } catch (usageError) {
+      console.warn('更新提示词使用次数失败:', usageError)
+    }
     showToast(t('promptManagement.detailModal.copySuccess'))
   } catch (error) {
     console.error('复制失败:', error)
@@ -287,12 +331,20 @@ const showToast = async (message: string, color: string = 'success') => {
 
 // 初始化
 onMounted(async () => {
-  await loadCategories()
-  await loadPrompt()
+  initialLoadPromise = Promise.all([
+    loadCategories(),
+    loadPrompt()
+  ]).then(() => undefined)
+  await initialLoadPromise
+  initialLoadPromise = null
 })
 
 // 每次页面进入（含从编辑页返回）都重新加载，保证数据实时
 onIonViewWillEnter(async () => {
+  if (initialLoadPromise) {
+    await initialLoadPromise
+    return
+  }
   await loadPrompt()
 })
 
@@ -348,6 +400,22 @@ onUnmounted(() => {
   line-height: 1.5;
 }
 
+.prompt-meta-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 12px;
+}
+
+.prompt-submeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 10px;
+  color: var(--ion-color-medium);
+  font-size: 12px;
+}
+
 .tags-container {
   display: flex;
   gap: 8px;
@@ -387,7 +455,7 @@ onUnmounted(() => {
 }
 
 .action-buttons {
-  padding: 16px;
+  padding: 16px 16px calc(env(safe-area-inset-bottom, 0px) + 28px);
   display: flex;
   flex-direction: column;
   gap: 12px;

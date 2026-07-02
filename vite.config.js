@@ -21,6 +21,8 @@ const config = defineConfig({
     },
     plugins: [vuePlugin()],
     define: {
+        '__PLATFORM__': JSON.stringify('electron'),
+        '__APP_PLATFORM__': JSON.stringify('electron'),
         '__APP_VERSION__': JSON.stringify(version)
     },
     resolve: {

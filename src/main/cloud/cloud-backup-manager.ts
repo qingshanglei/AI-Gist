@@ -14,11 +14,50 @@ import {
   ICloudConfig, 
   CloudBackupInfo, 
   CloudBackupResult, 
-  CloudRestoreResult 
+  CloudRestoreResult,
+  CloudFileInfo,
+  CloudFileWriteOptions,
+  CloudStorageProvider
 } from '@shared/types/cloud-backup';
+import {
+  CLOUD_SYNC_MANIFEST_BACKUP_FILE,
+  CLOUD_SYNC_MANIFEST_FILE,
+  CLOUD_BACKUP_FILE_EXTENSION,
+  CLOUD_BACKUP_FILE_PREFIX,
+  getCloudBackupDirectoryPath,
+  getCloudBackupFilePath,
+  getCloudSyncSnapshotFileName,
+  getCloudSyncSnapshotRevisionFromFileName,
+  getCloudSyncSnapshotsDirectoryRelativePath,
+  isCloudBackupFileName,
+  joinCloudPath
+} from '@shared/cloud-backup-paths';
+import type { CloudSyncSnapshot } from '@shared/cloud-sync-engine';
+import type {
+  CloudSyncManifest,
+  CloudSyncManifestSaveOptions
+} from '@shared/cloud-sync-manifest';
+import {
+  assertValidCloudSyncManifest,
+  createCloudSyncManifestRevisionConflictError,
+  doesCloudSyncManifestMatchExpectedRevision,
+  getCloudSyncManifestRevision,
+  readCloudSyncManifestWithFallback
+} from '@shared/cloud-sync-manifest';
+import type {
+  CloudSyncRemoteSnapshotInfo
+} from '@shared/cloud-sync-snapshots';
+import {
+  assertValidCloudSyncSnapshotFile,
+  createCloudSyncSnapshotFile
+} from '@shared/cloud-sync-snapshots';
 import { WebDAVProvider } from './webdav-provider';
 import { ICloudProvider } from './icloud-provider';
 import { DataManagementService } from '../data/data-management-service';
+import {
+  createBackupPayload,
+  parseBackupPayload
+} from '@shared/backup-integrity';
 
 /**
  * 常量定义
@@ -26,8 +65,8 @@ import { DataManagementService } from '../data/data-management-service';
 const CONSTANTS = {
   CONFIG_FILE: 'cloud-config.json',
   CONFIG_DIR: '.ai-gist',
-  BACKUP_FILE_EXTENSION: '.json',
-  BACKUP_FILE_PREFIX: 'backup-',
+  BACKUP_FILE_EXTENSION: CLOUD_BACKUP_FILE_EXTENSION,
+  BACKUP_FILE_PREFIX: CLOUD_BACKUP_FILE_PREFIX,
   ERROR_MESSAGES: {
     ICLOUD_PATH_EMPTY: 'iCloud 路径不能为空',
     CONFIG_NOT_FOUND: '配置不存在',
@@ -109,6 +148,7 @@ export class CloudBackupManager {
     this.setupAvailabilityHandlers();
     this.setupConfigManagementHandlers();
     this.setupBackupManagementHandlers();
+    this.setupSyncManifestHandlers();
   }
 
   /**
@@ -120,7 +160,7 @@ export class CloudBackupManager {
       try {
         return await ICloudProvider.isICloudAvailable();
       } catch (error) {
-        console.error(CONSTANTS.LOG_MESSAGES.ICLOUD_AVAILABILITY_CHECK_FAILED, error);
+        this.debugError(CONSTANTS.LOG_MESSAGES.ICLOUD_AVAILABILITY_CHECK_FAILED, error);
         return { available: false, reason: '检测失败' };
       }
     });
@@ -134,7 +174,7 @@ export class CloudBackupManager {
         const isConnected = await provider.testConnection();
         return { success: isConnected };
       } catch (error) {
-        console.error(CONSTANTS.LOG_MESSAGES.TEST_STORAGE_CONNECTION_FAILED, error);
+        this.debugError(CONSTANTS.LOG_MESSAGES.TEST_STORAGE_CONNECTION_FAILED, error);
         return { 
           success: false, 
           error: this.getErrorMessage(error) 
@@ -153,8 +193,8 @@ export class CloudBackupManager {
         await this.loadConfigs();
         return Array.from(this.storageConfigs.values());
       } catch (error) {
-        console.error(CONSTANTS.LOG_MESSAGES.GET_STORAGE_CONFIGS_FAILED, error);
-        return [];
+        this.debugError(CONSTANTS.LOG_MESSAGES.GET_STORAGE_CONFIGS_FAILED, error);
+        throw new Error(`获取存储配置失败: ${this.getErrorMessage(error)}`);
       }
     });
 
@@ -166,7 +206,7 @@ export class CloudBackupManager {
         await this.testAndSaveConfig(newConfig);
         return { success: true, config: newConfig };
       } catch (error) {
-        console.error(CONSTANTS.LOG_MESSAGES.ADD_STORAGE_CONFIG_FAILED, error);
+        this.debugError(CONSTANTS.LOG_MESSAGES.ADD_STORAGE_CONFIG_FAILED, error);
         return { 
           success: false, 
           error: this.getErrorMessage(error) 
@@ -183,7 +223,7 @@ export class CloudBackupManager {
         await this.testAndSaveConfig(updatedConfig);
         return { success: true, config: updatedConfig };
       } catch (error) {
-        console.error(CONSTANTS.LOG_MESSAGES.UPDATE_STORAGE_CONFIG_FAILED, error);
+        this.debugError(CONSTANTS.LOG_MESSAGES.UPDATE_STORAGE_CONFIG_FAILED, error);
         return { 
           success: false, 
           error: this.getErrorMessage(error) 
@@ -199,7 +239,7 @@ export class CloudBackupManager {
         await this.saveConfigs();
         return { success: true };
       } catch (error) {
-        console.error(CONSTANTS.LOG_MESSAGES.DELETE_STORAGE_CONFIG_FAILED, error);
+        this.debugError(CONSTANTS.LOG_MESSAGES.DELETE_STORAGE_CONFIG_FAILED, error);
         return { 
           success: false, 
           error: this.getErrorMessage(error) 
@@ -216,46 +256,32 @@ export class CloudBackupManager {
     ipcMain.handle('cloud:get-backup-list', async (_, storageId: string) => {
       try {
         const config = this.getStorageConfig(storageId);
-        console.log(`开始获取云端备份列表，存储类型: ${config.type}, 存储ID: ${storageId}`);
+        this.debugLog(`开始获取云端备份列表，存储类型: ${config.type}, 存储ID: ${storageId}`);
         
         const provider = this.createProvider(config);
         
         // 对于WebDAV，确保目录已初始化
         if (config.type === 'webdav' && provider.initializeDirectories) {
           try {
-            console.log('正在初始化WebDAV目录...');
+            this.debugLog('正在初始化WebDAV目录...');
             await provider.initializeDirectories();
-            console.log('WebDAV目录初始化完成');
+            this.debugLog('WebDAV目录初始化完成');
           } catch (error) {
-            console.warn('WebDAV 目录初始化失败，继续尝试列出文件:', error);
+            this.debugWarn('WebDAV 目录初始化失败，继续尝试列出文件:', error);
           }
         }
         
-        console.log('正在列出文件...');
-        const files = await provider.listFiles();
-        console.log(`找到 ${files.length} 个文件`);
+        this.debugLog('正在列出文件...');
+        const backupFiles = await this.listBackupCandidateFiles(provider, config);
         
-        // 对于WebDAV，尝试从备份目录列出文件
-        let backupFiles = this.filterBackupFiles(files);
-        if (config.type === 'webdav' && backupFiles.length === 0) {
-          console.log('从根目录未找到备份文件，尝试从备份目录列出...');
-          try {
-            const backupDirFiles = await provider.listFiles('/AI-Gist-Backup');
-            backupFiles = this.filterBackupFiles(backupDirFiles);
-            console.log(`从备份目录找到 ${backupFiles.length} 个备份文件`);
-          } catch (error) {
-            console.warn('从备份目录列出文件失败:', error);
-          }
-        }
-        
-        console.log(`过滤后找到 ${backupFiles.length} 个备份文件`);
+        this.debugLog(`过滤后找到 ${backupFiles.length} 个备份文件`);
         
         const backups = await this.parseBackupFiles(provider, backupFiles, storageId);
-        console.log(`解析完成，共 ${backups.length} 个备份`);
+        this.debugLog(`解析完成，共 ${backups.length} 个备份`);
         
         return this.sortBackupsByDate(backups);
       } catch (error) {
-        console.error(CONSTANTS.LOG_MESSAGES.GET_BACKUP_LIST_FAILED, error);
+        this.debugError(CONSTANTS.LOG_MESSAGES.GET_BACKUP_LIST_FAILED, error);
         throw new Error(`获取云端备份列表失败: ${this.getErrorMessage(error)}`);
       }
     });
@@ -297,13 +323,13 @@ export class CloudBackupManager {
         const timestamp = new Date().toISOString();
         const backupName = `backup-${timestamp.split('T')[0]}-${backupId.substring(0, 8)}`;
         
-        const localBackup = {
+        const localBackup = createBackupPayload({
           id: backupId,
           name: backupName,
           description: description || '云端备份',
           createdAt: timestamp,
           data: exportResult.data
-        };
+        });
         
         const provider = this.createProvider(config);
         const cloudBackup = await this.uploadBackupToCloud(provider, config, localBackup);
@@ -314,7 +340,7 @@ export class CloudBackupManager {
           backupInfo: cloudBackup,
         };
       } catch (error) {
-        console.error(CONSTANTS.LOG_MESSAGES.CREATE_BACKUP_FAILED, error);
+        this.debugError(CONSTANTS.LOG_MESSAGES.CREATE_BACKUP_FAILED, error);
         return {
           success: false,
           message: '创建云端备份失败',
@@ -328,7 +354,7 @@ export class CloudBackupManager {
       try {
         const config = this.getStorageConfig(storageId);
         const provider = this.createProvider(config);
-        const backupFile = await this.findBackupFile(provider, backupId);
+        const backupFile = await this.findBackupFile(provider, config, backupId);
         const backupInfo = await this.readBackupData(provider, backupFile);
         await this.restoreBackupData(backupInfo);
         
@@ -342,7 +368,7 @@ export class CloudBackupManager {
           },
         };
       } catch (error) {
-        console.error(CONSTANTS.LOG_MESSAGES.RESTORE_BACKUP_FAILED, error);
+        this.debugError(CONSTANTS.LOG_MESSAGES.RESTORE_BACKUP_FAILED, error);
         return {
           success: false,
           message: '恢复云端备份失败',
@@ -356,7 +382,7 @@ export class CloudBackupManager {
       try {
         const config = this.getStorageConfig(storageId);
         const provider = this.createProvider(config);
-        const backupFile = await this.findBackupFile(provider, backupId);
+        const backupFile = await this.findBackupFile(provider, config, backupId);
         await provider.deleteFile(backupFile.path);
         
         return { 
@@ -364,10 +390,104 @@ export class CloudBackupManager {
           message: CONSTANTS.SUCCESS_MESSAGES.BACKUP_DELETED 
         };
       } catch (error) {
-        console.error(CONSTANTS.LOG_MESSAGES.DELETE_BACKUP_FAILED, error);
+        this.debugError(CONSTANTS.LOG_MESSAGES.DELETE_BACKUP_FAILED, error);
         return { 
           success: false, 
           error: this.getErrorMessage(error) 
+        };
+      }
+    });
+  }
+
+  /**
+   * 设置同步 manifest 处理器。
+   * manifest 是 WebDAV/iCloud 多端同步的稳定入口，不参与普通备份列表。
+   */
+  private setupSyncManifestHandlers(): void {
+    ipcMain.handle('cloud:get-sync-manifest', async (_, storageId: string) => {
+      try {
+        return {
+          success: true,
+          manifest: await this.readCloudSyncManifest(storageId)
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: `读取云同步 manifest 失败: ${this.getErrorMessage(error)}`
+        };
+      }
+    });
+
+    ipcMain.handle('cloud:save-sync-manifest', async (
+      _,
+      storageId: string,
+      manifest: CloudSyncManifest,
+      options?: CloudSyncManifestSaveOptions
+    ) => {
+      try {
+        await this.writeCloudSyncManifest(storageId, manifest, options);
+        return { success: true };
+      } catch (error) {
+        if (this.isCloudSyncRevisionConflictError(error)) {
+          return {
+            success: false,
+            conflict: true,
+            currentRevision: await this.tryReadCloudSyncManifestRevision(storageId),
+            error: this.getErrorMessage(error)
+          };
+        }
+
+        return {
+          success: false,
+          error: this.getErrorMessage(error)
+        };
+      }
+    });
+
+    ipcMain.handle('cloud:list-sync-snapshots', async (_, storageId: string) => {
+      try {
+        return {
+          success: true,
+          snapshots: await this.listCloudSyncSnapshots(storageId)
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: this.getErrorMessage(error)
+        };
+      }
+    });
+
+    ipcMain.handle('cloud:read-sync-snapshot', async (
+      _,
+      storageId: string,
+      snapshot: CloudSyncRemoteSnapshotInfo | string
+    ) => {
+      try {
+        return {
+          success: true,
+          snapshot: await this.readCloudSyncSnapshot(storageId, snapshot)
+        };
+      } catch (error) {
+        return {
+          success: false,
+          error: this.getErrorMessage(error)
+        };
+      }
+    });
+
+    ipcMain.handle('cloud:save-sync-snapshot', async (
+      _,
+      storageId: string,
+      snapshot: CloudSyncSnapshot
+    ) => {
+      try {
+        await this.writeCloudSyncSnapshot(storageId, snapshot);
+        return { success: true };
+      } catch (error) {
+        return {
+          success: false,
+          error: this.getErrorMessage(error)
         };
       }
     });
@@ -448,6 +568,7 @@ export class CloudBackupManager {
         url: (config as WebDAVConfig).url,
         username: (config as WebDAVConfig).username,
         password: (config as WebDAVConfig).password,
+        requestTimeoutMs: (config as WebDAVConfig).requestTimeoutMs,
       } : {
         path: (config as ICloudConfig).path,
       })
@@ -516,10 +637,42 @@ export class CloudBackupManager {
    * @returns 备份文件列表
    */
   private filterBackupFiles(files: any[]): any[] {
-    return files.filter(file => 
-      file.name.endsWith(CONSTANTS.BACKUP_FILE_EXTENSION) && 
-      !file.isDirectory
-    );
+    return files.filter(file => isCloudBackupFileName(file.name) && !file.isDirectory);
+  }
+
+  /**
+   * 列出可能包含备份文件的位置。
+   * WebDAV 新版本统一使用 /AI-Gist-Backup，旧版本曾直接写入配置 URL 根目录。
+   */
+  private async listBackupCandidateFiles(provider: any, config: CloudStorageConfig): Promise<any[]> {
+    const backupFiles: any[] = [];
+    const searchPaths = this.getBackupSearchPaths(provider, config);
+
+    for (const searchPath of searchPaths) {
+      try {
+        const files = await provider.listFiles(searchPath || '/');
+        const filtered = this.filterBackupFiles(files);
+        this.debugLog(`从 ${searchPath || '/'} 找到 ${filtered.length} 个备份文件`);
+        backupFiles.push(...filtered);
+      } catch (error) {
+        this.debugWarn(`从 ${searchPath || '/'} 列出备份文件失败:`, error);
+      }
+    }
+
+    return this.dedupeFilesByPath(backupFiles);
+  }
+
+  /**
+   * 按远端路径去重，避免标准目录和旧目录搜索返回同一文件。
+   */
+  private dedupeFilesByPath(files: any[]): any[] {
+    const seen = new Set<string>();
+    return files.filter(file => {
+      const key = file.path || file.name;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   }
 
   /**
@@ -535,7 +688,8 @@ export class CloudBackupManager {
     for (const file of backupFiles) {
       try {
         const data = await provider.readFile(file.path);
-        const backupInfo: CloudBackupInfo = JSON.parse(data.toString());
+        const parsedBackup = parseBackupPayload(JSON.parse(data.toString()));
+        const backupInfo = parsedBackup.payload;
         
         // 计算文件大小（优先使用文件的实际大小，如果没有则使用数据长度）
         const size = file.size || data.length || backupInfo.size || 0;
@@ -545,9 +699,10 @@ export class CloudBackupManager {
           size,
           cloudPath: file.path,
           storageId,
+          checksum: parsedBackup.checksum,
         });
       } catch (error) {
-        console.warn(`${CONSTANTS.ERROR_MESSAGES.BACKUP_PARSE_FAILED}: ${file.path}`, error);
+        this.debugWarn(`${CONSTANTS.ERROR_MESSAGES.BACKUP_PARSE_FAILED}: ${file.path}`, error);
       }
     }
     
@@ -569,26 +724,12 @@ export class CloudBackupManager {
    * @param backupId 备份ID
    * @returns 备份文件对象
    */
-  private async findBackupFile(provider: any, backupId: string): Promise<any> {
-    // 首先从根目录搜索
-    let files = await provider.listFiles();
-    let backupFile = files.find((file: any) => 
-      file.name.includes(backupId) && 
+  private async findBackupFile(provider: any, config: CloudStorageConfig, backupId: string): Promise<any> {
+    const files = await this.listBackupCandidateFiles(provider, config);
+    const backupFile = files.find((file: any) =>
+      file.name.includes(backupId) &&
       file.name.endsWith(CONSTANTS.BACKUP_FILE_EXTENSION)
     );
-
-    // 如果没找到，尝试从备份目录搜索（适用于WebDAV）
-    if (!backupFile) {
-      try {
-        const backupDirFiles = await provider.listFiles('/AI-Gist-Backup');
-        backupFile = backupDirFiles.find((file: any) => 
-          file.name.includes(backupId) && 
-          file.name.endsWith(CONSTANTS.BACKUP_FILE_EXTENSION)
-        );
-      } catch (error) {
-        console.warn('从备份目录搜索文件失败:', error);
-      }
-    }
 
     if (!backupFile) {
       throw new Error(CONSTANTS.ERROR_MESSAGES.BACKUP_FILE_NOT_FOUND);
@@ -605,7 +746,7 @@ export class CloudBackupManager {
    */
   private async readBackupData(provider: any, backupFile: any): Promise<any> {
     const data = await provider.readFile(backupFile.path);
-    return JSON.parse(data.toString());
+    return parseBackupPayload(JSON.parse(data.toString())).payload;
   }
 
   /**
@@ -621,7 +762,7 @@ export class CloudBackupManager {
       try {
         await provider.initializeDirectories();
       } catch (error) {
-        console.warn('WebDAV 目录初始化失败，继续尝试写入文件:', error);
+        this.debugWarn('WebDAV 目录初始化失败，继续尝试写入文件:', error);
       }
     }
 
@@ -636,6 +777,7 @@ export class CloudBackupManager {
       size: Buffer.byteLength(backupData, 'utf-8'), // 设置正确的文件大小
       cloudPath,
       storageId: config.id,
+      checksum: localBackup.checksum,
     };
   }
 
@@ -678,6 +820,162 @@ export class CloudBackupManager {
     }
   }
 
+  /**
+   * 读取云同步 manifest。首次同步时 manifest 不存在，返回空 manifest。
+   */
+  private async readCloudSyncManifest(storageId: string): Promise<CloudSyncManifest> {
+    await this.loadConfigs();
+    const config = this.getStorageConfig(storageId);
+    const provider = this.createProvider(config);
+    const manifestPath = this.getSyncManifestCloudPath(config);
+    const backupPath = this.getSyncManifestBackupCloudPath(config);
+
+    return readCloudSyncManifestWithFallback({
+      readPrimary: () => this.readCloudSyncManifestFile(provider, manifestPath),
+      readBackup: () => this.readCloudSyncManifestFile(provider, backupPath),
+      isNotFoundError: error => this.isNotFoundError(error),
+      describeError: error => this.formatErrorMessage(error)
+    });
+  }
+
+  private async readCloudSyncManifestFile(
+    provider: CloudStorageProvider,
+    cloudPath: string
+  ): Promise<CloudSyncManifest> {
+    const data = await provider.readFile(cloudPath);
+    try {
+      return assertValidCloudSyncManifest(JSON.parse(Buffer.from(data).toString('utf-8')));
+    } catch (error) {
+      throw new Error(`云同步 manifest 内容无效（${cloudPath}）: ${this.formatErrorMessage(error)}`);
+    }
+  }
+
+  /**
+   * 写入云同步 manifest。
+   */
+  private async writeCloudSyncManifest(
+    storageId: string,
+    manifest: CloudSyncManifest,
+    options: CloudSyncManifestSaveOptions = {}
+  ): Promise<void> {
+    await this.loadConfigs();
+    const config = this.getStorageConfig(storageId);
+    const provider = this.createProvider(config);
+    const manifestPath = this.getSyncManifestCloudPath(config);
+    const backupPath = this.getSyncManifestBackupCloudPath(config);
+    const normalizedManifest = assertValidCloudSyncManifest({
+      ...manifest,
+      updatedAt: new Date().toISOString()
+    });
+
+    if (config.type === 'webdav' && provider.initializeDirectories) {
+      await provider.initializeDirectories();
+    }
+
+    const content = Buffer.from(JSON.stringify(normalizedManifest, null, 2), 'utf-8');
+    if (options.expectedRevision === undefined) {
+      await provider.writeFile(backupPath, content);
+      await provider.writeFile(manifestPath, content);
+      return;
+    }
+
+    const primaryInfo = await this.getCloudFileInfo(provider, manifestPath);
+    const currentManifest = await readCloudSyncManifestWithFallback({
+      readPrimary: () => this.readCloudSyncManifestFile(provider, manifestPath),
+      readBackup: () => this.readCloudSyncManifestFile(provider, backupPath),
+      isNotFoundError: error => this.isNotFoundError(error),
+      describeError: error => this.formatErrorMessage(error)
+    });
+    this.assertExpectedCloudSyncRevision(currentManifest, options.expectedRevision);
+
+    const writeOptions = this.createManifestWriteOptions(primaryInfo, currentManifest, options.expectedRevision);
+    try {
+      await provider.writeFile(manifestPath, content, writeOptions);
+    } catch (error) {
+      if (this.isCloudSyncRevisionConflictError(error)) {
+        throw createCloudSyncManifestRevisionConflictError(
+          options.expectedRevision,
+          getCloudSyncManifestRevision(currentManifest)
+        );
+      }
+      throw error;
+    }
+
+    await provider.writeFile(backupPath, content);
+  }
+
+  private async listCloudSyncSnapshots(storageId: string): Promise<CloudSyncRemoteSnapshotInfo[]> {
+    await this.loadConfigs();
+    const config = this.getStorageConfig(storageId);
+    const provider = this.createProvider(config);
+    const snapshotsDir = this.getSyncSnapshotsDirectoryCloudPath(config);
+
+    try {
+      const files = await provider.listFiles(snapshotsDir);
+      return files
+        .filter(file => !file.isDirectory)
+        .map(file => this.createRemoteSnapshotInfo(config, file))
+        .filter((info): info is CloudSyncRemoteSnapshotInfo => !!info)
+        .sort((a, b) => (b.createdAt || b.modifiedAt || '').localeCompare(a.createdAt || a.modifiedAt || ''));
+    } catch (error) {
+      if (this.isNotFoundError(error)) {
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  private async readCloudSyncSnapshot(
+    storageId: string,
+    snapshot: CloudSyncRemoteSnapshotInfo | string
+  ): Promise<CloudSyncSnapshot> {
+    await this.loadConfigs();
+    const config = this.getStorageConfig(storageId);
+    const provider = this.createProvider(config);
+    const snapshotInfo = this.normalizeSnapshotInfo(config, snapshot);
+    const data = await provider.readFile(snapshotInfo.path);
+
+    try {
+      return assertValidCloudSyncSnapshotFile(JSON.parse(Buffer.from(data).toString('utf-8')));
+    } catch (error) {
+      throw new Error(`云同步快照内容无效（${snapshotInfo.path}）: ${this.formatErrorMessage(error)}`);
+    }
+  }
+
+  private async writeCloudSyncSnapshot(storageId: string, snapshot: CloudSyncSnapshot): Promise<void> {
+    await this.loadConfigs();
+    const config = this.getStorageConfig(storageId);
+    const provider = this.createProvider(config);
+    const normalizedSnapshot = assertValidCloudSyncSnapshotFile(snapshot);
+    const snapshotPath = this.getSyncSnapshotCloudPath(config, normalizedSnapshot.revision);
+    const content = Buffer.from(
+      JSON.stringify(createCloudSyncSnapshotFile(normalizedSnapshot), null, 2),
+      'utf-8'
+    );
+
+    if (config.type === 'webdav' && provider.initializeDirectories) {
+      await provider.initializeDirectories();
+    }
+
+    try {
+      await provider.writeFile(snapshotPath, content, { ifNoneMatch: true });
+    } catch (error) {
+      if (!this.isCloudSyncRevisionConflictError(error)) {
+        throw error;
+      }
+
+      const existingSnapshot = await this.readCloudSyncSnapshot(storageId, {
+        revision: normalizedSnapshot.revision,
+        path: snapshotPath
+      });
+      if (this.isSameCloudSyncSnapshot(existingSnapshot, normalizedSnapshot)) {
+        return;
+      }
+
+      throw new Error(`云同步快照 ${normalizedSnapshot.revision} 已存在但内容不一致`);
+    }
+  }
+
   // ==================== 存储提供者管理 ====================
 
   /**
@@ -705,13 +1003,39 @@ export class CloudBackupManager {
   private getCloudPath(config: CloudStorageConfig, fileName: string): string {
     switch (config.type) {
       case 'webdav':
-        // 对于WebDAV，使用我们创建的备份目录
-        return `/AI-Gist-Backup/${fileName}`;
+        return this.getWebDAVBackupPath(config as WebDAVConfig, fileName);
       case 'icloud':
         return fileName;
       default:
         return fileName;
     }
+  }
+
+  private getSyncManifestCloudPath(config: CloudStorageConfig, fileName = CLOUD_SYNC_MANIFEST_FILE): string {
+    switch (config.type) {
+      case 'webdav':
+        return this.getWebDAVBackupPath(config as WebDAVConfig, fileName);
+      case 'icloud':
+        return fileName;
+      default:
+        return fileName;
+    }
+  }
+
+  private getSyncManifestBackupCloudPath(config: CloudStorageConfig): string {
+    return this.getSyncManifestCloudPath(config, CLOUD_SYNC_MANIFEST_BACKUP_FILE);
+  }
+
+  private getSyncSnapshotsDirectoryCloudPath(config: CloudStorageConfig): string {
+    return this.getSyncManifestCloudPath(config, getCloudSyncSnapshotsDirectoryRelativePath());
+  }
+
+  private getSyncSnapshotCloudPath(config: CloudStorageConfig, revision: string): string {
+    return this.getSyncManifestCloudPath(
+      config,
+      joinCloudPath(getCloudSyncSnapshotsDirectoryRelativePath(), getCloudSyncSnapshotFileName(revision))
+        .replace(/^\/+/, '')
+    );
   }
 
   // ==================== 配置文件管理 ====================
@@ -732,8 +1056,12 @@ export class CloudBackupManager {
         this.storageConfigs.set(config.id, config);
       }
     } catch (error) {
-      // 配置文件不存在或读取失败，使用空配置
-      this.storageConfigs.clear();
+      if (this.isFileNotFoundError(error)) {
+        this.storageConfigs.clear();
+        return;
+      }
+
+      throw new Error(`读取云存储配置失败: ${this.getErrorMessage(error)}`);
     }
   }
 
@@ -748,7 +1076,7 @@ export class CloudBackupManager {
       const configs = Array.from(this.storageConfigs.values());
       await fs.writeFile(this.configPath, JSON.stringify(configs, null, 2));
     } catch (error) {
-      console.error(CONSTANTS.LOG_MESSAGES.SAVE_CONFIG_FAILED, error);
+      this.debugError(CONSTANTS.LOG_MESSAGES.SAVE_CONFIG_FAILED, error);
       throw error;
     }
   }
@@ -763,4 +1091,176 @@ export class CloudBackupManager {
   private getErrorMessage(error: unknown): string {
     return error instanceof Error ? error.message : CONSTANTS.ERROR_MESSAGES.UNKNOWN_ERROR;
   }
-} 
+
+  private getBackupSearchPaths(provider: any, config: CloudStorageConfig): string[] {
+    if (config.type !== 'webdav') {
+      return [''];
+    }
+
+    const backupDir = typeof provider.getDefaultBackupDirectory === 'function'
+      ? provider.getDefaultBackupDirectory()
+      : getCloudBackupDirectoryPath();
+    const paths = [backupDir, ''].filter((searchPath): searchPath is string => typeof searchPath === 'string');
+    return paths.filter((searchPath, index) => paths.indexOf(searchPath) === index);
+  }
+
+  private getWebDAVBackupPath(config: WebDAVConfig, fileName: string): string {
+    if (this.isWebDAVUrlAtBackupDir(config.url)) {
+      return `/${fileName.replace(/^\/+/, '')}`;
+    }
+
+    return getCloudBackupFilePath(fileName);
+  }
+
+  private isWebDAVUrlAtBackupDir(url: string): boolean {
+    try {
+      const directoryName = getCloudBackupDirectoryPath().split('/').filter(Boolean).pop();
+      const pathname = new URL(url).pathname.replace(/\/+$/, '');
+      return pathname.split('/').filter(Boolean).pop() === directoryName;
+    } catch {
+      return false;
+    }
+  }
+
+  private isNotFoundError(error: unknown): boolean {
+    const message = error instanceof Error ? error.message : String(error);
+    return /404|not\s*found|no such file|does not exist|ENOENT|不存在|未找到/i.test(message);
+  }
+
+  private async getCloudFileInfo(
+    provider: CloudStorageProvider,
+    cloudPath: string
+  ): Promise<CloudFileInfo | null> {
+    if (!provider.getFileInfo) {
+      return null;
+    }
+
+    return await provider.getFileInfo(cloudPath);
+  }
+
+  private assertExpectedCloudSyncRevision(
+    manifest: CloudSyncManifest,
+    expectedRevision: string | null | undefined
+  ): void {
+    if (doesCloudSyncManifestMatchExpectedRevision(manifest, expectedRevision)) {
+      return;
+    }
+
+    throw createCloudSyncManifestRevisionConflictError(
+      expectedRevision,
+      getCloudSyncManifestRevision(manifest)
+    );
+  }
+
+  private createManifestWriteOptions(
+    primaryInfo: CloudFileInfo | null,
+    currentManifest: CloudSyncManifest,
+    expectedRevision: string | null | undefined
+  ): CloudFileWriteOptions {
+    if (expectedRevision === undefined) {
+      return {};
+    }
+
+    if (primaryInfo?.etag) {
+      return { ifMatch: primaryInfo.etag };
+    }
+
+    if (!currentManifest.latestSnapshot) {
+      return { ifNoneMatch: true };
+    }
+
+    return {};
+  }
+
+  private createRemoteSnapshotInfo(
+    config: CloudStorageConfig,
+    file: CloudFileInfo
+  ): CloudSyncRemoteSnapshotInfo | null {
+    const fileName = file.name || path.basename(file.path || '');
+    const revision = getCloudSyncSnapshotRevisionFromFileName(fileName);
+    if (!revision) {
+      return null;
+    }
+
+    return {
+      revision,
+      path: this.getSyncSnapshotCloudPath(config, revision),
+      modifiedAt: file.modifiedAt,
+      size: file.size
+    };
+  }
+
+  private normalizeSnapshotInfo(
+    config: CloudStorageConfig,
+    snapshot: CloudSyncRemoteSnapshotInfo | string
+  ): CloudSyncRemoteSnapshotInfo {
+    if (typeof snapshot === 'string') {
+      return {
+        revision: snapshot,
+        path: this.getSyncSnapshotCloudPath(config, snapshot)
+      };
+    }
+
+    return {
+      ...snapshot,
+      path: snapshot.path || this.getSyncSnapshotCloudPath(config, snapshot.revision)
+    };
+  }
+
+  private isSameCloudSyncSnapshot(left: CloudSyncSnapshot, right: CloudSyncSnapshot): boolean {
+    return left.revision === right.revision &&
+      left.dataChecksum === right.dataChecksum &&
+      JSON.stringify(left.data) === JSON.stringify(right.data);
+  }
+
+  private isCloudSyncRevisionConflictError(error: unknown): boolean {
+    const message = this.getErrorMessage(error);
+    return /manifest 已被其他设备更新|Precondition|412|if-match|if-none-match|已被其他设备更新|已存在，取消覆盖/i
+      .test(message);
+  }
+
+  private async tryReadCloudSyncManifestRevision(storageId: string): Promise<string | null> {
+    try {
+      return getCloudSyncManifestRevision(await this.readCloudSyncManifest(storageId));
+    } catch {
+      return null;
+    }
+  }
+
+  private isFileNotFoundError(error: unknown): boolean {
+    const code = typeof error === 'object' && error !== null && 'code' in error
+      ? String((error as { code?: string }).code || '')
+      : '';
+    return code === 'ENOENT';
+  }
+
+  private debugLog(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return;
+    }
+    console.debug(...args);
+  }
+
+  private debugWarn(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return;
+    }
+    console.warn(...args);
+  }
+
+  private debugError(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return;
+    }
+    console.error(...args);
+  }
+
+  private isDebugLoggingEnabled(): boolean {
+    return process.env.AI_GIST_DEBUG_CLOUD === '1' ||
+      (process.env.DEBUG || '').split(',').some(scope => scope.trim() === 'ai-gist:cloud');
+  }
+
+  private formatErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+}

@@ -20,6 +20,7 @@ export { AIConfigService } from './ai-config.service';
 export { AIGenerationHistoryService } from './ai-generation-history.service';
 export { AppSettingsService } from './app-settings.service';
 export { DatabaseServiceManager } from './database-manager.service';
+export { CloudSyncService, cloudSyncService } from './cloud-sync.service';
 export { emitDataChange, onDataChange } from './data-change-events';
 export type { DataChangeEventPayload, DataStoreName, DataChangeAction } from './data-change-events';
 

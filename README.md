@@ -126,6 +126,7 @@ yarn build:linux    # 构建 Linux 安装包
 详细的开发指南请参阅 [docs](./docs) 目录：
 
 - [项目架构指南](./docs/project-architecture.md)
+- [Web 本地部署与多端差异说明](./docs/web-deployment-and-platform-differences.md)
 - [GitHub Actions 自动构建与发布](./docs/github-actions.md)
 
 ## 贡献

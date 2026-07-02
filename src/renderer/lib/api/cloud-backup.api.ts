@@ -4,6 +4,32 @@ import type {
   ICloudConfig, 
   CloudBackupInfo 
 } from '@shared/types/cloud-backup';
+import type {
+  CloudSyncManifest,
+  CloudSyncManifestSaveOptions,
+  CloudSyncManifestSaveResult
+} from '@shared/cloud-sync-manifest';
+import type {
+  CloudSyncRemoteSnapshotInfo
+} from '@shared/cloud-sync-snapshots';
+import type {
+  CloudSyncSnapshot
+} from '@shared/cloud-sync-engine';
+import { PlatformDetector } from '@shared/platform';
+import { mobileCloudBackupService } from '../services/mobile-cloud-backup.service';
+import { webCloudBackupService } from '../services/web-cloud-backup.service';
+
+const getCloudBackupClient = () => {
+  if (PlatformDetector.isElectron()) {
+    return null;
+  }
+
+  if (PlatformDetector.isWeb()) {
+    return webCloudBackupService;
+  }
+
+  return mobileCloudBackupService;
+};
 
 export class CloudBackupAPI {
   private static isElectronAvailable(): boolean {
@@ -17,6 +43,11 @@ export class CloudBackupAPI {
     available: boolean;
     reason?: string;
   }> {
+    const client = getCloudBackupClient();
+    if (client) {
+      return await client.isICloudAvailable();
+    }
+
     if (!this.isElectronAvailable()) {
       throw new Error('Electron API not available');
     }
@@ -27,6 +58,11 @@ export class CloudBackupAPI {
    * 获取存储配置列表
    */
   static async getStorageConfigs(): Promise<CloudStorageConfig[]> {
+    const client = getCloudBackupClient();
+    if (client) {
+      return await client.getStorageConfigs();
+    }
+
     if (!this.isElectronAvailable()) {
       throw new Error('Electron API not available');
     }
@@ -41,6 +77,11 @@ export class CloudBackupAPI {
     config?: CloudStorageConfig;
     error?: string;
   }> {
+    const client = getCloudBackupClient();
+    if (client) {
+      return await client.addStorageConfig(config);
+    }
+
     if (!this.isElectronAvailable()) {
       throw new Error('Electron API not available');
     }
@@ -55,6 +96,11 @@ export class CloudBackupAPI {
     config?: CloudStorageConfig;
     error?: string;
   }> {
+    const client = getCloudBackupClient();
+    if (client) {
+      return await client.updateStorageConfig(id, config);
+    }
+
     if (!this.isElectronAvailable()) {
       throw new Error('Electron API not available');
     }
@@ -68,6 +114,11 @@ export class CloudBackupAPI {
     success: boolean;
     error?: string;
   }> {
+    const client = getCloudBackupClient();
+    if (client) {
+      return await client.deleteStorageConfig(id);
+    }
+
     if (!this.isElectronAvailable()) {
       throw new Error('Electron API not available');
     }
@@ -81,6 +132,11 @@ export class CloudBackupAPI {
     success: boolean;
     error?: string;
   }> {
+    const client = getCloudBackupClient();
+    if (client) {
+      return await client.testStorageConnection(config);
+    }
+
     if (!this.isElectronAvailable()) {
       throw new Error('Electron API not available');
     }
@@ -91,6 +147,11 @@ export class CloudBackupAPI {
    * 获取云端备份列表
    */
   static async getCloudBackupList(storageId: string): Promise<CloudBackupInfo[]> {
+    const client = getCloudBackupClient();
+    if (client) {
+      return await client.getCloudBackupList(storageId);
+    }
+
     if (!this.isElectronAvailable()) {
       throw new Error('Electron API not available');
     }
@@ -106,6 +167,11 @@ export class CloudBackupAPI {
     backupInfo?: CloudBackupInfo;
     error?: string;
   }> {
+    const client = getCloudBackupClient();
+    if (client) {
+      return await client.createCloudBackup(storageId, description);
+    }
+
     if (!this.isElectronAvailable()) {
       throw new Error('Electron API not available');
     }
@@ -121,6 +187,11 @@ export class CloudBackupAPI {
     backupInfo?: CloudBackupInfo;
     error?: string;
   }> {
+    const client = getCloudBackupClient();
+    if (client) {
+      return await client.restoreCloudBackup(storageId, backupId);
+    }
+
     if (!this.isElectronAvailable()) {
       throw new Error('Electron API not available');
     }
@@ -135,9 +206,108 @@ export class CloudBackupAPI {
     message?: string;
     error?: string;
   }> {
+    const client = getCloudBackupClient();
+    if (client) {
+      return await client.deleteCloudBackup(storageId, backupId);
+    }
+
     if (!this.isElectronAvailable()) {
       throw new Error('Electron API not available');
     }
     return await window.electronAPI.cloud.deleteBackup(storageId, backupId);
   }
-} 
+
+  /**
+   * 获取云同步 manifest
+   */
+  static async getCloudSyncManifest(storageId: string): Promise<CloudSyncManifest> {
+    const client = getCloudBackupClient();
+    if (client) {
+      return await client.getCloudSyncManifest(storageId);
+    }
+
+    if (!this.isElectronAvailable()) {
+      throw new Error('Electron API not available');
+    }
+    const response = await window.electronAPI.cloud.getSyncManifest(storageId);
+    if (response && typeof response === 'object' && 'success' in response) {
+      if (response.success && response.manifest) {
+        return response.manifest;
+      }
+      throw new Error(('error' in response && response.error) || '读取云同步 manifest 失败');
+    }
+    return response;
+  }
+
+  /**
+   * 保存云同步 manifest
+   */
+  static async saveCloudSyncManifest(
+    storageId: string,
+    manifest: CloudSyncManifest,
+    options?: CloudSyncManifestSaveOptions
+  ): Promise<CloudSyncManifestSaveResult> {
+    const client = getCloudBackupClient();
+    if (client) {
+      return await client.saveCloudSyncManifest(storageId, manifest, options);
+    }
+
+    if (!this.isElectronAvailable()) {
+      throw new Error('Electron API not available');
+    }
+    return await window.electronAPI.cloud.saveSyncManifest(storageId, manifest, options);
+  }
+
+  static async listCloudSyncSnapshots(storageId: string): Promise<CloudSyncRemoteSnapshotInfo[]> {
+    const client = getCloudBackupClient();
+    if (client && typeof (client as any).listCloudSyncSnapshots === 'function') {
+      return await (client as any).listCloudSyncSnapshots(storageId);
+    }
+
+    if (!this.isElectronAvailable()) {
+      return [];
+    }
+
+    const response = await window.electronAPI.cloud.listSyncSnapshots(storageId);
+    if (response.success) {
+      return response.snapshots;
+    }
+    throw new Error(response.error || '列出云同步快照失败');
+  }
+
+  static async readCloudSyncSnapshot(
+    storageId: string,
+    snapshot: CloudSyncRemoteSnapshotInfo | string
+  ): Promise<CloudSyncSnapshot> {
+    const client = getCloudBackupClient();
+    if (client && typeof (client as any).readCloudSyncSnapshot === 'function') {
+      return await (client as any).readCloudSyncSnapshot(storageId, snapshot);
+    }
+
+    if (!this.isElectronAvailable()) {
+      throw new Error('Electron API not available');
+    }
+
+    const response = await window.electronAPI.cloud.readSyncSnapshot(storageId, snapshot);
+    if (response.success) {
+      return response.snapshot;
+    }
+    throw new Error(response.error || '读取云同步快照失败');
+  }
+
+  static async saveCloudSyncSnapshot(
+    storageId: string,
+    snapshot: CloudSyncSnapshot
+  ): Promise<{ success: boolean; error?: string }> {
+    const client = getCloudBackupClient();
+    if (client && typeof (client as any).saveCloudSyncSnapshot === 'function') {
+      return await (client as any).saveCloudSyncSnapshot(storageId, snapshot);
+    }
+
+    if (!this.isElectronAvailable()) {
+      return { success: false, error: 'Electron API not available' };
+    }
+
+    return await window.electronAPI.cloud.saveSyncSnapshot(storageId, snapshot);
+  }
+}

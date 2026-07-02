@@ -364,12 +364,16 @@ const formData = ref<Partial<Prompt>>({
 
 // 用于判断是否有真实改动（编辑模式下记录原始值）
 const originalSnapshot = ref<string>('')
-const originalImageCount = ref(0)
+const originalImageSignature = ref('')
+
+const getImageSignature = () => {
+  return imageBlobs.value.map(blob => `${blob.size}:${blob.type}`).join('|')
+}
 
 const takeSnapshot = () => {
   const { imageBlobs: _blobs, ...rest } = formData.value as any
   originalSnapshot.value = JSON.stringify(rest)
-  originalImageCount.value = imageBlobs.value.length
+  originalImageSignature.value = getImageSignature()
 }
 
 const hasRealChanges = (): boolean => {
@@ -380,7 +384,7 @@ const hasRealChanges = (): boolean => {
   // 编辑模式：与快照比较
   const { imageBlobs: _blobs, ...rest } = formData.value as any
   const currentSnapshot = JSON.stringify(rest)
-  return currentSnapshot !== originalSnapshot.value || imageBlobs.value.length !== originalImageCount.value
+  return currentSnapshot !== originalSnapshot.value || getImageSignature() !== originalImageSignature.value
 }
 
 // 选中的分类名称
@@ -435,7 +439,6 @@ const loadData = async () => {
         router.back()
         return
       }
-      console.log('成功加载提示词:', prompt)
       // 确保 tags 是数组格式
       let normalizedTags: string[] = []
       if (prompt.tags) {
@@ -471,7 +474,7 @@ const loadData = async () => {
 }
 
 // 选择分类
-const selectCategory = (categoryId: string | null) => {
+const selectCategory = (categoryId: number | null) => {
   formData.value.categoryId = categoryId
   showCategoryPicker.value = false
 }

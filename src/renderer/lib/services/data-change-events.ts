@@ -13,7 +13,8 @@ export type DataStoreName =
   | 'ai_configs'
   | 'quick_optimization_configs'
   | 'ai_generation_history'
-  | 'settings';
+  | 'settings'
+  | 'syncTombstones';
 
 export type DataChangeAction =
   | 'create'

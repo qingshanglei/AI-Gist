@@ -39,42 +39,45 @@ export class DatabaseManager {
   }
 
   /**
+   * 导出完整备份数据（包含图片和历史等 JSON 可序列化元数据）
+   */
+  async exportAllDataForBackup(): Promise<any> {
+    return await databaseService.exportAllDataForBackup();
+  }
+
+  /**
+   * 导出云同步数据（包含删除标记）
+   */
+  async exportAllDataForSync(): Promise<any> {
+    return await databaseService.exportAllDataForSync();
+  }
+
+  /**
    * 导入数据
    */
-  async importData(data: any): Promise<void> {
-    await databaseService.importData(data);
+  async importData(data: any): Promise<any> {
+    return await databaseService.importData(data);
   }
 
   /**
    * 备份数据
    */
   async backupData(): Promise<any> {
-    const data = await this.exportAllData();
-    return {
-      timestamp: new Date().toISOString(),
-      version: '1.0',
-      data
-    };
+    return await databaseService.backupData();
   }
 
   /**
    * 恢复数据
    */
-  async restoreData(backupData: any): Promise<void> {
-    if (backupData.data) {
-      await this.importData(backupData.data);
-    }
+  async restoreData(backupData: any): Promise<any> {
+    return await databaseService.restoreData(backupData);
   }
 
   /**
    * 完全替换数据（先清空，再恢复）
    */
-  async replaceAllData(backupData: any): Promise<void> {
-    if (backupData.data) {
-      // 先清空所有数据，然后导入新数据
-      await databaseService.forceCleanAllTables();
-      await this.importData(backupData.data);
-    }
+  async replaceAllData(backupData: any): Promise<any> {
+    return await databaseService.replaceAllData(backupData);
   }
 
   /**
@@ -115,6 +118,8 @@ if (typeof window !== 'undefined') {
     ...((window as any).databaseAPI || {}),
     databaseServiceManager: databaseManager,
     exportAllData: () => databaseManager.exportAllData(),
+    exportAllDataForBackup: () => databaseManager.exportAllDataForBackup(),
+    exportAllDataForSync: () => databaseManager.exportAllDataForSync(),
     importData: (data: any) => databaseManager.importData(data),
     backupData: () => databaseManager.backupData(),
     restoreData: (backupData: any) => databaseManager.restoreData(backupData),
@@ -153,6 +158,8 @@ export function createDatabaseAPI() {
   return {
     databaseServiceManager: databaseManager,
     exportAllData: () => databaseManager.exportAllData(),
+    exportAllDataForBackup: () => databaseManager.exportAllDataForBackup(),
+    exportAllDataForSync: () => databaseManager.exportAllDataForSync(),
     importData: (data: any) => databaseManager.importData(data),
     restoreData: (backupData: any) => databaseManager.restoreData(backupData),
     replaceAllData: (backupData: any) => databaseManager.replaceAllData(backupData),

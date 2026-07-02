@@ -202,11 +202,17 @@ const handleToggle = async (config: AIConfig, event: any) => {
       id: config.id!,
       data: {
         ...config,
-        enabled
+        enabled,
+        isPreferred: enabled ? config.isPreferred : false
       }
     })
 
     config.enabled = enabled
+    if (!enabled && config.isPreferred) {
+      await api.aiConfigs.clearPreferred.mutate()
+      config.isPreferred = false
+    }
+    await loadConfigs({ showLoading: false })
     const message = enabled
       ? t('aiConfig.configEnabled')
       : t('aiConfig.configDisabled')
@@ -249,6 +255,7 @@ const handleClearPreferred = async () => {
         handler: async () => {
           try {
             await api.aiConfigs.clearPreferred.mutate()
+            await loadConfigs({ showLoading: false })
             showToast(t('aiConfig.globalPreferredCleared'))
           } catch (error) {
             console.error('清除首选配置失败:', error)
@@ -278,6 +285,10 @@ const handleDelete = async (config: AIConfig) => {
         handler: async () => {
           try {
             await api.aiConfigs.delete.mutate(config.id!)
+            configs.value = configs.value.filter(item => item.id !== config.id)
+            if (preferredConfig.value?.id === config.id) {
+              preferredConfig.value = null
+            }
             showToast(t('aiConfig.configDeleteSuccess'))
           } catch (error) {
             console.error('删除 AI 配置失败:', error)
@@ -403,6 +414,10 @@ ion-chip {
 
 ion-card {
   margin: 16px;
+}
+
+ion-content {
+  --padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 104px);
 }
 
 .preferred-alert {

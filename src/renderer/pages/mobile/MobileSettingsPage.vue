@@ -114,43 +114,38 @@ import { Filesystem, Directory, Encoding } from '@capacitor/filesystem'
 import { Share } from '@capacitor/share'
 import { databaseService } from '~/lib/db'
 import { presentMobileToast } from '~/lib/utils/mobile-toast'
+import { createBackupPayload } from '@shared/backup-integrity'
 
 const router = useRouter()
 const { t, currentLocale, switchLocale } = useI18n()
-const { setThemeSource, themeSource } = useTheme()
+const { themeSource } = useTheme()
 
 const currentLanguage = ref(currentLocale.value)
 const currentTheme = ref(themeSource.value || 'system')
 const appVersion = ref(typeof __APP_VERSION__ !== 'undefined' ? __APP_VERSION__ : '')
 
+const createBackupId = () => {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
+}
+
 // 语言切换
 const handleLanguageChange = (event: any) => {
   const newLocale = event.detail.value
-  console.log('[Settings] 语言切换:', {
-    from: currentLanguage.value,
-    to: newLocale
-  })
-
   switchLocale(newLocale)
   currentLanguage.value = newLocale
-
-  console.log('[Settings] 语言切换完成，当前语言:', currentLanguage.value)
 }
 
 // 主题切换
 const handleThemeChange = async (event: any) => {
   const newTheme = event.detail.value as 'system' | 'light' | 'dark'
 
-  console.log('[Settings] 主题切换开始:', {
-    from: currentTheme.value,
-    to: newTheme
-  })
-
   // 保存到本地存储
   localStorage.setItem('theme', newTheme)
   currentTheme.value = newTheme
-
-  console.log('[Settings] 主题已保存到 localStorage')
 
   // 应用主题
   applyTheme(newTheme)
@@ -158,8 +153,6 @@ const handleThemeChange = async (event: any) => {
 
 // 应用主题函数
 const applyTheme = (theme: 'system' | 'light' | 'dark') => {
-  console.log('[Settings] applyTheme 调用，参数:', theme)
-
   const html = document.documentElement
 
   let isDark = false
@@ -167,13 +160,9 @@ const applyTheme = (theme: 'system' | 'light' | 'dark') => {
   if (theme === 'system') {
     // 使用系统主题
     isDark = window.matchMedia('(prefers-color-scheme: dark)').matches
-    console.log('[Settings] 使用系统主题，检测到:', isDark ? 'dark' : 'light')
   } else {
     isDark = theme === 'dark'
-    console.log('[Settings] 使用指定主题:', theme)
   }
-
-  console.log('[Settings] 应用主题前 html.classList:', html.classList.toString())
 
   // 1. Ionic 官方暗色调色板（控制 Ionic 组件颜色变量）
   html.classList.toggle('ion-palette-dark', isDark)
@@ -184,9 +173,6 @@ const applyTheme = (theme: 'system' | 'light' | 'dark') => {
   html.classList.toggle('light', !isDark)
   body.classList.toggle('dark', isDark)
   body.classList.toggle('light', !isDark)
-
-  console.log('[Settings] 应用主题后 html.classList:', html.classList.toString())
-  console.log('[Settings] 主题应用完成，isDark:', isDark)
 }
 
 // 导出数据
@@ -221,16 +207,24 @@ const performExport = async () => {
   try {
     await loading.present()
 
-    // 从数据库导出所有数据
-    const result = await databaseService.exportAllData()
+    // 从数据库导出完整备份数据，确保图片等二进制元数据被序列化
+    const result = await databaseService.exportAllDataForBackup()
 
-    if (!result || !result.success) {
-      throw new Error('导出数据失败')
+    if (!result || !result.success || !result.data) {
+      throw new Error(result?.error || result?.message || '导出数据失败')
     }
 
-    // 直接导出数据，与桌面端格式保持一致
-    const jsonString = JSON.stringify(result.data, null, 2)
-    const fileName = `ai-gist-backup-${new Date().toISOString().split('T')[0]}.json`
+    const createdAt = new Date().toISOString()
+    const backupId = createBackupId()
+    const backupPayload = createBackupPayload({
+      id: backupId,
+      name: `ai-gist-backup-${createdAt.split('T')[0]}-${backupId.slice(0, 8)}`,
+      description: t('dataManagement.exportFullBackup'),
+      createdAt,
+      data: result.data
+    })
+    const jsonString = JSON.stringify(backupPayload, null, 2)
+    const fileName = `${backupPayload.name}.json`
 
     // 保存到文件系统
     const savedFile = await Filesystem.writeFile({
@@ -353,27 +347,19 @@ const navigateToAbout = () => {
 }
 
 onMounted(() => {
-  console.log('[Settings] 组件挂载')
-
   // 加载应用版本
   // appVersion.value = window.electronAPI?.getAppVersion() || '1.0.0'
 
   // 从本地存储加载主题设置
   const savedTheme = localStorage.getItem('theme') as 'system' | 'light' | 'dark' | null
-  console.log('[Settings] 从 localStorage 读取主题:', savedTheme)
 
   if (savedTheme) {
     currentTheme.value = savedTheme
-    console.log('[Settings] 应用保存的主题:', savedTheme)
     applyTheme(savedTheme)
   } else {
     // 默认使用系统主题
-    console.log('[Settings] 没有保存的主题，使用系统默认')
     applyTheme('system')
   }
-
-  console.log('[Settings] 当前语言:', currentLanguage.value)
-  console.log('[Settings] 当前主题:', currentTheme.value)
 })
 </script>
 

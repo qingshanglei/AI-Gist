@@ -16,6 +16,33 @@ import { AppSettingsService } from './app-settings.service';
 import { QuickOptimizationService } from './quick-optimization.service';
 import { generateUUID } from '../utils/uuid';
 import { emitDataChange } from './data-change-events';
+import { unwrapBackupData } from '@shared/backup-integrity';
+
+const SYNCABLE_DATA_STORES = [
+  'categories',
+  'prompts',
+  'promptVariables',
+  'promptHistories',
+  'ai_configs',
+  'quick_optimization_configs',
+  'ai_generation_history',
+  'settings',
+  'syncTombstones'
+];
+
+const RESTORABLE_DATA_FIELDS = [
+  'categories',
+  'prompts',
+  'promptVariables',
+  'promptHistories',
+  'aiConfigs',
+  'quickOptimizationConfigs',
+  'aiHistory',
+  'settings',
+  'syncTombstones'
+];
+
+const DATABASE_DEBUG_STORAGE_KEY = 'ai-gist.debug.database';
 
 /**
  * 统一的数据库服务管理类
@@ -93,26 +120,45 @@ export class DatabaseServiceManager {
     this.category.close();
   }
 
+  private debugLog(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return;
+    }
+    console.debug(...args);
+  }
+
+  private debugWarn(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return;
+    }
+    console.warn(...args);
+  }
+
+  private debugError(...args: unknown[]): void {
+    if (!this.isDebugLoggingEnabled()) {
+      return;
+    }
+    console.error(...args);
+  }
+
+  private isDebugLoggingEnabled(): boolean {
+    try {
+      return typeof localStorage !== 'undefined' &&
+        localStorage.getItem(DATABASE_DEBUG_STORAGE_KEY) === 'true';
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * 获取数据库健康状态
    * 检查所有关键表是否存在
    * @returns Promise<{ healthy: boolean; missingStores: string[] }> 健康状态信息
    */
   async getHealthStatus(): Promise<{ healthy: boolean; missingStores: string[] }> {
-    const requiredStores = [
-      'categories',
-      'prompts',
-      'promptVariables',
-      'promptHistories',
-      'ai_configs',
-      'ai_generation_history',
-      'settings',
-      'quick_optimization_configs'
-    ];
-
     const missingStores: string[] = [];
 
-    for (const storeName of requiredStores) {
+    for (const storeName of SYNCABLE_DATA_STORES) {
       const exists = await this.category.checkObjectStoreExists(storeName);
       if (!exists) {
         missingStores.push(storeName);
@@ -132,13 +178,13 @@ export class DatabaseServiceManager {
    */
   async repairDatabase(): Promise<{ success: boolean; message: string }> {
     try {
-      console.log('DatabaseServiceManager: 开始修复数据库...');
+      this.debugLog('DatabaseServiceManager: 开始修复数据库...');
       
       // 使用基础服务的修复功能
       const repairResult = await this.category.repairDatabase();
       
       if (repairResult.success) {
-        console.log('DatabaseServiceManager: 数据库修复成功');
+        this.debugLog('DatabaseServiceManager: 数据库修复成功');
         
         // 重新检查健康状态
         const healthStatus = await this.getHealthStatus();
@@ -158,7 +204,7 @@ export class DatabaseServiceManager {
         return repairResult;
       }
     } catch (error) {
-      console.error('DatabaseServiceManager: 数据库修复失败:', error);
+      this.debugError('DatabaseServiceManager: 数据库修复失败:', error);
       return {
         success: false,
         message: `数据库修复失败: ${error instanceof Error ? error.message : '未知错误'}`
@@ -178,7 +224,7 @@ export class DatabaseServiceManager {
     missingStores?: string[];
   }> {
     try {
-      console.log('正在检查数据库健康状态...');
+      this.debugLog('正在检查数据库健康状态...');
       
       const healthStatus = await this.getHealthStatus();
       
@@ -190,10 +236,10 @@ export class DatabaseServiceManager {
         };
       }
       
-      console.log('检测到数据库问题，缺失的对象存储:', healthStatus.missingStores);
+      this.debugLog('检测到数据库问题，缺失的对象存储:', healthStatus.missingStores);
       
       // 首先尝试普通修复
-      console.log('尝试修复数据库...');
+      this.debugLog('尝试修复数据库...');
       const repairResult = await this.repairDatabase();
       
       if (repairResult.success) {
@@ -212,7 +258,7 @@ export class DatabaseServiceManager {
         missingStores: healthStatus.missingStores
       };
     } catch (error) {
-      console.error('检查和修复数据库过程中出错:', error);
+      this.debugError('检查和修复数据库过程中出错:', error);
       return {
         healthy: false,
         repaired: false,
@@ -242,34 +288,49 @@ export class DatabaseServiceManager {
   }
 
   /**
-   * 序列化 prompt 的 imageBlobs（Blob[] → base64 string[]）
+   * 序列化记录中的 imageBlobs（Blob[] → base64 string[]）
    */
-  private async serializeImageBlobs(prompts: any[]): Promise<any[]> {
-    return Promise.all(prompts.map(async (prompt) => {
-      if (!prompt.imageBlobs?.length) return prompt
-      const serialized = await Promise.all(
-        prompt.imageBlobs
-          .filter((b: any) => b instanceof Blob)
-          .map((b: Blob) => this.blobToBase64(b))
-      )
-      return { ...prompt, imageBlobs: serialized }
+  private async serializeImageBlobs(records: any[]): Promise<any[]> {
+    return Promise.all(records.map(async (record) => {
+      if (!record.imageBlobs?.length) return record
+      if (!Array.isArray(record.imageBlobs)) {
+        throw new Error('图片数据格式无效，无法创建完整备份')
+      }
+
+      const serialized = await Promise.all(record.imageBlobs.map((item: any, index: number) => {
+        if (item instanceof Blob) {
+          return this.blobToBase64(item)
+        }
+        if (typeof item === 'string' && item.startsWith('data:')) {
+          return item
+        }
+        throw new Error(`图片数据格式无效，无法创建完整备份（第 ${index + 1} 张）`)
+      }))
+      return { ...record, imageBlobs: serialized }
     }))
   }
 
   /**
-   * 反序列化 prompt 的 imageBlobs（base64 string[] → Blob[]）
+   * 反序列化记录中的 imageBlobs（base64 string[] → Blob[]）
    */
-  private async deserializeImageBlobs(promptData: any): Promise<any> {
-    if (!promptData.imageBlobs?.length) return promptData
+  private async deserializeImageBlobs(recordData: any): Promise<any> {
+    if (!recordData.imageBlobs?.length) return recordData
+    if (!Array.isArray(recordData.imageBlobs)) {
+      throw new Error('图片数据格式无效，无法恢复完整数据')
+    }
+
     const blobs = (await Promise.all(
-      promptData.imageBlobs.map(async (item: any) => {
+      recordData.imageBlobs.map(async (item: any, index: number) => {
         if (typeof item === 'string' && item.startsWith('data:')) {
           return this.base64ToBlob(item)
         }
-        return item instanceof Blob ? item : null
+        if (item instanceof Blob) {
+          return item
+        }
+        throw new Error(`图片数据格式无效，无法恢复完整数据（第 ${index + 1} 张）`)
       })
-    )).filter(Boolean)
-    return { ...promptData, imageBlobs: blobs }
+    ))
+    return { ...recordData, imageBlobs: blobs }
   }
 
   /**
@@ -277,64 +338,81 @@ export class DatabaseServiceManager {
    */
   async exportAllData(): Promise<DataExportResult> {
     try {
-      console.log('渲染进程: 开始导出数据库数据...');
+      this.debugLog('渲染进程: 开始导出数据库数据...');
       
       // 首先检查数据库健康状态
-      console.log('正在检查数据库健康状态...');
+      this.debugLog('正在检查数据库健康状态...');
       const healthStatus = await this.getHealthStatus();
       
       if (!healthStatus.healthy) {
-        console.warn('检测到数据库异常，缺失的对象存储:', healthStatus.missingStores);
+        this.debugWarn('检测到数据库异常，缺失的对象存储:', healthStatus.missingStores);
         
         // 尝试修复数据库
-        console.log('正在尝试修复数据库...');
+        this.debugLog('正在尝试修复数据库...');
         const repairResult = await this.repairDatabase();
         
         if (!repairResult.success) {
           throw new Error(`数据库修复失败: ${repairResult.message}`);
         }
         
-        console.log('数据库修复成功，继续导出数据...');
+        this.debugLog('数据库修复成功，继续导出数据...');
       }
       
       // 安全地获取所有数据
       const results = await Promise.allSettled([
         this.category.getBasicCategories(),
         this.prompt.getAllPromptsForTags(),
+        this.prompt.getAllPromptVariables(),
+        this.prompt.getAllPromptHistories(),
         this.aiConfig.getAllAIConfigs(),
+        this.quickOptimization.getAllQuickOptimizationConfigs(),
         this.aiGenerationHistory.getAllAIGenerationHistory(),
         this.appSettings.getAllSettings()
       ]);
       
-      // 处理结果，对失败的操作返回空数组
+      const tableNames = ['categories', 'prompts', 'promptVariables', 'promptHistories', 'aiConfigs', 'quickOptimizationConfigs', 'aiHistory', 'settings'];
+      const failedTables = results
+        .map((result, index) => result.status === 'rejected'
+          ? { tableName: tableNames[index], reason: result.reason }
+          : null)
+        .filter((failure): failure is { tableName: string; reason: unknown } => !!failure);
+
+      if (failedTables.length > 0) {
+        failedTables.forEach(failure => {
+          this.debugWarn(`获取 ${failure.tableName} 数据失败:`, failure.reason);
+        });
+        throw new Error(`读取数据表失败: ${failedTables.map(failure => failure.tableName).join(', ')}`);
+      }
+
       const [
         categories,
         prompts,
+        promptVariables,
+        promptHistories,
         aiConfigs,
+        quickOptimizationConfigs,
         aiHistory,
         settings
-      ] = results.map((result, index) => {
-        if (result.status === 'fulfilled') {
-          return result.value || [];
-        } else {
-          const tableNames = ['categories', 'prompts', 'aiConfigs', 'aiHistory', 'settings'];
-          console.warn(`获取 ${tableNames[index]} 数据失败:`, result.reason);
-          return [];
-        }
-      });
+      ] = results.map(result => result.status === 'fulfilled' ? (result.value || []) : []);
       
-      const exportData = {
+      const exportData = this.attachRelationUUIDsToExportData({
         categories: categories as any[],
         prompts: prompts as any[],
+        promptVariables: promptVariables as any[],
+        promptHistories: promptHistories as any[],
         aiConfigs: aiConfigs as any[],
+        quickOptimizationConfigs: quickOptimizationConfigs as any[],
         aiHistory: aiHistory as any[],
         settings: settings as any[]
-      };
+      });
       
-      console.log('渲染进程: 数据导出完成', {
+      this.debugLog('渲染进程: 数据导出完成', {
         分类数: exportData.categories.length,
         提示词数: exportData.prompts.length,
+        提示词变量数: exportData.promptVariables.length,
+        提示词历史数: exportData.promptHistories.length,
         AI配置数: exportData.aiConfigs.length,
+        快速优化配置数: exportData.quickOptimizationConfigs.length,
         AI历史数: exportData.aiHistory.length,
         设置数: exportData.settings.length
       });
@@ -348,7 +426,7 @@ export class DatabaseServiceManager {
       };
       
     } catch (error) {
-      console.error('渲染进程: 导出数据库数据失败:', error);
+      this.debugError('渲染进程: 导出数据库数据失败:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -362,15 +440,171 @@ export class DatabaseServiceManager {
    * 移动端备份时使用此方法，确保 imageBlobs 能正确序列化为 JSON
    */
   async exportAllDataForBackup(): Promise<DataExportResult> {
-    const result = await this.exportAllData();
+    try {
+      const result = await this.exportAllData();
+      if (!result.success || !result.data) return result;
+      return {
+        ...result,
+        data: {
+          ...result.data,
+          prompts: await this.serializeImageBlobs(result.data.prompts),
+          promptHistories: await this.serializeImageBlobs(result.data.promptHistories || [])
+        }
+      };
+    } catch (error) {
+      this.debugError('导出备份数据失败:', error);
+      return {
+        success: false,
+        message: '备份数据导出失败',
+        error: error instanceof Error ? error.message : String(error)
+      };
+    }
+  }
+
+  private attachRelationUUIDsToExportData(data: any): any {
+    const categoriesById = new Map<string, any>(
+      (data.categories || [])
+        .filter((category: any) => category?.id !== undefined && category?.id !== null)
+        .map((category: any) => [String(category.id), category])
+    );
+    const promptsById = new Map<string, any>(
+      (data.prompts || [])
+        .filter((prompt: any) => prompt?.id !== undefined && prompt?.id !== null)
+        .map((prompt: any) => [String(prompt.id), prompt])
+    );
+
+    return {
+      ...data,
+      prompts: (data.prompts || []).map((prompt: any) => {
+        const category = prompt.category || categoriesById.get(String(prompt.categoryId));
+        return category?.uuid && !prompt.categoryUuid
+          ? { ...prompt, categoryUuid: category.uuid }
+          : prompt;
+      }),
+      promptVariables: (data.promptVariables || []).map((variable: any) => {
+        const prompt = promptsById.get(String(variable.promptId));
+        return prompt?.uuid && !variable.promptUuid
+          ? { ...variable, promptUuid: prompt.uuid }
+          : variable;
+      }),
+      promptHistories: (data.promptHistories || []).map((history: any) => {
+        const prompt = promptsById.get(String(history.promptId));
+        const category = categoriesById.get(String(history.categoryId));
+        return {
+          ...history,
+          ...(prompt?.uuid && !history.promptUuid ? { promptUuid: prompt.uuid } : {}),
+          ...(category?.uuid && !history.categoryUuid ? { categoryUuid: category.uuid } : {})
+        };
+      })
+    };
+  }
+
+  private resolveRestoredPromptId(
+    record: any,
+    idMapping: Record<string, number>,
+    uuidMapping: Record<string, number>,
+    restoredIds: Set<number>
+  ): number | undefined {
+    if (record.promptId !== undefined) {
+      const mappedId = idMapping[`prompt_${record.promptId}`];
+      if (mappedId !== undefined) {
+        return mappedId;
+      }
+    }
+
+    if (record.promptUuid && uuidMapping[record.promptUuid] !== undefined) {
+      return uuidMapping[record.promptUuid];
+    }
+
+    if (record.promptId !== undefined) {
+      const numericId = Number(record.promptId);
+      if (restoredIds.has(numericId)) {
+        return numericId;
+      }
+    }
+
+    if (restoredIds.size === 1) {
+      return [...restoredIds][0];
+    }
+
+    return undefined;
+  }
+
+  private resolveRestoredCategoryId(
+    record: any,
+    idMapping: Record<string, number>,
+    uuidMapping: Record<string, number>,
+    restoredIds: Set<number>
+  ): number | undefined {
+    if (record.categoryId !== undefined && record.categoryId !== null) {
+      const mappedId = idMapping[`category_${record.categoryId}`];
+      if (mappedId !== undefined) {
+        return mappedId;
+      }
+    }
+
+    if (record.categoryUuid && uuidMapping[record.categoryUuid] !== undefined) {
+      return uuidMapping[record.categoryUuid];
+    }
+
+    if (record.categoryId !== undefined && record.categoryId !== null) {
+      const numericId = Number(record.categoryId);
+      if (restoredIds.has(numericId)) {
+        return numericId;
+      }
+    }
+
+    return undefined;
+  }
+
+  /**
+   * 导出云同步快照数据。
+   * 与普通备份相比，同步快照额外包含删除标记，避免多端硬删除丢失。
+   */
+  async exportAllDataForSync(): Promise<DataExportResult> {
+    try {
+      await this.ensureStableSyncUUIDs();
+    } catch (error) {
+      return {
+        success: false,
+        message: '同步数据导出失败',
+        error: `同步记录 UUID 迁移失败: ${error instanceof Error ? error.message : String(error)}`
+      };
+    }
+
+    const result = await this.exportAllDataForBackup();
     if (!result.success || !result.data) return result;
+
+    let syncTombstones: any[] = [];
+    try {
+      syncTombstones = await this.category.getSyncTombstones();
+    } catch (error) {
+      this.debugWarn('获取同步删除标记失败:', error);
+      return {
+        success: false,
+        message: '同步数据导出失败',
+        error: `读取同步删除标记失败: ${error instanceof Error ? error.message : String(error)}`
+      };
+    }
+
     return {
       ...result,
       data: {
         ...result.data,
-        prompts: await this.serializeImageBlobs(result.data.prompts)
+        syncTombstones
       }
     };
+  }
+
+  private async ensureStableSyncUUIDs(): Promise<void> {
+    const migrationResult = await this.category.migrateAllRecordsToUUID();
+    const failedStores = Object.entries(migrationResult)
+      .filter(([, updatedCount]) => updatedCount < 0)
+      .map(([storeName]) => storeName);
+
+    if (failedStores.length > 0) {
+      throw new Error(failedStores.join(', '));
+    }
   }
 
   /**
@@ -378,7 +612,8 @@ export class DatabaseServiceManager {
    */
   async importData(data: any): Promise<DataImportResult> {
     try {
-      console.log('渲染进程: 开始导入数据库数据...');
+      this.debugLog('渲染进程: 开始导入数据库数据...');
+      data = unwrapBackupData(data);
       
       if (!data || typeof data !== 'object') {
         throw new Error('导入数据格式无效');
@@ -386,29 +621,40 @@ export class DatabaseServiceManager {
       
       // 确保导入数据具有完整的UUID
       data = this.ensureUUIDsInImportData(data);
+      const hasStandalonePromptVariables = Array.isArray(data.promptVariables);
       
       const details: Record<string, number> = {};
       let totalErrors = 0;
       
       // ID映射表：旧ID -> 新ID
       const idMapping: Record<string, number> = {};
+      const categoryUuidMapping: Record<string, number> = {};
+      const promptUuidMapping: Record<string, number> = {};
+      const restoredCategoryIds = new Set<number>();
+      const restoredPromptIds = new Set<number>();
       
       // 导入分类数据
       if (data.categories && data.categories.length > 0) {
-        console.log(`导入分类数据: ${data.categories.length} 条`);
+        this.debugLog(`导入分类数据: ${data.categories.length} 条`);
         for (const category of data.categories) {
           const oldId = category.id;
           const { id, ...categoryDataWithoutId } = category;
           
           try {
-            const newCategory = await this.category.createCategory(categoryDataWithoutId);
+            const newCategory = await this.addRestoredRecord('categories', categoryDataWithoutId);
             // 记录ID映射：旧ID -> 新ID
             if (oldId !== undefined) {
               idMapping[`category_${oldId}`] = newCategory.id!;
-              console.log(`分类ID映射: ${oldId} -> ${newCategory.id}`);
+              this.debugLog(`分类ID映射: ${oldId} -> ${newCategory.id}`);
+            }
+            if (newCategory.id !== undefined) {
+              restoredCategoryIds.add(newCategory.id);
+              if (category.uuid) {
+                categoryUuidMapping[category.uuid] = newCategory.id;
+              }
             }
           } catch (err) {
-            console.warn('导入分类数据失败:', category.id, err);
+            this.debugWarn('导入分类数据失败:', category.id, err);
             totalErrors++;
           }
         }
@@ -416,36 +662,130 @@ export class DatabaseServiceManager {
       
       // 导入提示词数据（需要处理分类ID映射）
       if (data.prompts && data.prompts.length > 0) {
-        console.log(`导入提示词数据: ${data.prompts.length} 条`);
+        this.debugLog(`导入提示词数据: ${data.prompts.length} 条`);
         for (const prompt of data.prompts) {
           const oldPromptId = prompt.id;
-          const { id, ...promptDataWithoutId } = prompt;
+          const promptDataWithoutId = { ...prompt };
+          delete promptDataWithoutId.id;
+          delete promptDataWithoutId.category;
+          if (hasStandalonePromptVariables) {
+            delete promptDataWithoutId.variables;
+          }
           
           // 处理分类ID映射
-          if (promptDataWithoutId.categoryId !== undefined) {
+          if (promptDataWithoutId.categoryId !== undefined || promptDataWithoutId.categoryUuid) {
             const oldCategoryId = promptDataWithoutId.categoryId;
-            const newCategoryId = idMapping[`category_${oldCategoryId}`];
-            
+            const newCategoryId = this.resolveRestoredCategoryId(
+              promptDataWithoutId,
+              idMapping,
+              categoryUuidMapping,
+              restoredCategoryIds
+            );
+
             if (newCategoryId !== undefined) {
               promptDataWithoutId.categoryId = newCategoryId;
-              console.log(`提示词分类ID映射: ${oldCategoryId} -> ${newCategoryId}`);
+              this.debugLog(`提示词分类ID映射: ${oldCategoryId} -> ${newCategoryId}`);
             } else {
-              console.warn(`未找到分类ID映射: ${oldCategoryId}，将提示词设为未分类`);
+              this.debugWarn(`未找到分类ID映射: ${oldCategoryId}，将提示词设为未分类`);
               promptDataWithoutId.categoryId = undefined;
             }
           }
 
           try {
             const promptToCreate = await this.deserializeImageBlobs(promptDataWithoutId);
-            const newPrompt = await this.prompt.createPrompt(promptToCreate);
+            const newPrompt = await this.addRestoredRecord('prompts', promptToCreate);
 
             // 记录提示词ID映射：旧ID -> 新ID
             if (oldPromptId !== undefined) {
               idMapping[`prompt_${oldPromptId}`] = newPrompt.id!;
-              console.log(`提示词ID映射: ${oldPromptId} -> ${newPrompt.id}`);
+              this.debugLog(`提示词ID映射: ${oldPromptId} -> ${newPrompt.id}`);
+            }
+            if (newPrompt.id !== undefined) {
+              restoredPromptIds.add(newPrompt.id);
+              if (prompt.uuid) {
+                promptUuidMapping[prompt.uuid] = newPrompt.id;
+              }
             }
           } catch (err) {
-            console.warn('导入提示词数据失败:', prompt.id, err);
+            this.debugWarn('导入提示词数据失败:', prompt.id, err);
+            totalErrors++;
+          }
+        }
+      }
+
+      // 导入提示词变量数据（需要处理提示词 ID 映射）
+      if (data.promptVariables && data.promptVariables.length > 0) {
+        this.debugLog(`导入提示词变量数据: ${data.promptVariables.length} 条`);
+        for (const variable of data.promptVariables) {
+          const variableDataWithoutId = { ...variable };
+          delete variableDataWithoutId.id;
+
+          if (variableDataWithoutId.promptId !== undefined || variableDataWithoutId.promptUuid) {
+            const newPromptId = this.resolveRestoredPromptId(
+              variableDataWithoutId,
+              idMapping,
+              promptUuidMapping,
+              restoredPromptIds
+            );
+            if (newPromptId !== undefined) {
+              variableDataWithoutId.promptId = newPromptId;
+            } else {
+              this.debugWarn(`未找到提示词变量的提示词ID映射: ${variableDataWithoutId.promptId}`);
+              totalErrors++;
+              continue;
+            }
+          }
+
+          try {
+            await this.addRestoredRecord('promptVariables', variableDataWithoutId);
+          } catch (err) {
+            this.debugWarn('导入提示词变量数据失败:', variable.id, err);
+            totalErrors++;
+          }
+        }
+      }
+
+      // 导入提示词历史数据（需要处理提示词 ID 映射）
+      if (data.promptHistories && data.promptHistories.length > 0) {
+        this.debugLog(`导入提示词历史数据: ${data.promptHistories.length} 条`);
+        for (const history of data.promptHistories) {
+          const { id, ...historyDataWithoutId } = history;
+
+          if (historyDataWithoutId.promptId !== undefined || historyDataWithoutId.promptUuid) {
+            const newPromptId = this.resolveRestoredPromptId(
+              historyDataWithoutId,
+              idMapping,
+              promptUuidMapping,
+              restoredPromptIds
+            );
+            if (newPromptId !== undefined) {
+              historyDataWithoutId.promptId = newPromptId;
+            } else {
+              this.debugWarn(`未找到提示词历史的提示词ID映射: ${historyDataWithoutId.promptId}`);
+              totalErrors++;
+              continue;
+            }
+          }
+
+          if (historyDataWithoutId.categoryId !== undefined || historyDataWithoutId.categoryUuid) {
+            const newCategoryId = this.resolveRestoredCategoryId(
+              historyDataWithoutId,
+              idMapping,
+              categoryUuidMapping,
+              restoredCategoryIds
+            );
+            if (newCategoryId !== undefined) {
+              historyDataWithoutId.categoryId = newCategoryId;
+            } else {
+              delete historyDataWithoutId.categoryId;
+            }
+          }
+
+          try {
+            const historyToCreate = await this.deserializeImageBlobs(historyDataWithoutId);
+            await this.addRestoredRecord('promptHistories', historyToCreate);
+          } catch (err) {
+            this.debugWarn('导入提示词历史数据失败:', history.id, err);
             totalErrors++;
           }
         }
@@ -453,13 +793,28 @@ export class DatabaseServiceManager {
       
       // 导入AI配置数据
       if (data.aiConfigs && data.aiConfigs.length > 0) {
-        console.log(`导入AI配置数据: ${data.aiConfigs.length} 条`);
+        this.debugLog(`导入AI配置数据: ${data.aiConfigs.length} 条`);
         for (const config of data.aiConfigs) {
           const { id, ...configDataWithoutId } = config;
           try {
-            await this.aiConfig.createAIConfig(configDataWithoutId);
+            await this.addRestoredRecord('ai_configs', configDataWithoutId);
           } catch (err) {
-            console.warn('导入AI配置数据失败:', config.id, err);
+            this.debugWarn('导入AI配置数据失败:', config.id, err);
+            totalErrors++;
+          }
+        }
+      }
+
+      // 导入快速优化配置数据
+      if (data.quickOptimizationConfigs && data.quickOptimizationConfigs.length > 0) {
+        this.debugLog(`导入快速优化配置数据: ${data.quickOptimizationConfigs.length} 条`);
+        for (const config of data.quickOptimizationConfigs) {
+          const configDataWithoutId = { ...config };
+          delete configDataWithoutId.id;
+          try {
+            await this.addRestoredRecord('quick_optimization_configs', configDataWithoutId);
+          } catch (err) {
+            this.debugWarn('导入快速优化配置数据失败:', config.id, err);
             totalErrors++;
           }
         }
@@ -467,13 +822,13 @@ export class DatabaseServiceManager {
       
       // 导入AI历史数据
       if (data.aiHistory && data.aiHistory.length > 0) {
-        console.log(`导入AI历史数据: ${data.aiHistory.length} 条`);
+        this.debugLog(`导入AI历史数据: ${data.aiHistory.length} 条`);
         for (const history of data.aiHistory) {
           const { id, ...historyDataWithoutId } = history;
           try {
-            await this.aiGenerationHistory.createAIGenerationHistory(historyDataWithoutId);
+            await this.addRestoredRecord('ai_generation_history', historyDataWithoutId);
           } catch (err) {
-            console.warn('导入AI历史数据失败:', history.id, err);
+            this.debugWarn('导入AI历史数据失败:', history.id, err);
             totalErrors++;
           }
         }
@@ -481,12 +836,14 @@ export class DatabaseServiceManager {
       
       // 导入设置数据
       if (data.settings && data.settings.length > 0) {
-        console.log(`导入设置数据: ${data.settings.length} 条`);
+        this.debugLog(`导入设置数据: ${data.settings.length} 条`);
         for (const setting of data.settings) {
+          const settingDataWithoutId = { ...setting };
+          delete settingDataWithoutId.id;
           try {
-            await this.appSettings.updateSettingByKey(setting.key, setting.value, setting.type, setting.description);
+            await this.addRestoredRecord('settings', settingDataWithoutId);
           } catch (err) {
-            console.warn('导入设置数据失败:', setting.key, err);
+            this.debugWarn('导入设置数据失败:', setting.key, err);
             totalErrors++;
           }
         }
@@ -495,18 +852,26 @@ export class DatabaseServiceManager {
       // 统计导入结果
       details.categories = (data.categories?.length || 0);
       details.prompts = (data.prompts?.length || 0);
+      details.promptVariables = (data.promptVariables?.length || 0);
+      details.promptHistories = (data.promptHistories?.length || 0);
       details.aiConfigs = (data.aiConfigs?.length || 0);
+      details.quickOptimizationConfigs = (data.quickOptimizationConfigs?.length || 0);
       details.aiHistory = (data.aiHistory?.length || 0);
       details.settings = (data.settings?.length || 0);
       
       const totalImported = Object.values(details).reduce((sum, count) => sum + count, 0);
       
-      console.log('渲染进程: 数据导入完成', details);
-      console.log('ID映射表:', idMapping);
+      this.debugLog('渲染进程: 数据导入完成', details);
+      this.debugLog('ID映射表:', idMapping);
+
+      const hasErrors = totalErrors > 0;
       
       return {
-        success: true,
-        message: `数据导入成功，共导入 ${totalImported} 条记录${totalErrors > 0 ? `，失败 ${totalErrors} 条` : ''}`,
+        success: !hasErrors,
+        message: hasErrors
+          ? `数据导入未完全完成，共处理 ${totalImported} 条记录，失败 ${totalErrors} 条`
+          : `数据导入成功，共导入 ${totalImported} 条记录`,
+        error: hasErrors ? `导入过程中有 ${totalErrors} 条记录失败` : undefined,
         totalImported,
         totalErrors,
         details,
@@ -514,13 +879,13 @@ export class DatabaseServiceManager {
           categories: details.categories,
           prompts: details.prompts,
           settings: details.settings,
-          history: details.aiHistory,
+          history: details.aiHistory + details.promptHistories,
           aiConfigs: details.aiConfigs
         }
       };
       
     } catch (error) {
-      console.error('渲染进程: 导入数据库数据失败:', error);
+      this.debugError('渲染进程: 导入数据库数据失败:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -533,27 +898,30 @@ export class DatabaseServiceManager {
    * 备份数据
    */
   async backupData(): Promise<DataExportResult> {
-    // 备份和导出是相同的逻辑
-    return await this.exportAllData();
+    return await this.exportAllDataForBackup();
   }
   
   /**
    * 恢复数据
    */
-  async restoreData(backupData: any): Promise<DataImportResult> {
+  async restoreData(backupData: any, options: { skipClean?: boolean } = {}): Promise<DataImportResult> {
     try {
-      console.log('渲染进程: 开始恢复数据...');
+      this.debugLog('渲染进程: 开始恢复数据...');
+      backupData = unwrapBackupData(backupData);
       
       if (!backupData || typeof backupData !== 'object') {
         throw new Error('恢复数据格式无效');
       }
+
+      this.assertRestorableDataShape(backupData);
       
       // 确保导入数据具有完整的UUID
       backupData = this.ensureUUIDsInImportData(backupData);
+      const hasStandalonePromptVariables = Array.isArray(backupData.promptVariables);
       
       // 清空现有数据表（如果支持的话）
-      if (this.forceCleanAllTables) {
-        console.log('清空现有数据表...');
+      if (!options.skipClean && this.forceCleanAllTables) {
+        this.debugLog('清空现有数据表...');
         await this.forceCleanAllTables();
       }
       
@@ -563,23 +931,33 @@ export class DatabaseServiceManager {
       
       // ID映射表：旧ID -> 新ID
       const idMapping: Record<string, number> = {};
+      const categoryUuidMapping: Record<string, number> = {};
+      const promptUuidMapping: Record<string, number> = {};
+      const restoredCategoryIds = new Set<number>();
+      const restoredPromptIds = new Set<number>();
       
       // 恢复分类数据
       if (backupData.categories && backupData.categories.length > 0) {
-        console.log(`恢复分类数据: ${backupData.categories.length} 条`);
+        this.debugLog(`恢复分类数据: ${backupData.categories.length} 条`);
         for (const category of backupData.categories) {
           const oldId = category.id;
           const { id, ...categoryDataWithoutId } = category;
           
           try {
-            const newCategory = await this.category.createCategory(categoryDataWithoutId);
+            const newCategory = await this.addRestoredRecord('categories', categoryDataWithoutId);
             // 记录ID映射：旧ID -> 新ID
             if (oldId !== undefined) {
               idMapping[`category_${oldId}`] = newCategory.id!;
-              console.log(`分类ID映射: ${oldId} -> ${newCategory.id}`);
+              this.debugLog(`分类ID映射: ${oldId} -> ${newCategory.id}`);
+            }
+            if (newCategory.id !== undefined) {
+              restoredCategoryIds.add(newCategory.id);
+              if (category.uuid) {
+                categoryUuidMapping[category.uuid] = newCategory.id;
+              }
             }
           } catch (err) {
-            console.warn('恢复分类数据失败:', category.id, err);
+            this.debugWarn('恢复分类数据失败:', category.id, err);
             totalErrors++;
           }
         }
@@ -587,36 +965,130 @@ export class DatabaseServiceManager {
       
       // 恢复提示词数据（需要处理分类ID映射）
       if (backupData.prompts && backupData.prompts.length > 0) {
-        console.log(`恢复提示词数据: ${backupData.prompts.length} 条`);
+        this.debugLog(`恢复提示词数据: ${backupData.prompts.length} 条`);
         for (const prompt of backupData.prompts) {
           const oldPromptId = prompt.id;
-          const { id, ...promptDataWithoutId } = prompt;
+          const promptDataWithoutId = { ...prompt };
+          delete promptDataWithoutId.id;
+          delete promptDataWithoutId.category;
+          if (hasStandalonePromptVariables) {
+            delete promptDataWithoutId.variables;
+          }
           
           // 处理分类ID映射
-          if (promptDataWithoutId.categoryId !== undefined) {
+          if (promptDataWithoutId.categoryId !== undefined || promptDataWithoutId.categoryUuid) {
             const oldCategoryId = promptDataWithoutId.categoryId;
-            const newCategoryId = idMapping[`category_${oldCategoryId}`];
-            
+            const newCategoryId = this.resolveRestoredCategoryId(
+              promptDataWithoutId,
+              idMapping,
+              categoryUuidMapping,
+              restoredCategoryIds
+            );
+
             if (newCategoryId !== undefined) {
               promptDataWithoutId.categoryId = newCategoryId;
-              console.log(`提示词分类ID映射: ${oldCategoryId} -> ${newCategoryId}`);
+              this.debugLog(`提示词分类ID映射: ${oldCategoryId} -> ${newCategoryId}`);
             } else {
-              console.warn(`未找到分类ID映射: ${oldCategoryId}，将提示词设为未分类`);
+              this.debugWarn(`未找到分类ID映射: ${oldCategoryId}，将提示词设为未分类`);
               promptDataWithoutId.categoryId = undefined;
             }
           }
 
           try {
             const promptToCreate = await this.deserializeImageBlobs(promptDataWithoutId);
-            const newPrompt = await this.prompt.createPrompt(promptToCreate);
+            const newPrompt = await this.addRestoredRecord('prompts', promptToCreate);
 
             // 记录提示词ID映射：旧ID -> 新ID
             if (oldPromptId !== undefined) {
               idMapping[`prompt_${oldPromptId}`] = newPrompt.id!;
-              console.log(`提示词ID映射: ${oldPromptId} -> ${newPrompt.id}`);
+              this.debugLog(`提示词ID映射: ${oldPromptId} -> ${newPrompt.id}`);
+            }
+            if (newPrompt.id !== undefined) {
+              restoredPromptIds.add(newPrompt.id);
+              if (prompt.uuid) {
+                promptUuidMapping[prompt.uuid] = newPrompt.id;
+              }
             }
           } catch (err) {
-            console.warn('恢复提示词数据失败:', prompt.id, err);
+            this.debugWarn('恢复提示词数据失败:', prompt.id, err);
+            totalErrors++;
+          }
+        }
+      }
+
+      // 恢复提示词变量数据（需要处理提示词 ID 映射）
+      if (backupData.promptVariables && backupData.promptVariables.length > 0) {
+        this.debugLog(`恢复提示词变量数据: ${backupData.promptVariables.length} 条`);
+        for (const variable of backupData.promptVariables) {
+          const variableDataWithoutId = { ...variable };
+          delete variableDataWithoutId.id;
+
+          if (variableDataWithoutId.promptId !== undefined || variableDataWithoutId.promptUuid) {
+            const newPromptId = this.resolveRestoredPromptId(
+              variableDataWithoutId,
+              idMapping,
+              promptUuidMapping,
+              restoredPromptIds
+            );
+            if (newPromptId !== undefined) {
+              variableDataWithoutId.promptId = newPromptId;
+            } else {
+              this.debugWarn(`未找到提示词变量的提示词ID映射: ${variableDataWithoutId.promptId}`);
+              totalErrors++;
+              continue;
+            }
+          }
+
+          try {
+            await this.addRestoredRecord('promptVariables', variableDataWithoutId);
+          } catch (err) {
+            this.debugWarn('恢复提示词变量数据失败:', variable.id, err);
+            totalErrors++;
+          }
+        }
+      }
+
+      // 恢复提示词历史数据（需要处理提示词 ID 映射）
+      if (backupData.promptHistories && backupData.promptHistories.length > 0) {
+        this.debugLog(`恢复提示词历史数据: ${backupData.promptHistories.length} 条`);
+        for (const history of backupData.promptHistories) {
+          const { id, ...historyDataWithoutId } = history;
+
+          if (historyDataWithoutId.promptId !== undefined || historyDataWithoutId.promptUuid) {
+            const newPromptId = this.resolveRestoredPromptId(
+              historyDataWithoutId,
+              idMapping,
+              promptUuidMapping,
+              restoredPromptIds
+            );
+            if (newPromptId !== undefined) {
+              historyDataWithoutId.promptId = newPromptId;
+            } else {
+              this.debugWarn(`未找到提示词历史的提示词ID映射: ${historyDataWithoutId.promptId}`);
+              totalErrors++;
+              continue;
+            }
+          }
+
+          if (historyDataWithoutId.categoryId !== undefined || historyDataWithoutId.categoryUuid) {
+            const newCategoryId = this.resolveRestoredCategoryId(
+              historyDataWithoutId,
+              idMapping,
+              categoryUuidMapping,
+              restoredCategoryIds
+            );
+            if (newCategoryId !== undefined) {
+              historyDataWithoutId.categoryId = newCategoryId;
+            } else {
+              delete historyDataWithoutId.categoryId;
+            }
+          }
+
+          try {
+            const historyToCreate = await this.deserializeImageBlobs(historyDataWithoutId);
+            await this.addRestoredRecord('promptHistories', historyToCreate);
+          } catch (err) {
+            this.debugWarn('恢复提示词历史数据失败:', history.id, err);
             totalErrors++;
           }
         }
@@ -624,13 +1096,28 @@ export class DatabaseServiceManager {
       
       // 恢复AI配置数据
       if (backupData.aiConfigs && backupData.aiConfigs.length > 0) {
-        console.log(`恢复AI配置数据: ${backupData.aiConfigs.length} 条`);
+        this.debugLog(`恢复AI配置数据: ${backupData.aiConfigs.length} 条`);
         for (const config of backupData.aiConfigs) {
           const { id, ...configDataWithoutId } = config;
           try {
-            await this.aiConfig.createAIConfig(configDataWithoutId);
+            await this.addRestoredRecord('ai_configs', configDataWithoutId);
           } catch (err) {
-            console.warn('恢复AI配置数据失败:', config.id, err);
+            this.debugWarn('恢复AI配置数据失败:', config.id, err);
+            totalErrors++;
+          }
+        }
+      }
+
+      // 恢复快速优化配置数据
+      if (backupData.quickOptimizationConfigs && backupData.quickOptimizationConfigs.length > 0) {
+        this.debugLog(`恢复快速优化配置数据: ${backupData.quickOptimizationConfigs.length} 条`);
+        for (const config of backupData.quickOptimizationConfigs) {
+          const configDataWithoutId = { ...config };
+          delete configDataWithoutId.id;
+          try {
+            await this.addRestoredRecord('quick_optimization_configs', configDataWithoutId);
+          } catch (err) {
+            this.debugWarn('恢复快速优化配置数据失败:', config.id, err);
             totalErrors++;
           }
         }
@@ -638,13 +1125,13 @@ export class DatabaseServiceManager {
       
       // 恢复AI历史数据
       if (backupData.aiHistory && backupData.aiHistory.length > 0) {
-        console.log(`恢复AI历史数据: ${backupData.aiHistory.length} 条`);
+        this.debugLog(`恢复AI历史数据: ${backupData.aiHistory.length} 条`);
         for (const history of backupData.aiHistory) {
           const { id, ...historyDataWithoutId } = history;
           try {
-            await this.aiGenerationHistory.createAIGenerationHistory(historyDataWithoutId);
+            await this.addRestoredRecord('ai_generation_history', historyDataWithoutId);
           } catch (err) {
-            console.warn('恢复AI历史数据失败:', history.id, err);
+            this.debugWarn('恢复AI历史数据失败:', history.id, err);
             totalErrors++;
           }
         }
@@ -652,32 +1139,46 @@ export class DatabaseServiceManager {
       
       // 恢复设置数据
       if (backupData.settings && backupData.settings.length > 0) {
-        console.log(`恢复设置数据: ${backupData.settings.length} 条`);
+        this.debugLog(`恢复设置数据: ${backupData.settings.length} 条`);
         for (const setting of backupData.settings) {
+          const settingDataWithoutId = { ...setting };
+          delete settingDataWithoutId.id;
           try {
-            await this.appSettings.updateSettingByKey(setting.key, setting.value, setting.type, setting.description);
+            await this.addRestoredRecord('settings', settingDataWithoutId);
           } catch (err) {
-            console.warn('恢复设置数据失败:', setting.key, err);
+            this.debugWarn('恢复设置数据失败:', setting.key, err);
             totalErrors++;
           }
         }
       }
+
+      const restoredTombstones = await this.restoreSyncTombstones(backupData.syncTombstones || []);
       
       // 统计恢复结果
       details.categories = (backupData.categories?.length || 0);
       details.prompts = (backupData.prompts?.length || 0);
+      details.promptVariables = (backupData.promptVariables?.length || 0);
+      details.promptHistories = (backupData.promptHistories?.length || 0);
       details.aiConfigs = (backupData.aiConfigs?.length || 0);
+      details.quickOptimizationConfigs = (backupData.quickOptimizationConfigs?.length || 0);
       details.aiHistory = (backupData.aiHistory?.length || 0);
       details.settings = (backupData.settings?.length || 0);
+      if (restoredTombstones > 0) {
+        details.syncTombstones = restoredTombstones;
+      }
       
       const totalRestored = Object.values(details).reduce((sum, count) => sum + count, 0);
+      const success = totalErrors === 0;
       
-      console.log(`渲染进程: 数据恢复完成，总计恢复记录数: ${totalRestored}, 错误数: ${totalErrors}`);
-      console.log('ID映射表:', idMapping);
+      this.debugLog(`渲染进程: 数据恢复完成，总计恢复记录数: ${totalRestored}, 错误数: ${totalErrors}`);
+      this.debugLog('ID映射表:', idMapping);
       
       return {
-        success: true,
-        message: `数据恢复成功，共恢复 ${totalRestored} 条记录${totalErrors > 0 ? `，失败 ${totalErrors} 条` : ''}`,
+        success,
+        message: success
+          ? `数据恢复成功，共恢复 ${totalRestored} 条记录`
+          : `数据恢复失败，共恢复 ${totalRestored} 条记录，失败 ${totalErrors} 条`,
+        error: success ? undefined : `恢复过程中有 ${totalErrors} 条记录失败`,
         totalImported: totalRestored,
         totalErrors,
         details,
@@ -685,13 +1186,13 @@ export class DatabaseServiceManager {
           categories: details.categories,
           prompts: details.prompts,
           settings: details.settings,
-          history: details.aiHistory,
+          history: details.aiHistory + details.promptHistories,
           aiConfigs: details.aiConfigs
         }
       };
       
     } catch (error) {
-      console.error('渲染进程: 恢复数据失败:', error);
+      this.debugError('渲染进程: 恢复数据失败:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -705,15 +1206,17 @@ export class DatabaseServiceManager {
    */
   async replaceAllData(backupData: any): Promise<DataImportResult> {
     try {
-      console.log('渲染进程: 开始完全替换数据...');
+      this.debugLog('渲染进程: 开始完全替换数据...');
+      const dataToRestore = unwrapBackupData(backupData);
+      this.assertRestorableDataShape(dataToRestore);
       
       // 先清空所有数据
       await this.forceCleanAllTables();
       
       // 然后恢复数据
-      return await this.restoreData(backupData);
+      return await this.restoreData(dataToRestore, { skipClean: true });
     } catch (error) {
-      console.error('渲染进程: 完全替换数据失败:', error);
+      this.debugError('渲染进程: 完全替换数据失败:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -727,37 +1230,45 @@ export class DatabaseServiceManager {
    */
   async forceCleanAllTables(): Promise<void> {
     try {
-      console.log('开始清空所有数据表...');
+      this.debugLog('开始清空所有数据表...');
       
       const db = await this.getDatabase();
       if (!db) {
         throw new Error('无法获取数据库连接');
       }
       
-      const tableNames = ['categories', 'prompts', 'promptVariables', 'promptHistories', 'ai_configs', 'ai_generation_history', 'settings'];
-      
-      for (const tableName of tableNames) {
+      for (const tableName of SYNCABLE_DATA_STORES) {
         if (db.objectStoreNames.contains(tableName)) {
           const transaction = db.transaction([tableName], 'readwrite');
           const store = transaction.objectStore(tableName);
           await new Promise<void>((resolve, reject) => {
+            let clearSucceeded = false;
+
+            transaction.oncomplete = () => {
+              if (clearSucceeded) {
+                this.debugLog(`清空表 ${tableName} 成功`);
+                emitDataChange({
+                  storeName: tableName,
+                  action: 'clear'
+                });
+              }
+              resolve();
+            };
+            transaction.onerror = () => reject(transaction.error || new Error(`清空表 ${tableName} 事务失败`));
+            transaction.onabort = () => reject(transaction.error || new Error(`清空表 ${tableName} 事务中止`));
+
             const clearRequest = store.clear();
             clearRequest.onsuccess = () => {
-              console.log(`清空表 ${tableName} 成功`);
-              emitDataChange({
-                storeName: tableName,
-                action: 'clear'
-              });
-              resolve();
+              clearSucceeded = true;
             };
             clearRequest.onerror = () => reject(clearRequest.error);
           });
         }
       }
       
-      console.log('所有数据表清空完成');
+      this.debugLog('所有数据表清空完成');
     } catch (error) {
-      console.error('清空数据表失败:', error);
+      this.debugError('清空数据表失败:', error);
       throw error;
     }
   }
@@ -771,9 +1282,142 @@ export class DatabaseServiceManager {
       // 使用基础服务的数据库连接
       return (this.category as any).db;
     } catch (error) {
-      console.error('获取数据库连接失败:', error);
+      this.debugError('获取数据库连接失败:', error);
       return null;
     }
+  }
+
+  private async addRestoredRecord<T extends { id?: number } = any>(
+    storeName: string,
+    data: Omit<T, 'id'> & { id?: number }
+  ): Promise<T> {
+    const db = await this.getDatabase();
+    if (!db) {
+      throw new Error('无法获取数据库连接');
+    }
+
+    const recordToRestore = { ...(data as any) };
+    delete recordToRestore.id;
+
+    return await new Promise<T>((resolve, reject) => {
+      const transaction = db.transaction([storeName], 'readwrite');
+      const store = transaction.objectStore(storeName);
+      const request = store.add(recordToRestore);
+
+      request.onsuccess = () => {
+        const restoredRecord = {
+          ...recordToRestore,
+          id: request.result as number
+        } as T;
+        emitDataChange({
+          storeName: storeName as any,
+          action: 'create',
+          id: request.result
+        });
+        resolve(restoredRecord);
+      };
+      request.onerror = () => reject(request.error);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error || new Error(`恢复 ${storeName} 事务中止`));
+    });
+  }
+
+  private assertRestorableDataShape(data: any): void {
+    if (!data || typeof data !== 'object' || Array.isArray(data)) {
+      throw new Error('恢复数据格式无效');
+    }
+
+    const presentFields = RESTORABLE_DATA_FIELDS.filter(field => field in data);
+    if (presentFields.length === 0) {
+      throw new Error('恢复数据格式无效：缺少可恢复的数据表');
+    }
+
+    const invalidFields = presentFields.filter(field =>
+      data[field] !== undefined && !Array.isArray(data[field])
+    );
+    if (invalidFields.length > 0) {
+      throw new Error(`恢复数据格式无效：${invalidFields.join(', ')} 必须是数组`);
+    }
+
+    this.assertRestorableImageBlobShape(data.prompts, 'prompts');
+    this.assertRestorableImageBlobShape(data.promptHistories, 'promptHistories');
+  }
+
+  private assertRestorableImageBlobShape(records: any[] | undefined, collectionName: string): void {
+    if (!Array.isArray(records)) {
+      return;
+    }
+
+    records.forEach((record, recordIndex) => {
+      if (!record?.imageBlobs?.length) {
+        return;
+      }
+
+      if (!Array.isArray(record.imageBlobs)) {
+        throw new Error(`图片数据格式无效，无法恢复完整数据（${collectionName}[${recordIndex}].imageBlobs 必须是数组）`);
+      }
+
+      record.imageBlobs.forEach((item: any, imageIndex: number) => {
+        const isBlobItem = typeof Blob !== 'undefined' && item instanceof Blob;
+        const isDataUrl = typeof item === 'string' && item.startsWith('data:');
+        if (!isBlobItem && !isDataUrl) {
+          throw new Error(
+            `图片数据格式无效，无法恢复完整数据（${collectionName}[${recordIndex}].imageBlobs[${imageIndex}]）`
+          );
+        }
+      });
+    });
+  }
+
+  private async restoreSyncTombstones(syncTombstones: any[]): Promise<number> {
+    if (!Array.isArray(syncTombstones) || syncTombstones.length === 0) {
+      return 0;
+    }
+
+    const invalidTombstones = syncTombstones
+      .filter(tombstone => !isRestorableSyncTombstone(tombstone));
+    if (invalidTombstones.length > 0) {
+      throw new Error(`同步删除标记格式无效: ${invalidTombstones.length} 条`);
+    }
+
+    const db = await this.getDatabase();
+    if (!db || !db.objectStoreNames.contains('syncTombstones')) {
+      throw new Error('无法恢复同步删除标记：数据库缺少 syncTombstones 表');
+    }
+
+    const validTombstones = syncTombstones
+      .map(tombstone => {
+        const dataWithoutId = { ...tombstone };
+        delete dataWithoutId.id;
+        return {
+          ...dataWithoutId,
+          deletedAt: tombstone.deletedAt ? new Date(tombstone.deletedAt) : new Date()
+        };
+      });
+
+    if (validTombstones.length === 0) {
+      return 0;
+    }
+
+    return new Promise((resolve, reject) => {
+      const transaction = db.transaction(['syncTombstones'], 'readwrite');
+      const store = transaction.objectStore('syncTombstones');
+      let restoredCount = 0;
+
+      transaction.oncomplete = () => resolve(restoredCount);
+      transaction.onerror = () => reject(transaction.error);
+      transaction.onabort = () => reject(transaction.error);
+
+      for (const tombstone of validTombstones) {
+        const request = store.add(tombstone);
+        request.onsuccess = () => {
+          restoredCount++;
+        };
+        request.onerror = () => {
+          reject(request.error || new Error('恢复同步删除标记失败'));
+        };
+      }
+    });
   }
 
   /**
@@ -783,6 +1427,7 @@ export class DatabaseServiceManager {
   async getDataStats(): Promise<{
     categories: number;
     prompts: number;
+    promptHistories: number;
     aiConfigs: number;
     aiHistory: number;
     settings: number;
@@ -793,12 +1438,14 @@ export class DatabaseServiceManager {
       const [
         categories,
         prompts,
+        promptHistories,
         aiConfigs,
         aiHistory,
         settings
       ] = await Promise.all([
         this.category.getBasicCategories(),
         this.prompt.getAllPromptsForTags(),
+        this.prompt.getAllPromptHistories(),
         this.aiConfig.getAllAIConfigs(),
         this.aiGenerationHistory.getAllAIGenerationHistory(),
         this.appSettings.getAllSettings()
@@ -808,6 +1455,7 @@ export class DatabaseServiceManager {
       const totalSize = JSON.stringify({
         categories,
         prompts,
+        promptHistories,
         aiConfigs,
         aiHistory,
         settings
@@ -820,6 +1468,7 @@ export class DatabaseServiceManager {
       return {
         categories: categories.length,
         prompts: prompts.length,
+        promptHistories: promptHistories.length,
         aiConfigs: aiConfigs.length,
         aiHistory: aiHistory.length,
         settings: settings.length,
@@ -827,7 +1476,7 @@ export class DatabaseServiceManager {
         lastBackupTime
       };
     } catch (error) {
-      console.error('获取数据统计失败:', error);
+      this.debugError('获取数据统计失败:', error);
       throw error;
     }
   }
@@ -837,17 +1486,19 @@ export class DatabaseServiceManager {
    */
   async getDataStatistics(): Promise<{ success: boolean; data?: any; error?: string }> {
     try {
-      console.log('开始获取数据统计信息...');
+      this.debugLog('开始获取数据统计信息...');
       
       const [
         categories,
         prompts,
+        promptHistories,
         aiConfigs,
         aiHistory,
         settings
       ] = await Promise.all([
         this.category.getBasicCategories(),
         this.prompt.getAllPromptsForTags(),
+        this.prompt.getAllPromptHistories(),
         this.aiConfig.getAllAIConfigs(),
         this.aiGenerationHistory.getAllAIGenerationHistory(),
         this.appSettings.getAllSettings()
@@ -869,10 +1520,10 @@ export class DatabaseServiceManager {
         categories: categories.length,
         prompts: prompts.length,
         aiConfigs: aiConfigs.length,
-        history: aiHistory.length,
+        history: promptHistories.length,
         settings: settings.length,
         totalRecords: categories.length + prompts.length + aiConfigs.length + 
-                     aiHistory.length + settings.length,
+                     promptHistories.length + aiHistory.length + settings.length,
         sensitiveData: {
           prompts: sensitivePrompts,
           aiConfigs: sensitiveAIConfigs,
@@ -880,10 +1531,10 @@ export class DatabaseServiceManager {
         }
       };
 
-      console.log('数据统计获取成功:', stats);
+      this.debugLog('数据统计获取成功:', stats);
       return { success: true, data: stats };
     } catch (error) {
-      console.error('获取数据统计失败:', error);
+      this.debugError('获取数据统计失败:', error);
       return { 
         success: false, 
         error: error instanceof Error ? error.message : '未知错误' 
@@ -910,6 +1561,7 @@ export class DatabaseServiceManager {
       storeStats: {
         categories: stats.categories,
         prompts: stats.prompts,
+        promptHistories: stats.promptHistories,
         aiConfigs: stats.aiConfigs,
         aiHistory: stats.aiHistory,
         settings: stats.settings
@@ -941,13 +1593,13 @@ export class DatabaseServiceManager {
     }
 
     // 需要UUID的数据类型
-    const syncableTypes = ['categories', 'prompts', 'promptVariables', 'promptHistories', 'aiConfigs', 'aiGenerationHistory'];
+    const syncableTypes = ['categories', 'prompts', 'promptVariables', 'promptHistories', 'aiConfigs', 'quickOptimizationConfigs', 'aiHistory', 'aiGenerationHistory'];
     
     for (const type of syncableTypes) {
       if (data[type] && Array.isArray(data[type])) {
         data[type] = data[type].map((item: any) => {
           if (!item.uuid) {
-            console.log(`为导入的 ${type} 数据补全 UUID: ${item.id || item.name || '未知条目'}`);
+            this.debugLog(`为导入的 ${type} 数据补全 UUID: ${item.id || item.name || '未知条目'}`);
             item.uuid = generateUUID();
           }
           return item;
@@ -964,7 +1616,7 @@ export class DatabaseServiceManager {
    */
   async syncImportData(data: any): Promise<DataImportResult> {
     try {
-      console.log('渲染进程: 开始同步导入数据...');
+      this.debugLog('渲染进程: 开始同步导入数据...');
       
       if (!data || typeof data !== 'object') {
         throw new Error('同步导入数据格式无效');
@@ -1019,23 +1671,30 @@ export class DatabaseServiceManager {
 
       // 等待所有 upsert 操作完成
       const results = await Promise.allSettled(allPromises);
+      const errors = results
+        .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
+        .map(result => result.reason instanceof Error ? result.reason.message : String(result.reason));
 
-      results.forEach(result => {
-        if (result.status === 'rejected') {
-          console.warn('同步导入项目失败:', result.reason);
-        }
-      });
+      errors.forEach(error => this.debugWarn('同步导入项目失败:', error));
       
-      console.log('渲染进程: 同步导入完成:', details);
+      this.debugLog('渲染进程: 同步导入完成:', details);
+      const totalImported = Object.values(details).reduce((sum, count) => sum + count, 0);
+      const totalErrors = errors.length;
       
       return {
-        success: true,
-        message: '同步导入操作完成',
+        success: totalErrors === 0,
+        message: totalErrors === 0
+          ? `同步导入成功，共处理 ${totalImported} 条记录`
+          : `同步导入未完全完成，共处理 ${totalImported} 条记录，失败 ${totalErrors} 条`,
+        error: totalErrors > 0 ? `同步导入过程中有 ${totalErrors} 条记录失败` : undefined,
+        totalImported,
+        totalErrors,
         details,
+        errors: errors.length > 0 ? errors : undefined,
       };
       
     } catch (error) {
-      console.error('渲染进程: 同步导入数据库数据失败:', error);
+      this.debugError('渲染进程: 同步导入数据库数据失败:', error);
       return {
         success: false,
         error: error instanceof Error ? error.message : String(error),
@@ -1043,4 +1702,12 @@ export class DatabaseServiceManager {
       };
     }
   }
+}
+
+function isRestorableSyncTombstone(tombstone: any): boolean {
+  return !!tombstone &&
+    typeof tombstone.collectionName === 'string' &&
+    tombstone.collectionName.length > 0 &&
+    typeof tombstone.recordKey === 'string' &&
+    tombstone.recordKey.length > 0;
 }

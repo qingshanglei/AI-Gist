@@ -209,10 +209,14 @@ const config = ref<AIConfig | null>(null)
 const loading = ref(true)
 const testingConnection = ref(false)
 const testingIntelligent = ref(false)
+let initialLoadPromise: Promise<void> | null = null
 
 // 加载配置详情
-const loadConfig = async () => {
-  loading.value = true
+const loadConfig = async (options: { showLoading?: boolean } = {}) => {
+  const showLoading = options.showLoading ?? true
+  if (showLoading) {
+    loading.value = true
+  }
 
   try {
     const configs = await api.aiConfigs.getAll.query()
@@ -226,13 +230,15 @@ const loadConfig = async () => {
     console.error('加载配置失败:', error)
     showToast(t('aiConfig.loadFailed'), 'danger')
   } finally {
-    loading.value = false
+    if (showLoading) {
+      loading.value = false
+    }
   }
 }
 
 // 下拉刷新
 const handleRefresh = async (event: any) => {
-  await loadConfig()
+  await loadConfig({ showLoading: false })
   event.target.complete()
 }
 
@@ -247,11 +253,16 @@ const handleToggleEnabled = async (event: any) => {
       id: config.value.id!,
       data: {
         ...config.value,
-        enabled
+        enabled,
+        isPreferred: enabled ? config.value.isPreferred : false
       }
     })
 
     config.value.enabled = enabled
+    if (!enabled && config.value.isPreferred) {
+      await api.aiConfigs.clearPreferred.mutate()
+      config.value.isPreferred = false
+    }
     const message = enabled
       ? t('aiConfig.configEnabled')
       : t('aiConfig.configDisabled')
@@ -452,14 +463,16 @@ const showActionMenu = async () => {
     }
   ]
 
-  buttons.push({
-    text: t('common.delete'),
-    icon: trashOutline,
-    role: 'destructive',
-    handler: () => {
-      handleDelete()
-    }
-  })
+  if (!config.value.isPreferred) {
+    buttons.push({
+      text: t('common.delete'),
+      icon: trashOutline,
+      role: 'destructive',
+      handler: () => {
+        handleDelete()
+      }
+    })
+  }
 
   buttons.push({
     text: t('common.cancel'),
@@ -476,12 +489,16 @@ const showActionMenu = async () => {
 
 // 初始化
 onMounted(() => {
-  loadConfig()
+  initialLoadPromise = loadConfig()
+  initialLoadPromise.finally(() => {
+    initialLoadPromise = null
+  })
 })
 
 // 页面进入时刷新
 onIonViewWillEnter(() => {
-  loadConfig()
+  if (initialLoadPromise) return
+  loadConfig({ showLoading: !config.value })
 })
 </script>
 
